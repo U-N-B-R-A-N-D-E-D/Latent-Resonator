@@ -1,0 +1,22 @@
+# Latent Resonator — Python Script Dependencies
+# Install: pip install -r requirements.txt
+#
+# These are development/conversion tools only.
+# They are NOT bundled in the distributed macOS application.
+#
+# For the ACE-Step bridge server, see: requirements_bridge.txt
+# Or run: ./setup_ace_bridge.sh (handles everything automatically)
+
+# Koenig Seed Generator (generate_koenig_seed.py)
+numpy>=1.24.0              # BSD-3-Clause
+
+# Core ML Conversion (convert_ace_to_coreml.py)
+torch>=2.0.0               # BSD-3-Clause
+coremltools>=7.0            # BSD-3-Clause (Apple)
+transformers>=4.35.0        # Apache-2.0 (Hugging Face)
+
+# ACE-Step Bridge Server (ace_bridge_server.py)
+# See requirements_bridge.txt for the full list, or just run:
+#   ./setup_ace_bridge.sh
+flask>=3.0.0               # BSD-3-Clause
+soundfile>=0.12.0          # BSD-3-Clause
