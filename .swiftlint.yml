@@ -1,0 +1,55 @@
+# Latent Resonator — SwiftLint Configuration
+# v0.0.1-beta
+
+excluded:
+  - LatentResonator/LatentResonator/Scripts
+  - LatentResonator/LatentResonator/Metal
+  - build
+  - DerivedData
+  - .build
+
+disabled_rules:
+  - trailing_whitespace
+  - todo
+  - nesting
+  - identifier_name
+  - type_body_length
+  - file_length
+  - function_body_length
+  - cyclomatic_complexity
+  - function_parameter_count
+  - large_tuple
+  - shorthand_operator
+  - trailing_comma
+  - multiple_closures_with_trailing_closure
+  - opening_brace
+  - comma
+  - implicit_optional_initialization
+  - redundant_string_enum_value
+  - inclusive_language
+  - vertical_whitespace
+  - colon
+
+opt_in_rules:
+  - empty_count
+  - closure_spacing
+  - contains_over_first_not_nil
+  - fatal_error_message
+  - first_where
+  - toggle_bool
+
+line_length:
+  warning: 150
+  error: 200
+  ignores_comments: true
+  ignores_urls: true
+
+type_name:
+  min_length: 2
+  max_length: 50
+
+force_cast: warning
+force_try: warning
+force_unwrapping: warning
+
+reporter: xcode

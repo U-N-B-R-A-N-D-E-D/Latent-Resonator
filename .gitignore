@@ -1,0 +1,98 @@
+# ──────────────────────────────────────────────
+# Latent Resonator — .gitignore
+# ──────────────────────────────────────────────
+
+# Xcode
+build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+Package.resolved
+
+# Core ML Models (large binaries — not tracked in git)
+*.mlmodelc/
+*.mlpackage/
+*.mlmodel
+CoreMLModels/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+*.egg
+.venv/
+venv/
+env/
+*.whl
+
+# ACE-Step Bridge (project-specific venv + model weights)
+.venv-ace-bridge/
+models/
+ACE-Step/
+
+# Generated audio artifacts
+*.wav
+*.mp3
+*.aiff
+*.flac
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE
+.cursor/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# SwiftLint
+.swiftlint.yml.cache
+
+# Xcode test results
+*.xcresult
+
+# Internal dev-only test suite (not shipped)
+LatentResonator/LatentResonatorTests/
+
+# Environment / Secrets
+.env
+.env.local
+*.key
+*.pem
+# Stale package manager artifacts
+package-lock.json
+package.json
+
+# Profiling data
+*.profraw
+*.profdata
+
+# Distribution artifacts
+dist/
