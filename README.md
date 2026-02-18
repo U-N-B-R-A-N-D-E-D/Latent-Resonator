@@ -14,9 +14,14 @@ Grounded in the avant-garde traditions of Musique Concrète (Schaeffer), Stochas
 
 > *"We do not create music; we organize sound, and in the process, we allow the machine to reveal its own acoustic unconscious."*
 
-## Listen
+## Audio Demo
 
-> Audio samples coming soon. The Koenig Seed (dry Euclidean impulses) enters the feedback loop and emerges as self-organizing metallic textures, spectral drones, and granular dust.
+**Texture Improvisation** -- 14 minutes 47 seconds of a live recursive session, unedited.
+Euclidean impulses (Koenig Seed) enter the Neural Feedback Loop and emerge as self-organizing metallic textures, spectral drones, and granular artifacts.
+
+[**Listen: latent_resonator_texture_improv.mp3**](docs/audio/latent_resonator_texture_improv.mp3) *(48 kHz stereo, 31 MB, 14m 47s)*
+
+*Mastered to -15 LUFS integrated with brick-wall limiter at -0.1 dBTP.*
 
 ---
 
@@ -271,7 +276,7 @@ All major actions are reachable without a mouse. Also documented in Settings > S
 |---|---|
 | `Space` | Start / Stop engine |
 | `Escape` | Panic -- force stop all lanes |
-| `R` | Toggle master recording |
+| `R` | Toggle master recording (saves to `~/Documents/LatentResonator/`) |
 
 ### Navigation
 
@@ -497,11 +502,10 @@ RLTNAS/
 ├── LICENSE                          # MIT License
 ├── CONTRIBUTING.md
 ├── .gitignore
-├── scripts/
-│   ├── build-release.sh             # Archive + export + notarize + DMG
-│   └── export-options.plist         # Developer ID export options
 ├── docs/
-│   └── whitepaper.md                # Full research paper
+│   ├── whitepaper.md                # Full research paper
+│   └── audio/
+│       └── latent_resonator_texture_improv.mp3  # Full session (14m 47s)
 └── LatentResonator/
     ├── LatentResonator.xcodeproj/
     └── LatentResonator/

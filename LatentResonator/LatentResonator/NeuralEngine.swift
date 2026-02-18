@@ -956,6 +956,7 @@ final class NeuralEngine: ObservableObject {
         do {
             _ = try masterRecorder.startRecording(name: "MASTER", format: format)
             isMasterRecording = true
+            print(">> Neural Engine: Recording started -> \(AudioRecorder.outputDirectory.path)")
         } catch {
             print(">> Neural Engine: Master recording failed -- \(error.localizedDescription)")
         }
@@ -964,6 +965,9 @@ final class NeuralEngine: ObservableObject {
     private func stopMasterRecording() {
         if let url = masterRecorder.stopRecording() {
             isMasterRecording = false
+            let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+            let mb = String(format: "%.1f", Double(bytes) / 1_048_576)
+            print(">> Neural Engine: Recording saved -> \(url.path) (\(mb) MB)")
             // Export metadata sidecar with aggregate state
             let totalCycles = lanes.reduce(0) { $0 + $1.iterationCount }
             let laneNames = lanes.map { $0.name }
@@ -976,13 +980,14 @@ final class NeuralEngine: ObservableObject {
                     "laneCount": lanes.count
                 ]
             )
+        } else {
+            isMasterRecording = false
         }
     }
 
     // MARK: - Master Audio Tap (Recording)
 
     private func processMasterTap(_ buffer: AVAudioPCMBuffer) {
-        // Master recording -- append buffer if active
         masterRecorder.writeBuffer(buffer)
     }
 
