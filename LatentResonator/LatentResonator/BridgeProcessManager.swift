@@ -298,7 +298,16 @@ final class BridgeProcessManager: ObservableObject {
         let healthURL = URL(string: LRConstants.ACEBridge.baseURL)!
             .appendingPathComponent(LRConstants.ACEBridge.healthEndpoint)
 
-        if checkHealthSync(url: healthURL, timeout: 2.0) {
+        // When forceCPU is true, never reuse — an existing bridge may be MPS and will crash.
+        // Kill any process on the port so we launch fresh with --device cpu.
+        if LRConstants.ACEBridge.forceCPU {
+            if checkHealthSync(url: healthURL, timeout: 2.0) {
+                log("forceCPU: terminating existing bridge to launch with --device cpu")
+                requestShutdownViaHTTPSync()
+                killProcessOnPortSync(port: LRConstants.ACEBridge.defaultPort)
+                Thread.sleep(forTimeInterval: 1.0)  // allow port to be released
+            }
+        } else if checkHealthSync(url: healthURL, timeout: 2.0) {
             updateState(.running)
             log("[ok] Bridge already running on port \(LRConstants.ACEBridge.defaultPort) (reusing)")
             return
@@ -314,9 +323,12 @@ final class BridgeProcessManager: ObservableObject {
             let healthURL = URL(string: LRConstants.ACEBridge.baseURL)!
                 .appendingPathComponent(LRConstants.ACEBridge.healthEndpoint)
             let maxWait: TimeInterval = 120
-            let pollInterval: TimeInterval = 1.0
+            let pollInterval = LRConstants.ACEBridge.bridgeStartupPollInterval
+            let initialDelay = LRConstants.ACEBridge.bridgeStartupInitialDelay
             var waited: TimeInterval = 0
             var up = false
+            Thread.sleep(forTimeInterval: initialDelay)
+            waited = initialDelay
             while waited < maxWait {
                 if serverProcess?.isRunning != true {
                     break
@@ -385,12 +397,12 @@ final class BridgeProcessManager: ObservableObject {
             log("No model weights found -- passthrough mode")
         }
 
-        // Device: "cpu" is the only safe choice.  MPS (Metal) crashes with
-        // SIGABRT in validateComputeFunctionArguments -> rsub_Scalar during
-        // ACE-Step inference.  PYTORCH_ENABLE_MPS_FALLBACK=1 cannot prevent
-        // this because the crash occurs inside Metal's C-level assertion
-        // before PyTorch's fallback mechanism can intervene.
-        args += ["--device", "cpu"]
+        // Device: use CPU when MPS crashes (Metal validation in rsub). Otherwise auto (MPS on Apple Silicon).
+        let device = LRConstants.ACEBridge.forceCPU ? "cpu" : "auto"
+        args += ["--device", device]
+        if LRConstants.ACEBridge.forceCPU {
+            log("Using CPU device (MPS disabled due to rsub crash)")
+        }
 
         process.arguments = args
         process.currentDirectoryURL = Self.scriptsDir
@@ -398,12 +410,16 @@ final class BridgeProcessManager: ObservableObject {
         // Inherit PATH but activate venv
         var env = ProcessInfo.processInfo.environment
         env["VIRTUAL_ENV"] = venvDir.path
+        if LRConstants.ACEBridge.forceCPU {
+            env["LATENT_RESONATOR_FORCE_CPU"] = "1"
+        }
         env["PATH"] = "\(venvDir.path)/bin:" + (env["PATH"] ?? "")
         // Ensure Python doesn't buffer output
         env["PYTHONUNBUFFERED"] = "1"
-        // MPS fallback: if any MPS-unsupported op slips through, fall
-        // back to CPU instead of crashing
+        // MPS fallback: enable for any ops not yet fully implemented in MPS
         env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+        // MPS memory fix for ACE-Step 1.5 v0.1.0+ (prevents "MPS backend out of memory")
+        env["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
         process.environment = env
 
         // Capture stdout

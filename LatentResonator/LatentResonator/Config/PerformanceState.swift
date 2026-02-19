@@ -35,6 +35,14 @@ struct LaneSnapshot: Codable, Equatable {
     var spectralFreezeActive: Bool
     /// Per-lane denoise default (0-1). Scene recall restores this. Nil when decoding old snapshots -> treated as 1.0.
     var denoiseStrength: Float?
+    /// Auto-decay toggle state. Nil when decoding old snapshots -> treated as false.
+    var autoDecayEnabled: Bool?
+    /// Index of the lane providing cross-feedback. Nil = self-feedback (default).
+    var feedbackSourceLaneIndex: Int?
+    /// Active archive recall index. Nil = normal playback.
+    var archiveRecallIndex: Int?
+    /// Continuous saturation morph position [0..1]. Nil when decoding old snapshots -> treated as 0.
+    var saturationMorph: Float?
 }
 
 // MARK: - Performance Scene (snapshot; name avoids shadowing SwiftUI.Scene)
@@ -340,12 +348,47 @@ extension StepGrid: Codable {
 // MARK: - Full Performance State (Persistence Container)
 
 /// Top-level container for all persistable performance data:
-/// scene bank + step grid. Saved as JSON to Application Support.
+/// scene bank + per-lane step grids. Saved as JSON to Application Support.
 struct PerformanceStateSnapshot: Codable {
     var sceneBank: SceneBank
-    var stepGrid: StepGrid
+    /// Per-lane step grids (Option B: Focus Lane UX). Migration: legacy `stepGrid` decodes to stepGrids.
+    var stepGrids: [StepGrid]
     var crossfaderSceneAIndex: Int
     var crossfaderSceneBIndex: Int
+
+    init(sceneBank: SceneBank, stepGrids: [StepGrid], crossfaderSceneAIndex: Int, crossfaderSceneBIndex: Int) {
+        self.sceneBank = sceneBank
+        self.stepGrids = stepGrids
+        self.crossfaderSceneAIndex = crossfaderSceneAIndex
+        self.crossfaderSceneBIndex = crossfaderSceneBIndex
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sceneBank = try c.decode(SceneBank.self, forKey: .sceneBank)
+        crossfaderSceneAIndex = try c.decode(Int.self, forKey: .crossfaderSceneAIndex)
+        crossfaderSceneBIndex = try c.decode(Int.self, forKey: .crossfaderSceneBIndex)
+        // Migration: legacy files have stepGrid (singular); new files have stepGrids.
+        if let grids = try c.decodeIfPresent([StepGrid].self, forKey: .stepGrids) {
+            stepGrids = grids
+        } else if let legacy = try c.decodeIfPresent(StepGrid.self, forKey: .stepGrid) {
+            stepGrids = [legacy]
+        } else {
+            stepGrids = []
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(sceneBank, forKey: .sceneBank)
+        try c.encode(stepGrids, forKey: .stepGrids)
+        try c.encode(crossfaderSceneAIndex, forKey: .crossfaderSceneAIndex)
+        try c.encode(crossfaderSceneBIndex, forKey: .crossfaderSceneBIndex)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sceneBank, stepGrids, stepGrid, crossfaderSceneAIndex, crossfaderSceneBIndex
+    }
 }
 
 // MARK: - Performance State Store

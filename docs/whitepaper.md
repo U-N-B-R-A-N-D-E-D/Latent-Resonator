@@ -41,6 +41,71 @@ The primary objective of this study is to formalize the "Neural Feedback Loop" a
 
 ---
 
+## 2. Implementation: The Real-Time Instrument Architecture
+
+The theoretical framework of Section 1 describes the recursive loop as a batch-processing protocol. The Latent Resonator instrument extends this into a real-time, multi-lane performance system built in Swift on Apple's AVAudioEngine. This section documents the expanded architecture as implemented.
+
+### 2.1 Multi-Lane Topology
+
+The system operates N independent feedback lanes simultaneously. Each lane encapsulates:
+
+- An **excitation source** (oscillators, Koenig Seed, live audio input, or silence)
+- A **13-stage SpectralProcessor** (FFT, semantic EQ, spectral noise injection, per-band saturation, spectral memory, granularity, spectral freeze, IFFT, ladder filter, comb filter, tunable resonator, bit crusher, waveshaper)
+- A **recursive feedback buffer** (lock-free SPSC ring buffer)
+- An **ACE-Step / CoreML inference bridge** for neural processing
+
+Lanes are mixed through a master bus with per-lane volume, mute, and solo. Cross-lane feedback routing allows one lane's output to feed another lane's input, creating networked resonant topologies.
+
+### 2.2 Spectral-Conditioned Prompt Evolution
+
+The original protocol (§4.2.2) prescribed fixed iteration thresholds for prompt phase transitions. The instrument replaces this with spectral-conditioned evolution: prompt phases shift based on the real-time **spectral flatness** of the signal. When the signal is tonal (flatness < 0.35), Phase 1 prompts remain active. As the signal becomes noisier (flatness >= 0.35), Phase 2 ("recursive drift") engages. Full entropic saturation (flatness >= 0.65) triggers Phase 3. This creates an autonomous, signal-aware compositional trajectory.
+
+### 2.3 Auto-Decay and the Recursive Drift Trajectory
+
+The whitepaper's inputStrength decay from 0.60 to 0.45 over iterations (§4.2.2) is formalized as an opt-in **auto-decay** system. When enabled, inputStrength interpolates linearly from its current value toward a preset-defined target over a preset-defined number of iterations. This implements the whitepaper protocol as a one-toggle performance gesture.
+
+### 2.4 Spectral Feature Extraction and Telemetry
+
+The SpectralProcessor computes three real-time spectral features per STFT hop:
+
+- **Spectral Centroid** [0..1]: brightness indicator (low = warm, high = metallic)
+- **Spectral Flatness** [0..1]: noisiness indicator (0 = tonal, 1 = white noise)
+- **Spectral Flux**: frame-to-frame magnitude change (rate of timbral evolution)
+
+These features drive prompt evolution, feed the latent space visualization (XY pad in CNT/FLAT mode), and are exported as CSV telemetry alongside recorded audio for post-performance analysis.
+
+### 2.5 Colored Spectral Noise and Per-Band Saturation
+
+Noise injection (§4.1.3) is shaped by the semantic spectral profile: "metallic" prompts inject more high-frequency noise while "warm" prompts concentrate noise in lower bands. Similarly, per-band waveshaping saturates each spectral band proportionally to its semantic weight, creating prompt-dependent harmonic enrichment in the frequency domain.
+
+### 2.6 Iteration Archive and Selective Recall
+
+Each lane maintains a ring buffer of past iteration audio (up to 16 entries). A performer can recall any archived iteration, replaying it through the feedback path. This enables temporal navigation within the recursive drift: jumping back to an earlier state and branching into a new trajectory.
+
+### 2.7 Continuous Saturation Morphing
+
+The WARMTH macro drives a continuous crossfade between saturation circuit models (clean, tube, transistor, diode). Rather than discrete mode switching, the waveshaper interpolates between adjacent modes, eliminating clicks and enabling expressive timbral sweeps through a single control.
+
+### 2.8 Configurable FFT Size
+
+Spectral resolution is configurable per preset: 512 (fast, low-latency percussion), 1024 (default), or 2048 (high-resolution pads). This trades temporal resolution for spectral detail, allowing each lane preset to optimize for its sonic role.
+
+### 2.9 Motherbase Performance Surface and Focus Lane UX
+
+The **Motherbase** is a fixed-layout performance view (Elektron-style) providing scenes, crossfader, step grid, and focus lane controls. Key advances:
+
+- **Per-Lane Step Grid**: Each lane owns its own `StepGrid` (chain length, advance mode, BPM, step locks). The focused lane's grid is displayed and edited. Step advance applies locks per lane; the step timer advances all lanes in sync.
+
+- **Drift Pad (XY) → Knob Binding**: The XY pad controls configurable axes (TXT/CHS macros, CFG/FBK neural, CUT/RES filter, or CNT/FLAT read-only spectral). The focus lane strip observes the lane via `@ObservedObject`, so knob values update immediately when the pad writes to lane parameters. Commit throttle is 30 ms (~33 Hz) for responsive feedback.
+
+- **CNT/FLAT Live Spectral Display**: In read-only mode, the pad displays spectral centroid (X) and flatness (Y). A wrapper view observes the lane so the cursor updates live as the DSP pipeline publishes new feature values.
+
+- **Prompt Phase P-Lock**: P1/P2/P3 toggles set `promptPhaseOverride` on the lane. When editing a step, they also set the step's `promptPhase` lock via `setStepPromptPhase`, so the lock applies when that step plays. The effective phase shown is the step lock when editing, otherwise the lane override.
+
+- **Performance State Persistence**: `PerformanceStateSnapshot` stores `stepGrids: [StepGrid]` (one per lane). Legacy `stepGrid` (singular) decodes to a single-element array for backward compatibility.
+
+---
+
 ## 3. Technical Architecture: The ACE-Step 1.5 System
 
 To understand how the "Neural Feedback Loop" functions, we must first analyze the architecture of the instrument: the ACE-Step 1.5 model. This model represents a significant evolution in open-source audio synthesis, optimized for consumer hardware while retaining commercial-grade fidelity.
