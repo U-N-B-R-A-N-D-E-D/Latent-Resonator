@@ -24,10 +24,10 @@ final class SpectralProcessor {
 
     // MARK: - FFT Configuration
 
-    private let fftSize: Int
-    private let halfN: Int
-    private let fftLog2n: vDSP_Length
-    private let fftSetup: FFTSetup
+    private var fftSize: Int
+    private var halfN: Int
+    private var fftLog2n: vDSP_Length
+    private var fftSetup: FFTSetup?
 
     /// Split complex buffers reused across calls (no allocation in hot path).
     private var realPart: [Float]
@@ -74,9 +74,26 @@ final class SpectralProcessor {
     /// Updated each STFT hop; safe to read from the UI thread at a throttled rate.
     private(set) var magnitudeSnapshot: [Float] = []
 
+    // MARK: - Spectral Features (Real-Time Analysis)
+
+    /// Normalized spectral centroid [0..1] where 0 = DC, 1 = Nyquist.
+    /// High values indicate bright/metallic timbre; low = warm/bassy.
+    private(set) var spectralCentroid: Float = 0.0
+
+    /// Spectral flatness [0..1] where 0 = tonal/harmonic, 1 = noise-like.
+    /// Measures how far the spectrum is from white noise.
+    private(set) var spectralFlatness: Float = 0.0
+
+    /// Spectral flux: frame-to-frame magnitude change [0..inf).
+    /// Measures the rate of timbral evolution.
+    private(set) var spectralFlux: Float = 0.0
+
+    /// Previous frame's magnitude for flux computation (pre-allocated).
+    private var previousMagnitude: [Float] = []
+
     // MARK: - Precomputed Window
 
-    private let hannWindow: [Float]
+    private var hannWindow: [Float]
 
     // MARK: - Pre-allocated Audio Thread Buffers (Phase 1: No Heap on Hot Path)
     //
@@ -92,7 +109,7 @@ final class SpectralProcessor {
     private var overlapAddBuffer: [Float] = []
 
     /// Hop size for 50% overlap STFT (COLA-compliant with Hann window).
-    private let hopSize: Int
+    private var hopSize: Int
 
     // MARK: - Moog-style Ladder Filter State (Phase 3: Analog Character)
     //
@@ -134,10 +151,12 @@ final class SpectralProcessor {
         halfN = fftSize / 2
         fftLog2n = vDSP_Length(LRConstants.fftLog2n)
 
-        guard let setup = vDSP_create_fftsetup(fftLog2n, FFTRadix(kFFTRadix2)) else {
-            fatalError(">> SpectralProcessor: Failed to create FFT setup")
+        if let setup = vDSP_create_fftsetup(fftLog2n, FFTRadix(kFFTRadix2)) {
+            fftSetup = setup
+        } else {
+            print(">> SpectralProcessor: FFT setup failed (log2n=\(fftLog2n)) -- operating in passthrough mode")
+            fftSetup = nil
         }
-        fftSetup = setup
 
         realPart = [Float](repeating: 0, count: halfN)
         imagPart = [Float](repeating: 0, count: halfN)
@@ -167,7 +186,38 @@ final class SpectralProcessor {
     }
 
     deinit {
-        vDSP_destroy_fftsetup(fftSetup)
+        if let setup = fftSetup {
+            vDSP_destroy_fftsetup(setup)
+        }
+    }
+
+    /// Reconfigure FFT size at preset-load time (NOT during audio processing).
+    /// Must be called from the main thread before processing begins.
+    func reconfigure(fftSize newSize: Int) {
+        guard LRConstants.availableFFTSizes.contains(newSize), newSize != fftSize else { return }
+        if let old = fftSetup {
+            vDSP_destroy_fftsetup(old)
+            fftSetup = nil
+        }
+        fftSize = newSize
+        halfN = newSize / 2
+        let log2 = Int(log2f(Float(newSize)))
+        fftLog2n = vDSP_Length(log2)
+        if let setup = vDSP_create_fftsetup(fftLog2n, FFTRadix(kFFTRadix2)) {
+            fftSetup = setup
+        } else {
+            print(">> SpectralProcessor: FFT setup failed for size \(newSize) -- staying in passthrough")
+        }
+        realPart = [Float](repeating: 0, count: halfN)
+        imagPart = [Float](repeating: 0, count: halfN)
+        spectralMemory = [Float](repeating: 0, count: halfN)
+        magnitudeSnapshot = [Float](repeating: 0, count: halfN)
+        previousMagnitude = [Float](repeating: 0, count: halfN)
+        var window = [Float](repeating: 0, count: fftSize)
+        vDSP_hann_window(&window, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
+        hannWindow = window
+        hopSize = fftSize / 2
+        chunkBuffer = [Float](repeating: 0, count: fftSize)
     }
 
     // MARK: - Prompt -> Spectral Profile
@@ -183,11 +233,9 @@ final class SpectralProcessor {
         var matches = 0
 
         let lowered = prompt.lowercased()
-        for (keyword, gains) in LRConstants.semanticProfiles {
-            if lowered.contains(keyword) {
-                for i in 0..<4 { accum[i] += gains[i] }
-                matches += 1
-            }
+        for (keyword, gains) in LRConstants.semanticProfiles where lowered.contains(keyword) {
+            for i in 0..<4 { accum[i] += gains[i] }
+            matches += 1
         }
 
         if matches > 0 {
@@ -224,6 +272,7 @@ final class SpectralProcessor {
     ///   - filterResonance: Ladder filter resonance [0..0.95]
     ///   - filterMode: LP/HP/BP filter type
     ///   - saturationMode: Waveshaper circuit model
+    ///   - saturationMorph: Crossfade [0..1] toward the next saturation mode
     /// - Returns: Processed audio samples (written into pre-allocated buffer)
     func process(
         samples: [Float],
@@ -238,9 +287,11 @@ final class SpectralProcessor {
         filterCutoff: Float = LRConstants.filterCutoffDefault,
         filterResonance: Float = LRConstants.filterResonanceDefault,
         filterMode: FilterMode = .lowpass,
-        saturationMode: SaturationMode = .clean
+        saturationMode: SaturationMode = .clean,
+        saturationMorph: Float = 0.0
     ) -> [Float] {
         guard !samples.isEmpty else { return samples }
+        guard let setup = fftSetup else { return samples }
 
         // Smooth all DSP parameters (slide~ equivalent -- prevents clicks)
         smoothParam(&smoothedCfg, toward: guidanceScale)
@@ -290,17 +341,20 @@ final class SpectralProcessor {
             packForFFT(chunkBuffer)
             realPart.withUnsafeMutableBufferPointer { realBuf in
                 imagPart.withUnsafeMutableBufferPointer { imagBuf in
-                    var splitComplex = DSPSplitComplex(
-                        realp: realBuf.baseAddress!,
-                        imagp: imagBuf.baseAddress!
-                    )
-                    vDSP_fft_zrip(fftSetup, &splitComplex, 1, fftLog2n,
+                    guard let realBase = realBuf.baseAddress, let imagBase = imagBuf.baseAddress else { return }
+                    var splitComplex = DSPSplitComplex(realp: realBase, imagp: imagBase)
+                    vDSP_fft_zrip(setup, &splitComplex, 1, fftLog2n,
                                   FFTDirection(kFFTDirection_Forward))
                 }
             }
 
             // -- Step 3: Semantic spectral profile (prompt-derived 4-band EQ) --
             applySemanticProfile()
+
+            // -- Step 3b: Per-band spectral saturation (prompt-shaped harmonic enrichment) --
+            if sCfg > 5.0 {
+                applySpectralSaturation(guidanceScale: sCfg)
+            }
 
             // -- Step 4: Spectral noise injection (entropy -> frequency domain) --
             if entropyLevel > 0.001 {
@@ -327,14 +381,15 @@ final class SpectralProcessor {
                 magnitudeSnapshot[i] = sqrtf(realPart[i] * realPart[i] + imagPart[i] * imagPart[i])
             }
 
+            // -- Step 7c: Spectral feature extraction --
+            computeSpectralFeatures(halfN: halfN)
+
             // -- Step 8: Inverse FFT + unpack --
             realPart.withUnsafeMutableBufferPointer { realBuf in
                 imagPart.withUnsafeMutableBufferPointer { imagBuf in
-                    var splitComplex = DSPSplitComplex(
-                        realp: realBuf.baseAddress!,
-                        imagp: imagBuf.baseAddress!
-                    )
-                    vDSP_fft_zrip(fftSetup, &splitComplex, 1, fftLog2n,
+                    guard let realBase = realBuf.baseAddress, let imagBase = imagBuf.baseAddress else { return }
+                    var splitComplex = DSPSplitComplex(realp: realBase, imagp: imagBase)
+                    vDSP_fft_zrip(setup, &splitComplex, 1, fftLog2n,
                                   FFTDirection(kFFTDirection_Inverse))
                 }
             }
@@ -345,10 +400,8 @@ final class SpectralProcessor {
             vDSP_vsmul(chunkBuffer, 1, &scale, &chunkBuffer, 1, vDSP_Length(fftSize))
 
             // Overlap-add: accumulate into OLA buffer (COLA reconstruction)
-            for i in 0..<fftSize {
-                if pos + i < olaSize {
-                    overlapAddBuffer[pos + i] += chunkBuffer[i]
-                }
+            for i in 0..<fftSize where pos + i < olaSize {
+                overlapAddBuffer[pos + i] += chunkBuffer[i]
             }
 
             pos += hopSize
@@ -388,7 +441,8 @@ final class SpectralProcessor {
         // -- Step 13: Guidance-driven waveshaper (Phase 4: Analog Circuit) --
         let gain = powf(max(sCfg, 0.1) / 10.0, 1.5)
         applyWaveshaper(&outputBuffer, count: sampleCount,
-                        gain: gain, mode: saturationMode)
+                        gain: gain, mode: saturationMode,
+                        morphPosition: saturationMorph)
 
         return Array(outputBuffer[0..<sampleCount])
     }
@@ -434,9 +488,14 @@ final class SpectralProcessor {
         }
     }
 
-    /// Inject Gaussian noise in the frequency domain.
+    /// Inject colored Gaussian noise in the frequency domain.
     /// Creates spectral perturbation analogous to diffusion noise,
     /// acting as "nucleation sites" for new timbral structures (§4.1.3).
+    ///
+    /// Noise amplitude per bin is shaped by the semantic spectralProfile:
+    /// "metallic" prompts inject more high-frequency noise, "warm" prompts
+    /// inject more low-frequency noise. A single entropy knob produces
+    /// semantically different results depending on the active prompt.
     ///
     /// Scaling: level [0..1] maps to noiseAmp via quadratic curve.
     /// At 0.25 entropy -> subtle texture. At 0.5 -> clear noise character.
@@ -444,10 +503,68 @@ final class SpectralProcessor {
     /// resolution in the low range where subtle textures live.
     private func injectSpectralNoise(level: Float) {
         let noiseAmp = level * level * 0.5 + level * 0.1  // Quadratic: 0->0, 0.5->0.175, 1.0->0.6
+        let bandSize = max(halfN / 4, 1)
         for i in 1..<halfN {   // Skip DC bin
-            realPart[i] += SignalGenerator.boxMullerNoise() * noiseAmp
-            imagPart[i] += SignalGenerator.boxMullerNoise() * noiseAmp
+            let band = min(i / bandSize, 3)
+            let coloredAmp = noiseAmp * spectralProfile[band]
+            realPart[i] += SignalGenerator.boxMullerNoise() * coloredAmp
+            imagPart[i] += SignalGenerator.boxMullerNoise() * coloredAmp
         }
+    }
+
+    /// Apply per-band waveshaping in the frequency domain. Each spectral band
+    /// is saturated proportionally to its semantic profile weight, creating
+    /// prompt-dependent harmonic enrichment: "metallic" prompts saturate highs,
+    /// "warm" prompts saturate lows. No heap allocations.
+    private func applySpectralSaturation(guidanceScale: Float) {
+        let gain = powf(max(guidanceScale, 0.1) / 10.0, 1.5)
+        let bandSize = max(halfN / 4, 1)
+        for band in 0..<4 {
+            let bandGain = gain * spectralProfile[band]
+            let start = band * bandSize
+            let end = (band == 3) ? halfN : (band + 1) * bandSize
+            for i in start..<end {
+                let mag = sqrtf(realPart[i] * realPart[i] + imagPart[i] * imagPart[i])
+                guard mag > 1e-10 else { continue }
+                let saturated = tanhf(mag * bandGain) / mag
+                realPart[i] *= saturated
+                imagPart[i] *= saturated
+            }
+        }
+    }
+
+    /// Compute spectral centroid, flatness, and flux from the current magnitudeSnapshot.
+    /// All arithmetic uses pre-allocated buffers; no heap allocations.
+    private func computeSpectralFeatures(halfN: Int) {
+        guard halfN > 1 else { return }
+        if previousMagnitude.count != halfN {
+            previousMagnitude = [Float](repeating: 0, count: halfN)
+        }
+
+        var weightedSum: Float = 0
+        var magSum: Float = 0
+        var logSum: Float = 0
+        var fluxSum: Float = 0
+        let epsilon: Float = 1e-10
+
+        for i in 1..<halfN {
+            let m = magnitudeSnapshot[i]
+            weightedSum += Float(i) * m
+            magSum += m
+            logSum += logf(m + epsilon)
+            let diff = m - previousMagnitude[i]
+            fluxSum += diff * diff
+            previousMagnitude[i] = m
+        }
+
+        let n = Float(halfN - 1)
+        spectralCentroid = magSum > epsilon
+            ? (weightedSum / magSum) / Float(halfN) : 0
+        let geometricMean = expf(logSum / n)
+        let arithmeticMean = magSum / n
+        spectralFlatness = arithmeticMean > epsilon
+            ? min(geometricMean / arithmeticMean, 1.0) : 0
+        spectralFlux = sqrtf(fluxSum)
     }
 
     /// Blend current spectrum with persistent spectral memory.
@@ -484,11 +601,9 @@ final class SpectralProcessor {
     /// creating the "granular dust" artifact (§5.4 taxonomy).
     private func applySpectralGranularity(_ granularity: Float) {
         let zeroProb = granularity * 0.7  // Max 70% of bins zeroed
-        for i in 1..<halfN {
-            if Float.random(in: 0...1) < zeroProb {
-                realPart[i] = 0
-                imagPart[i] = 0
-            }
+        for i in 1..<halfN where Float.random(in: 0...1) < zeroProb {
+            realPart[i] = 0
+            imagPart[i] = 0
         }
     }
 
@@ -769,42 +884,45 @@ final class SpectralProcessor {
     // - DIODE:      hard asymmetric clip: positive clipped, negative passed.
     //               Buzzy, broken character. Raw circuit sound.
 
+    /// Per-sample waveshaping for a single mode (no allocation).
+    @inline(__always)
+    private func shapeSample(_ x: Float, gain: Float, mode: SaturationMode) -> Float {
+        switch mode {
+        case .clean:
+            return tanhf(x * gain)
+        case .tube:
+            let g = x * gain
+            let soft = g / (1.0 + fabsf(g))
+            return soft + 0.1 * soft * fabsf(soft)
+        case .transistor:
+            return tanhf(x * gain * 2.5) * 0.8
+        case .diode:
+            let g = x * gain
+            return g > 0.0 ? min(g, 0.6) : max(g * 1.2, -1.0)
+        }
+    }
+
     private func applyWaveshaper(
         _ data: inout [Float],
         count: Int,
         gain: Float,
-        mode: SaturationMode
+        mode: SaturationMode,
+        morphPosition: Float = 0.0
     ) {
-        switch mode {
-        case .clean:
+        if morphPosition < 0.001 {
             for i in 0..<count {
-                data[i] *= gain
-                data[i] = tanhf(data[i])
+                data[i] = shapeSample(data[i], gain: gain, mode: mode)
             }
-        case .tube:
+        } else {
+            let allModes = SaturationMode.allCases
+            guard let currentIdx = allModes.firstIndex(of: mode) else { return }
+            let nextIdx = (currentIdx + 1) % allModes.count
+            let nextMode = allModes[nextIdx]
+            let t = morphPosition
             for i in 0..<count {
-                var x = data[i] * gain
-                // Asymmetric soft clip with even-harmonic emphasis
-                x = x / (1.0 + fabsf(x))
-                // Subtle even-harmonic color: add x^2 term (asymmetric warmth)
-                x += 0.1 * x * fabsf(x)
-                data[i] = x
-            }
-        case .transistor:
-            for i in 0..<count {
-                let x = data[i] * gain * 2.5
-                data[i] = tanhf(x) * 0.8
-            }
-        case .diode:
-            for i in 0..<count {
-                var x = data[i] * gain
-                // Hard asymmetric: positive side clipped at 0.6, negative passes
-                if x > 0.0 {
-                    x = min(x, 0.6)
-                } else {
-                    x = max(x * 1.2, -1.0)
-                }
-                data[i] = x
+                let a = shapeSample(data[i], gain: gain, mode: mode)
+                let b = shapeSample(data[i], gain: gain, mode: nextMode)
+                data[i] = a + (b - a) * t
             }
         }
     }

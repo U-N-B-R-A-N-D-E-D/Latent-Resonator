@@ -11,7 +11,11 @@
 		FC00000012 /* FiraCode-Medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000002 /* FiraCode-Medium.ttf */; };
 		FC00000013 /* FiraCode-SemiBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000003 /* FiraCode-SemiBold.ttf */; };
 		FC00000014 /* FiraCode-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000004 /* FiraCode-Bold.ttf */; };
+		FC00000031 /* Scripts in Resources */ = {isa = PBXBuildFile; fileRef = FC00000030 /* Scripts */; };
 		089C166500000030 /* LatentResonatorApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000020 /* LatentResonatorApp.swift */; };
+		089C16650000008A /* AudioRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000008B /* AudioRecorder.swift */; };
+		089C16650000009A /* SceneManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000009B /* SceneManager.swift */; };
+		089C16650000009D /* SequencerEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000009C /* SequencerEngine.swift */; };
 		089C166500000031 /* NeuralEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000021 /* NeuralEngine.swift */; };
 		089C166500000032 /* KoenigSeedGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000022 /* KoenigSeedGenerator.swift */; };
 		089C166500000033 /* CircularAudioBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000023 /* CircularAudioBuffer.swift */; };
@@ -30,6 +34,7 @@
 		089C166500000052 /* LaneStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000046 /* LaneStripView.swift */; };
 		089C166500000053 /* PerformanceState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000054 /* PerformanceState.swift */; };
 		089C166500000055 /* PerformanceMotherbaseView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000056 /* PerformanceMotherbaseView.swift */; };
+		089C16650000009F /* SceneCrossfaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000009E /* SceneCrossfaderView.swift */; };
 		089C166500000057 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000058 /* RootView.swift */; };
 		089C166500000059 /* ParameterRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000005A /* ParameterRouter.swift */; };
 		F1A2B3C400000061 /* LRComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C400000060 /* LRComponents.swift */; };
@@ -40,10 +45,14 @@
 		089C166500000084 /* SignalGeneratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000074 /* SignalGeneratorTests.swift */; };
 		089C166500000085 /* SpectralProcessorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000075 /* SpectralProcessorTests.swift */; };
 		089C166500000086 /* WAVCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000076 /* WAVCodecTests.swift */; };
+		089C166500000087 /* NeuralEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000077 /* NeuralEngineTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		089C166500000020 /* LatentResonatorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatentResonatorApp.swift; sourceTree = "<group>"; };
+		089C16650000008B /* AudioRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRecorder.swift; sourceTree = "<group>"; };
+		089C16650000009B /* SceneManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneManager.swift; sourceTree = "<group>"; };
+		089C16650000009C /* SequencerEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SequencerEngine.swift; sourceTree = "<group>"; };
 		089C166500000021 /* NeuralEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeuralEngine.swift; sourceTree = "<group>"; };
 		089C166500000022 /* KoenigSeedGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KoenigSeedGenerator.swift; sourceTree = "<group>"; };
 		089C166500000023 /* CircularAudioBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CircularAudioBuffer.swift; sourceTree = "<group>"; };
@@ -65,6 +74,7 @@
 		089C166500000046 /* LaneStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaneStripView.swift; sourceTree = "<group>"; };
 		089C166500000054 /* PerformanceState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceState.swift; sourceTree = "<group>"; };
 		089C166500000056 /* PerformanceMotherbaseView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceMotherbaseView.swift; sourceTree = "<group>"; };
+		089C16650000009E /* SceneCrossfaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneCrossfaderView.swift; sourceTree = "<group>"; };
 		089C166500000058 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		089C16650000005A /* ParameterRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParameterRouter.swift; sourceTree = "<group>"; };
 		F1A2B3C400000060 /* LRComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LRComponents.swift; sourceTree = "<group>"; };
@@ -75,11 +85,13 @@
 		089C166500000074 /* SignalGeneratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalGeneratorTests.swift; sourceTree = "<group>"; };
 		089C166500000075 /* SpectralProcessorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpectralProcessorTests.swift; sourceTree = "<group>"; };
 		089C166500000076 /* WAVCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WAVCodecTests.swift; sourceTree = "<group>"; };
+		089C166500000077 /* NeuralEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeuralEngineTests.swift; sourceTree = "<group>"; };
 		089C166500000066 /* LatentResonatorTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LatentResonatorTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		FC00000001 /* FiraCode-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "FiraCode-Regular.ttf"; sourceTree = "<group>"; };
 		FC00000002 /* FiraCode-Medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "FiraCode-Medium.ttf"; sourceTree = "<group>"; };
 		FC00000003 /* FiraCode-SemiBold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "FiraCode-SemiBold.ttf"; sourceTree = "<group>"; };
 		FC00000004 /* FiraCode-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "FiraCode-Bold.ttf"; sourceTree = "<group>"; };
+		FC00000030 /* Scripts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Scripts; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -114,6 +126,9 @@
 			children = (
 				089C166500000020 /* LatentResonatorApp.swift */,
 				089C166500000058 /* RootView.swift */,
+				089C16650000008B /* AudioRecorder.swift */,
+				089C16650000009B /* SceneManager.swift */,
+				089C16650000009C /* SequencerEngine.swift */,
 				089C166500000021 /* NeuralEngine.swift */,
 				089C166500000022 /* KoenigSeedGenerator.swift */,
 				089C166500000023 /* CircularAudioBuffer.swift */,
@@ -129,6 +144,7 @@
 				089C166500000006 /* Config */,
 				089C166500000007 /* Resources */,
 				FC00000020 /* Fonts */,
+				FC00000030 /* Scripts */,
 				089C16650000002C /* LatentResonator.entitlements */,
 				089C16650000002D /* Info.plist */,
 			);
@@ -140,6 +156,7 @@
 			children = (
 				089C166500000025 /* LatentResonatorView.swift */,
 				089C166500000056 /* PerformanceMotherbaseView.swift */,
+				089C16650000009E /* SceneCrossfaderView.swift */,
 				089C166500000026 /* RetroKnob.swift */,
 				089C166500000027 /* LatentXYPad.swift */,
 				089C166500000046 /* LaneStripView.swift */,
@@ -202,6 +219,7 @@
 				089C166500000074 /* SignalGeneratorTests.swift */,
 				089C166500000075 /* SpectralProcessorTests.swift */,
 				089C166500000076 /* WAVCodecTests.swift */,
+				089C166500000077 /* NeuralEngineTests.swift */,
 			);
 			path = LatentResonatorTests;
 			sourceTree = "<group>";
@@ -308,6 +326,7 @@
 				FC00000012 /* FiraCode-Medium.ttf in Resources */,
 				FC00000013 /* FiraCode-SemiBold.ttf in Resources */,
 				FC00000014 /* FiraCode-Bold.ttf in Resources */,
+				FC00000031 /* Scripts in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -319,6 +338,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				089C166500000030 /* LatentResonatorApp.swift in Sources */,
+				089C16650000008A /* AudioRecorder.swift in Sources */,
+				089C16650000009A /* SceneManager.swift in Sources */,
+				089C16650000009D /* SequencerEngine.swift in Sources */,
 				089C166500000031 /* NeuralEngine.swift in Sources */,
 				089C166500000032 /* KoenigSeedGenerator.swift in Sources */,
 				089C166500000033 /* CircularAudioBuffer.swift in Sources */,
@@ -337,6 +359,7 @@
 				089C166500000052 /* LaneStripView.swift in Sources */,
 				089C166500000053 /* PerformanceState.swift in Sources */,
 				089C166500000055 /* PerformanceMotherbaseView.swift in Sources */,
+				089C16650000009F /* SceneCrossfaderView.swift in Sources */,
 				089C166500000057 /* RootView.swift in Sources */,
 				089C166500000059 /* ParameterRouter.swift in Sources */,
 				F1A2B3C400000061 /* LRComponents.swift in Sources */,
@@ -354,6 +377,7 @@
 				089C166500000084 /* SignalGeneratorTests.swift in Sources */,
 				089C166500000085 /* SpectralProcessorTests.swift in Sources */,
 				089C166500000086 /* WAVCodecTests.swift in Sources */,
+				089C166500000087 /* NeuralEngineTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -494,7 +518,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.latentresonator.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -518,7 +542,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.latentresonator.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

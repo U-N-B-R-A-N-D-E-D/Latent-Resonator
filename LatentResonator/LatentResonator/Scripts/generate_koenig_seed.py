@@ -142,23 +142,15 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate Koenig Seed WAV file for Latent Resonator"
     )
-    parser.add_argument(
-        "--duration", type=float, default=10.0, help="Duration in seconds"
-    )
-    parser.add_argument(
-        "--sample-rate", type=int, default=48000, help="Sample rate in Hz"
-    )
+    parser.add_argument("--duration", type=float, default=10.0, help="Duration in seconds")
+    parser.add_argument("--sample-rate", type=int, default=48000, help="Sample rate in Hz")
     parser.add_argument("--pulses", type=int, default=5, help="Euclidean pulses (k)")
     parser.add_argument("--steps", type=int, default=13, help="Euclidean steps (n)")
     parser.add_argument(
         "--noise-tail-ms", type=float, default=20.0, help="Noise tail duration (ms)"
     )
-    parser.add_argument(
-        "--noise-amplitude", type=float, default=0.01, help="Noise tail amplitude"
-    )
-    parser.add_argument(
-        "--output", type=str, default="koenig_seed.wav", help="Output file path"
-    )
+    parser.add_argument("--noise-amplitude", type=float, default=0.01, help="Noise tail amplitude")
+    parser.add_argument("--output", type=str, default="koenig_seed.wav", help="Output file path")
 
     args = parser.parse_args()
 

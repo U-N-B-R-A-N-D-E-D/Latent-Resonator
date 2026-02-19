@@ -140,7 +140,8 @@ final class BridgeProcessManager: ObservableObject {
         var searchDirs: [URL] = []
 
         if let custom = UserDefaults.standard.string(forKey: LRConstants.ModelConfig.userDefaultsKey),
-           !custom.isEmpty {
+           !custom.isEmpty,
+           LRConstants.ModelConfig.isModelPathSafe(custom, projectRoot: Self.projectRoot) {
             searchDirs.append(URL(fileURLWithPath: custom))
         }
 
@@ -295,10 +296,19 @@ final class BridgeProcessManager: ObservableObject {
 
         // --- Step 3: Start the bridge server (or reuse if already listening) ---
 
-        let healthURL = URL(string: LRConstants.ACEBridge.baseURL)!
+        let healthURL = LRConstants.ACEBridge.baseURLAsURL
             .appendingPathComponent(LRConstants.ACEBridge.healthEndpoint)
 
-        if checkHealthSync(url: healthURL, timeout: 2.0) {
+        // When forceCPU is true, never reuse — an existing bridge may be MPS and will crash.
+        // Kill any process on the port so we launch fresh with --device cpu.
+        if LRConstants.ACEBridge.forceCPU {
+            if checkHealthSync(url: healthURL, timeout: 2.0) {
+                log("forceCPU: terminating existing bridge to launch with --device cpu")
+                requestShutdownViaHTTPSync()
+                killProcessOnPortSync(port: LRConstants.ACEBridge.defaultPort)
+                Thread.sleep(forTimeInterval: 1.0)  // allow port to be released
+            }
+        } else if checkHealthSync(url: healthURL, timeout: 2.0) {
             updateState(.running)
             log("[ok] Bridge already running on port \(LRConstants.ACEBridge.defaultPort) (reusing)")
             return
@@ -311,12 +321,15 @@ final class BridgeProcessManager: ObservableObject {
             try startServerProcess()
 
             // Wait until the server is actually listening (model load can take a long time)
-            let healthURL = URL(string: LRConstants.ACEBridge.baseURL)!
+            let healthURL = LRConstants.ACEBridge.baseURLAsURL
                 .appendingPathComponent(LRConstants.ACEBridge.healthEndpoint)
             let maxWait: TimeInterval = 120
-            let pollInterval: TimeInterval = 1.0
+            let pollInterval = LRConstants.ACEBridge.bridgeStartupPollInterval
+            let initialDelay = LRConstants.ACEBridge.bridgeStartupInitialDelay
             var waited: TimeInterval = 0
             var up = false
+            Thread.sleep(forTimeInterval: initialDelay)
+            waited = initialDelay
             while waited < maxWait {
                 if serverProcess?.isRunning != true {
                     break
@@ -385,12 +398,12 @@ final class BridgeProcessManager: ObservableObject {
             log("No model weights found -- passthrough mode")
         }
 
-        // Device: "cpu" is the only safe choice.  MPS (Metal) crashes with
-        // SIGABRT in validateComputeFunctionArguments -> rsub_Scalar during
-        // ACE-Step inference.  PYTORCH_ENABLE_MPS_FALLBACK=1 cannot prevent
-        // this because the crash occurs inside Metal's C-level assertion
-        // before PyTorch's fallback mechanism can intervene.
-        args += ["--device", "cpu"]
+        // Device: use CPU when MPS crashes (Metal validation in rsub). Otherwise auto (MPS on Apple Silicon).
+        let device = LRConstants.ACEBridge.forceCPU ? "cpu" : "auto"
+        args += ["--device", device]
+        if LRConstants.ACEBridge.forceCPU {
+            log("Using CPU device (MPS disabled due to rsub crash)")
+        }
 
         process.arguments = args
         process.currentDirectoryURL = Self.scriptsDir
@@ -398,12 +411,16 @@ final class BridgeProcessManager: ObservableObject {
         // Inherit PATH but activate venv
         var env = ProcessInfo.processInfo.environment
         env["VIRTUAL_ENV"] = venvDir.path
+        if LRConstants.ACEBridge.forceCPU {
+            env["LATENT_RESONATOR_FORCE_CPU"] = "1"
+        }
         env["PATH"] = "\(venvDir.path)/bin:" + (env["PATH"] ?? "")
         // Ensure Python doesn't buffer output
         env["PYTHONUNBUFFERED"] = "1"
-        // MPS fallback: if any MPS-unsupported op slips through, fall
-        // back to CPU instead of crashing
+        // MPS fallback: enable for any ops not yet fully implemented in MPS
         env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+        // MPS memory fix for ACE-Step 1.5 v0.1.0+ (prevents "MPS backend out of memory")
+        env["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
         process.environment = env
 
         // Capture stdout
@@ -508,7 +525,7 @@ final class BridgeProcessManager: ObservableObject {
 
     /// Synchronous POST /shutdown so the bridge exits before the app quits (reused or owned).
     private func requestShutdownViaHTTPSync() {
-        let url = URL(string: LRConstants.ACEBridge.baseURL)!
+        let url = LRConstants.ACEBridge.baseURLAsURL
             .appendingPathComponent("shutdown")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -554,20 +571,18 @@ final class BridgeProcessManager: ObservableObject {
             "/opt/homebrew/bin/python3",    // Apple Silicon Homebrew (may be 3.13+)
         ]
 
-        for path in candidates {
-            if FileManager.default.fileExists(atPath: path) {
-                // Verify version >= 3.9 and < 3.13 (ACE-Step deps require <3.13)
-                let (ok, output) = runSyncProcess(path, [
-                    "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
-                ])
-                if ok {
-                    let version = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let parts = version.split(separator: ".")
-                    if parts.count >= 2,
-                       let major = Int(parts[0]), let minor = Int(parts[1]),
-                       major >= 3, minor >= 9, minor < 13 {
-                        return path
-                    }
+        for path in candidates where FileManager.default.fileExists(atPath: path) {
+            // Verify version >= 3.9 and < 3.13 (ACE-Step deps require <3.13)
+            let (ok, output) = runSyncProcess(path, [
+                "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+            ])
+            if ok {
+                let version = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                let parts = version.split(separator: ".")
+                if parts.count >= 2,
+                   let major = Int(parts[0]), let minor = Int(parts[1]),
+                   major >= 3, minor >= 9, minor < 13 {
+                    return path
                 }
             }
         }

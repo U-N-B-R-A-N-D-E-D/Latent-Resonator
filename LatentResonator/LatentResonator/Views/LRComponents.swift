@@ -20,6 +20,7 @@ struct LRToggle: View {
     let isActive: Bool
     let activeColor: Color
     var fullWidth: Bool = false
+    var helpText: String? = nil
     let action: () -> Void
 
     @State private var isHovered = false
@@ -48,6 +49,7 @@ struct LRToggle: View {
         .buttonStyle(.plain)
         .onHover { hovering in isHovered = hovering }
         .animation(DS.stateTransition, value: isActive)
+        .ifLet(helpText) { view, text in view.help(text) }
         .accessibilityLabel(label)
         .accessibilityValue(isActive ? "On" : "Off")
         .accessibilityAddTraits(.isButton)
@@ -150,10 +152,10 @@ struct LRStatusRow: View {
                 .font(DS.font(DS.fontCaption, weight: .bold))
                 .foregroundColor(valueColor)
 
-            ForEach(Array(extras.enumerated()), id: \.offset) { _, extra in
-                Text(extra.0)
+            ForEach(Array(extras.indices), id: \.self) { idx in
+                Text(extras[idx].0)
                     .font(DS.font(DS.fontCaption, weight: .medium))
-                    .foregroundColor(extra.1)
+                    .foregroundColor(extras[idx].1)
             }
 
             Spacer()
@@ -221,6 +223,7 @@ struct LRActionButton: View {
     var icon: String? = nil
     var color: Color = DS.danger
     var style: Style = .primary
+    var helpText: String? = nil
     let action: () -> Void
 
     @State private var isHovered = false
@@ -244,6 +247,7 @@ struct LRActionButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering in isHovered = hovering }
+        .ifLet(helpText) { view, text in view.help(text) }
         .accessibilityLabel(label)
         .accessibilityAddTraits(.isButton)
     }
@@ -293,12 +297,6 @@ struct LRParamSlider: View {
                 Text(label)
                     .font(DS.font(DS.fontCaption2, weight: .bold))
                     .foregroundColor(DS.textTertiary)
-                if let hint = hint {
-                    Text("?")
-                        .font(DS.font(DS.fontCaption2, weight: .bold))
-                        .foregroundColor(DS.textDisabled)
-                        .help(hint)
-                }
             }
             .frame(width: 86, alignment: .leading)
             Slider(value: $value, in: range)
@@ -315,6 +313,7 @@ struct LRParamSlider: View {
                 .foregroundColor(color.opacity(0.7))
                 .frame(width: 54, alignment: .trailing)
         }
+        .ifLet(hint) { view, text in view.help(text) }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
         .accessibilityValue(String(format: format, value * multiplier))
@@ -362,6 +361,11 @@ final class ScrollWheelNSView: NSView {
         guard abs(delta) > 0.01 else { return }
         onScroll?(delta)
     }
+
+    override func mouseDown(with event: NSEvent) { nextResponder?.mouseDown(with: event) }
+    override func mouseUp(with event: NSEvent) { nextResponder?.mouseUp(with: event) }
+    override func mouseDragged(with event: NSEvent) { nextResponder?.mouseDragged(with: event) }
+    override var acceptsFirstResponder: Bool { false }
 }
 
 // MARK: - Slider + Scroll Modifier
@@ -390,5 +394,14 @@ extension View {
                 value.wrappedValue = min(range.upperBound, max(range.lowerBound, newVal))
             }
         )
+    }
+
+    @ViewBuilder
+    func ifLet<T, Modified: View>(_ value: T?, transform: (Self, T) -> Modified) -> some View {
+        if let value = value {
+            transform(self, value)
+        } else {
+            self
+        }
     }
 }

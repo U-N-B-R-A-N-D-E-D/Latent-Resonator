@@ -3,7 +3,7 @@ import AVFoundation
 import Combine
 import Accelerate
 
-// MARK: - Resonator Lane (Whitepaper §3.3, §4.2.2, §6.1)
+// MARK: - Resonator Lane (Whitepaper ?3.3, ?4.2.2, ?6.1)
 //
 // Self-contained feedback loop encapsulating one independent
 // Latent Resonator channel. Each lane owns its complete signal
@@ -36,6 +36,22 @@ import Accelerate
 //   S_{i+1} = ACE(S_i + N(u,o), P, y)  (section 3.3)
 //   The model as "Black Box Resonator"  (section 6.1)
 //   The Lucier Chamber (delay)          (section 1.2)
+
+// MARK: - Spectral Feature Snapshot (Telemetry)
+//
+// Lightweight record of spectral features at one point in time.
+// Appended to a per-lane log after each inference cycle. Exported
+// alongside recorded audio for post-performance analysis.
+
+struct SpectralFeatureSnapshot: Codable {
+    let iteration: Int
+    let centroid: Float
+    let flatness: Float
+    let flux: Float
+    let promptPhase: Int
+    let inputStrength: Float
+    let timestamp: TimeInterval
+}
 
 // MARK: - Cycle Parameter Snapshot
 //
@@ -80,6 +96,13 @@ final class ResonatorLane: ObservableObject, Identifiable {
     @Published var isMuted: Bool = false
     @Published var isSoloed: Bool = false
 
+    // MARK: - Step Grid (Per-Lane, Focus Lane UX)
+    //
+    // Each lane has its own step sequence and parameter locks. The UI shows
+    // only the focused lane's grid (Elektron-style). Enables polirhythm
+    // (different chain lengths) and independent voice modulation.
+    @Published var stepGrid: StepGrid = StepGrid()
+
     // MARK: - ACE-Step 1.5 Parameters (Per-Lane)
 
     @Published var guidanceScale: Float
@@ -91,24 +114,91 @@ final class ResonatorLane: ObservableObject, Identifiable {
     @Published var inferenceSteps: Int
     @Published var feedbackAmount: Float
 
+    // MARK: - Auto Decay (White Paper ?4.2.2 -- Recursive Drift Trajectory)
+
+    /// When enabled, inputStrength interpolates from its captured origin
+    /// toward autoDecayTarget over autoDecayIterations. Single toggle;
+    /// target and rate are preset-level configuration (not live knobs).
+    @Published var autoDecayEnabled: Bool = false {
+        didSet {
+            if autoDecayEnabled && !oldValue {
+                autoDecayOrigin = inputStrength
+            }
+        }
+    }
+    /// Preset-defined endpoint for inputStrength decay.
+    var autoDecayTarget: Float = LRConstants.autoDecayTargetDefault
+    /// Preset-defined number of iterations to reach the target.
+    var autoDecayIterations: Float = LRConstants.autoDecayIterationsDefault
+    /// Captured inputStrength at the moment auto-decay was enabled / inference started.
+    private var autoDecayOrigin: Float = LRConstants.inputStrengthDefault
+
+    // MARK: - Audio Input (Shared Buffer for .audioInput Excitation)
+
+    /// Shared ring buffer written by NeuralEngine's hardware input tap.
+    /// Lanes with excitationMode == .audioInput read from this.
+    weak var audioInputBuffer: CircularAudioBuffer?
+
+    // MARK: - Cross-Lane Feedback
+
+    /// When set, this lane's feedback path reads from another lane's
+    /// feedbackBuffer instead of its own. nil = self-feedback (default).
+    @Published var feedbackSourceLaneId: UUID?
+    /// External feedback ring buffer (set by NeuralEngine.updateFeedbackRouting()).
+    weak var externalFeedbackBuffer: CircularAudioBuffer?
+
     // MARK: - Prompt (Per-Lane)
 
     @Published var promptText: String
     @Published var promptEvolutionEnabled: Bool = true
 
-    /// Per-lane prompt evolution phases (§4.2.2 Recursive Drift).
+    /// Per-lane prompt evolution phases (?4.2.2 Recursive Drift).
     /// Each lane evolves through its own unique timbral trajectory.
     private var promptPhases: [String]
 
-    /// The currently active prompt phase (computed from iterationCount).
+    /// The currently active prompt phase, conditioned on spectral flatness.
+    /// Phase transitions are driven by the signal's entropic state:
+    ///   Phase 1: tonal/structured (flatness < phase2Threshold)
+    ///   Phase 2: entropic drift (flatness >= phase2Threshold and < phase3Threshold)
+    ///   Phase 3: deep saturation (flatness >= phase3Threshold)
+    /// Falls back to iteration-count heuristic for the first 2 iterations
+    /// when spectral features have not yet stabilized.
     var currentPromptPhase: Int {
-        if iterationCount < 3 { return 1 }
-        if iterationCount < 9 { return 2 }
-        return 3
+        if iterationCount < 2 { return 1 }
+        let flat = spectralFlatnessNormalized
+        if flat >= LRConstants.spectralPhase3Threshold { return 3 }
+        if flat >= LRConstants.spectralPhase2Threshold { return 2 }
+        return 1
     }
 
-    /// When set (1, 2, or 3), overrides currentPromptPhase for resolveActivePrompt (§4.2.2 step lock).
+    /// Latest spectral centroid from the DSP chain [0..1]. Published for UI visualization.
+    @Published var spectralCentroidNormalized: Float = 0.0
+    /// Latest spectral flatness from the DSP chain [0..1]. Published for UI visualization.
+    @Published var spectralFlatnessNormalized: Float = 0.0
+
+    /// When set (1, 2, or 3), overrides currentPromptPhase for resolveActivePrompt (?4.2.2 step lock).
     @Published var promptPhaseOverride: Int? = nil
+
+    /// When set, overrides the entire prompt for inference (Drum Lane drumVoice P-Lock §0).
+    /// Takes precedence over promptEvolutionEnabled and promptPhaseOverride.
+    /// Cleared when applySnapshot is called (scene recall).
+    @Published var promptOverride: String? = nil
+
+    // MARK: - Iteration Archive (Selective Recall)
+
+    /// Ring buffer of past iteration audio. Newest at the end.
+    /// Max size: LRConstants.iterationArchiveSize.
+    private(set) var iterationArchive: [[Float]] = []
+
+    /// When set, the lane replays archived audio from this index instead
+    /// of the normal loop buffer. nil = normal playback.
+    @Published var archiveRecallIndex: Int? = nil
+
+    // MARK: - Spectral Feature Log (Telemetry)
+
+    /// Running log of spectral features captured after each inference cycle.
+    /// Capped at featureLogMaxEntries. Exported with audio recordings.
+    private(set) var featureLog: [SpectralFeatureSnapshot] = []
 
     /// When true, next inference cycle skips ACE/CoreML and passes through (trigless / DSP-only step).
     var dspOnlyForNextCycle: Bool = false
@@ -132,6 +222,9 @@ final class ResonatorLane: ObservableObject, Identifiable {
     @Published var filterResonance: Float = LRConstants.filterResonanceDefault
     @Published var filterMode: FilterMode = .lowpass
     @Published var saturationMode: SaturationMode = .clean
+    /// Continuous crossfade [0..1] toward the next saturation mode.
+    /// Driven by the WARMTH macro to eliminate discrete mode-switch clicks.
+    @Published var saturationMorph: Float = 0.0
     @Published var pulseWidth: Float = LRConstants.pulseWidthDefault
 
     // MARK: - Macro Controls (Phase 5: Musical Gestures)
@@ -194,10 +287,10 @@ final class ResonatorLane: ObservableObject, Identifiable {
     /// Separate from SignalGenerator.lfoPhase to avoid thread contention.
     private var rtLfoPhase: Double = 0.0
 
-    // MARK: - Per-Lane Recording (§5 -- Emergent Phenomena Analysis)
+    // MARK: - Per-Lane Recording (?5 -- Emergent Phenomena Analysis)
 
     /// Per-lane recorder -- captures isolated output for studying
-    /// one latent trajectory in isolation (§5.1-5.4).
+    /// one latent trajectory in isolation (?5.1-5.4).
     let laneRecorder = AudioRecorder()
     @Published var isLaneRecording: Bool = false
 
@@ -221,8 +314,11 @@ final class ResonatorLane: ObservableObject, Identifiable {
 
     /// These are created and connected by NeuralEngine.rebuildAudioGraph().
     /// The lane itself provides render callbacks but does not own the graph.
-    var combinedSourceNode: AVAudioSourceNode!
+    /// Audio source node for excitation + feedback mix. Set in setupCombinedSourceNode() during init.
+    var combinedSourceNode: AVAudioSourceNode?
     let laneMixer = AVAudioMixerNode()
+    /// Tracks whether a capture tap is installed. Prevents double removeTap (malloc double free).
+    private var captureTapInstalled: Bool = false
 
     // MARK: - Ring Buffers
 
@@ -259,7 +355,7 @@ final class ResonatorLane: ObservableObject, Identifiable {
 
     let signalGenerator = SignalGenerator()
 
-    // MARK: - DSP Spectral Processor (Black Box Resonator §6.1)
+    // MARK: - DSP Spectral Processor (Black Box Resonator ?6.1)
 
     let spectralProcessor = SpectralProcessor(sampleRate: LRConstants.sampleRate)
 
@@ -273,7 +369,7 @@ final class ResonatorLane: ObservableObject, Identifiable {
     // Ladder filter state removed -- inline excitation DSP was producing NaN.
     // Filtering is handled by SpectralProcessor in the feedback path.
 
-    // MARK: - Delay Line (The Lucier Chamber -- §1.2)
+    // MARK: - Delay Line (The Lucier Chamber -- ?1.2)
 
     private var delayLineBuffer: [Float]
     private var delayWritePos: Int = 0
@@ -298,7 +394,7 @@ final class ResonatorLane: ObservableObject, Identifiable {
 
     // MARK: - Processing Format
 
-    private var processingFormat: AVAudioFormat!
+    private var processingFormat: AVAudioFormat?
 
     // MARK: - Initialization
 
@@ -322,6 +418,8 @@ final class ResonatorLane: ObservableObject, Identifiable {
         self.inferMethod = preset.inferMethod
         self.inferenceSteps = preset.inferenceSteps
         self.feedbackAmount = preset.feedbackAmount
+        self.autoDecayTarget = preset.autoDecayTarget
+        self.autoDecayIterations = preset.autoDecayIterations
         self.promptText = preset.prompt
         self.promptPhases = [preset.promptPhase1, preset.promptPhase2, preset.promptPhase3]
         self.excitationMode = preset.excitationMode
@@ -356,6 +454,7 @@ final class ResonatorLane: ObservableObject, Identifiable {
         self.loopBuffer.initialize(repeating: 0.0, count: loopCapacity)
 
         setupProcessingFormat()
+        spectralProcessor.reconfigure(fftSize: preset.fftSize)
         setupCombinedSourceNode()
     }
 
@@ -378,6 +477,17 @@ final class ResonatorLane: ObservableObject, Identifiable {
         )
     }
 
+    private var effectiveFormat: AVAudioFormat {
+        if let fmt = processingFormat { return fmt }
+        guard let fmt = AVAudioFormat(
+            standardFormatWithSampleRate: LRConstants.sampleRate,
+            channels: AVAudioChannelCount(LRConstants.channelCount)
+        ) else {
+            fatalError("ResonatorLane: standardFormat 48kHz/2ch failed")
+        }
+        return fmt
+    }
+
 
 
     private func setupCombinedSourceNode() {
@@ -390,7 +500,7 @@ final class ResonatorLane: ObservableObject, Identifiable {
         let processor = spectralProcessor
 
         combinedSourceNode = AVAudioSourceNode(
-            format: processingFormat
+            format: effectiveFormat
         ) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
             guard let self = self else { return noErr }
 
@@ -406,27 +516,49 @@ final class ResonatorLane: ObservableObject, Identifiable {
             }
 
             // -- 1. GENERATE EXCITATION (mono) --
-            sigGen.sineFrequency = self.sineFrequency
-            sigGen.pulseDensity = self.pulseDensity
-            sigGen.euclideanPulses = self.euclideanPulses
-            sigGen.euclideanSteps = self.euclideanSteps
-            sigGen.pulseWidth = self.pulseWidth
-            sigGen.renderInto(left: excBuf, right: excBuf,
-                              frameCount: count, mode: self.excitationMode,
-                              sampleRate: sr)
+            if self.excitationMode == .audioInput, let aiBuf = self.audioInputBuffer {
+                let got = aiBuf.read(into: excBuf, count: count)
+                if got < count {
+                    memset(excBuf.advanced(by: got), 0,
+                           (count - got) * MemoryLayout<Float>.size)
+                }
+            } else {
+                sigGen.sineFrequency = self.sineFrequency
+                sigGen.pulseDensity = self.pulseDensity
+                sigGen.euclideanPulses = self.euclideanPulses
+                sigGen.euclideanSteps = self.euclideanSteps
+                sigGen.pulseWidth = self.pulseWidth
+                sigGen.renderInto(left: excBuf, right: excBuf,
+                                  frameCount: count, mode: self.excitationMode,
+                                  sampleRate: sr)
+            }
 
-            // -- 2. READ FEEDBACK from ring buffer + loop fallback --
-            let readCount = fbBuffer.read(into: readBuf, count: count)
+            // -- 2. READ FEEDBACK from ring buffer + loop/archive fallback --
+            // Cross-lane feedback: if an external source is wired, read from it.
+            let activeFeedback = self.externalFeedbackBuffer ?? fbBuffer
+            let readCount = activeFeedback.read(into: readBuf, count: count)
             if readCount < count {
-                let loopLen = self.loopSampleCount
-                if loopLen > 0 {
+                // Archive recall: replay a specific past iteration buffer.
+                let archive = self.iterationArchive
+                if let recallIdx = self.archiveRecallIndex,
+                   recallIdx >= 0, recallIdx < archive.count, !archive[recallIdx].isEmpty {
+                    let arc = archive[recallIdx]
+                    let arcLen = arc.count
                     for i in readCount..<count {
-                        readBuf[i] = self.loopBuffer[self.loopReadPos]
-                        self.loopReadPos = (self.loopReadPos + 1) % loopLen
+                        readBuf[i] = arc[self.loopReadPos % arcLen]
+                        self.loopReadPos = (self.loopReadPos + 1) % arcLen
                     }
                 } else {
-                    memset(readBuf.advanced(by: readCount), 0,
-                           (count - readCount) * MemoryLayout<Float>.size)
+                    let loopLen = self.loopSampleCount
+                    if loopLen > 0 {
+                        for i in readCount..<count {
+                            readBuf[i] = self.loopBuffer[self.loopReadPos]
+                            self.loopReadPos = (self.loopReadPos + 1) % loopLen
+                        }
+                    } else {
+                        memset(readBuf.advanced(by: readCount), 0,
+                               (count - readCount) * MemoryLayout<Float>.size)
+                    }
                 }
             }
 
@@ -485,6 +617,7 @@ final class ResonatorLane: ObservableObject, Identifiable {
             let fResonance = self.filterResonance
             let fMode = self.filterMode
             let satMode = self.saturationMode
+            let satMorph = self.saturationMorph
 
             // -- 5. SPECTRAL PROCESSOR + DSP CHAIN --
             let processed = processor.process(
@@ -500,7 +633,8 @@ final class ResonatorLane: ObservableObject, Identifiable {
                 filterCutoff: fCutoff,
                 filterResonance: fResonance,
                 filterMode: fMode,
-                saturationMode: satMode
+                saturationMode: satMode,
+                saturationMorph: satMorph
             )
 
             // -- 6. DELAY LINE --
@@ -531,18 +665,23 @@ final class ResonatorLane: ObservableObject, Identifiable {
     /// Install the tap on laneMixer to capture audio for inference + RMS metering.
     /// Called by NeuralEngine after connecting nodes.
     func installCaptureTap() {
+        guard !captureTapInstalled else { return }
         laneMixer.installTap(
             onBus: 0,
             bufferSize: AVAudioFrameCount(LRConstants.bufferSize),
-            format: processingFormat
+            format: effectiveFormat
         ) { [weak self] buffer, _ in
             self?.processAudioTap(buffer)
         }
+        captureTapInstalled = true
     }
 
     /// Remove the capture tap. Called before detaching nodes.
+    /// Guarded to prevent double removeTap (causes malloc double free).
     func removeCaptureTap() {
+        guard captureTapInstalled else { return }
         laneMixer.removeTap(onBus: 0)
+        captureTapInstalled = false
     }
 
     // MARK: - Audio Tap (Runs on Audio Thread)
@@ -563,7 +702,6 @@ final class ResonatorLane: ObservableObject, Identifiable {
         vDSP_vasm(leftChannel, 1, rightChannel, 1, &half, &monoMix, 1, vDSP_Length(frameCount))
         captureBuffer.write(monoMix)
 
-
         // RMS for UI metering -- throttled to ~15 Hz to reduce view re-renders.
         // mach_absolute_time() is safe on the audio thread (no allocations).
         var rms: Float = 0
@@ -571,27 +709,32 @@ final class ResonatorLane: ObservableObject, Identifiable {
 
         let now = mach_absolute_time()
         let elapsedNs = now - lastRMSDispatchTime
-        if elapsedNs > 66_000_000 {  // ~66ms = ~15 Hz
+        if elapsedNs > LRConstants.rmsDispatchIntervalNs {
             lastRMSDispatchTime = now
             DispatchQueue.main.async { [weak self] in
                 self?.currentRMS = rms
             }
         }
 
-        // Spectral bins for visualization -- throttled to ~10 Hz
+        // Spectral bins + centroid/flatness for CNT/FLAT drift pad -- throttled to ~15 Hz
+        // When muted, render returns early so spectralProcessor is never updated; use center (0.5) as "no signal"
         let spectralElapsed = now - lastSpectralDispatchTime
-        if spectralElapsed > 100_000_000 {  // ~100ms = ~10 Hz
+        if spectralElapsed > LRConstants.rmsDispatchIntervalNs {
             lastSpectralDispatchTime = now
+            let muted = self.isMuted
             let snap = spectralProcessor.magnitudeSnapshot
-            if !snap.isEmpty {
-                DispatchQueue.main.async { [weak self] in
-                    self?.spectralBins = snap
-                }
+            let centroid = muted ? Float(0.5) : spectralProcessor.spectralCentroid
+            let flatness = muted ? Float(0.5) : spectralProcessor.spectralFlatness
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                if !snap.isEmpty { self.spectralBins = snap }
+                self.spectralCentroidNormalized = centroid
+                self.spectralFlatnessNormalized = flatness
             }
         }
     }
 
-    // MARK: - Per-Lane Recording Control (§5)
+    // MARK: - Per-Lane Recording Control (?5)
 
     /// Toggle per-lane recording on/off.
     func toggleLaneRecording() {
@@ -603,7 +746,7 @@ final class ResonatorLane: ObservableObject, Identifiable {
     }
 
     private func startLaneRecording() {
-        guard let format = processingFormat else { return }
+        let format = effectiveFormat
         do {
             _ = try laneRecorder.startRecording(name: name, format: format)
             isLaneRecording = true
@@ -644,13 +787,14 @@ final class ResonatorLane: ObservableObject, Identifiable {
         guard inferenceTask == nil else { return }
         isRunning = true
         consecutiveFailures = 0
+        autoDecayOrigin = inputStrength
 
         inferenceTask = Task(priority: .low) { [weak self] in
             while !Task.isCancelled {
                 guard let self = self else { break }
                 await self.runInferenceCycle()
                 // Yield to let the audio thread breathe -- inference is heavy on CPU
-                try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+                try? await Task.sleep(nanoseconds: LRConstants.inferenceYieldIntervalNs)
             }
         }
     }
@@ -674,6 +818,9 @@ final class ResonatorLane: ObservableObject, Identifiable {
         delayWritePos = 0
         loopSampleCount = 0
         loopReadPos = 0
+        iterationArchive.removeAll(keepingCapacity: true)
+        archiveRecallIndex = nil
+        featureLog.removeAll(keepingCapacity: true)
     }
 
     /// Reconfigure this lane with a new preset without replacing the audio nodes.
@@ -690,6 +837,9 @@ final class ResonatorLane: ObservableObject, Identifiable {
         inferMethod = preset.inferMethod
         inferenceSteps = preset.inferenceSteps
         feedbackAmount = preset.feedbackAmount
+        autoDecayTarget = preset.autoDecayTarget
+        autoDecayIterations = preset.autoDecayIterations
+        autoDecayEnabled = false
         promptText = preset.prompt
         excitationMode = preset.excitationMode
         delayTime = preset.delayTime
@@ -707,6 +857,7 @@ final class ResonatorLane: ObservableObject, Identifiable {
         chaos = preset.chaos
         warmth = preset.warmth
         promptPhases = [preset.promptPhase1, preset.promptPhase2, preset.promptPhase3]
+        spectralProcessor.reconfigure(fftSize: preset.fftSize)
         spectralProcessor.updateProfile(from: preset.prompt)
     }
 
@@ -740,7 +891,11 @@ final class ResonatorLane: ObservableObject, Identifiable {
             filterModeRaw: filterMode.rawValue,
             saturationModeRaw: saturationMode.rawValue,
             spectralFreezeActive: spectralFreezeActive,
-            denoiseStrength: denoiseStrengthDefault
+            denoiseStrength: denoiseStrengthDefault,
+            autoDecayEnabled: autoDecayEnabled,
+            feedbackSourceLaneIndex: nil,  // Resolved by NeuralEngine during scene save
+            archiveRecallIndex: archiveRecallIndex,
+            saturationMorph: saturationMorph
         )
     }
 
@@ -779,14 +934,18 @@ final class ResonatorLane: ObservableObject, Identifiable {
         let d = min(max(s.denoiseStrength ?? 1.0, 0), 1)
         denoiseStrengthDefault = d
         denoiseStrengthForInference = d
+        autoDecayEnabled = s.autoDecayEnabled ?? false
+        archiveRecallIndex = s.archiveRecallIndex
+        saturationMorph = s.saturationMorph ?? 0.0
+        promptOverride = nil  // Scene recall clears drum-voice override (§0)
         spectralProcessor.updateProfile(from: resolveActivePrompt())
     }
 
-    // MARK: - Inference Cycle (§3.3 Recursive Formula)
+    // MARK: - Inference Cycle (Section 3.3 Recursive Formula)
 
     /// Execute one complete inference cycle for this lane.
     ///
-    /// S_{i+1} = ACE(S_i + N(μ,σ), P, γ)
+    /// S_{i+1} = ACE(S_i + N(u, sigma^2), P, theta)
     ///
     /// Inference path (slow, async):
     ///   parameter snapshot -> S_i -> entropy injection ->
@@ -832,10 +991,10 @@ final class ResonatorLane: ObservableObject, Identifiable {
         // 2b. Thread-safe parameter snapshot (all @Published reads on MainActor)
         let params = await snapshotParameters()
 
-        // 3. Update spectral profile from resolved prompt (§4.2.2 evolution)
+        // 3. Update spectral profile from resolved prompt (?4.2.2 evolution)
         spectralProcessor.updateProfile(from: params.prompt)
 
-        // 4. Inject entropy -- per-iteration random noise (§4.2.2)
+        // 4. Inject entropy -- per-iteration random noise (?4.2.2)
         //    Scale 0.5 gives audible stochastic variation at moderate entropy.
         //    (Was 0.1 -- too weak, resulting in near-inaudible noise injection.)
         let noiseScale = params.entropy * 0.5
@@ -845,7 +1004,7 @@ final class ResonatorLane: ObservableObject, Identifiable {
             }
         }
 
-        // 5. LFO modulation (§5.2 Stochastic Parameter Evolution)
+        // 5. LFO modulation (?5.2 Stochastic Parameter Evolution)
         //    Only inference-time targets (cfg, entropy, granularity) are modulated
         //    here. Real-time targets (feedback, resonator) are modulated per-buffer
         //    in the audio render callback for instant response.
@@ -951,10 +1110,46 @@ final class ResonatorLane: ObservableObject, Identifiable {
         }
         loopSampleCount = copyCount
 
-        // 8. Increment iteration counter and clear inference flag on MainActor
+        // 7c. Append to iteration archive (ring buffer, capped at iterationArchiveSize)
+        iterationArchive.append(processedSamples)
+        if iterationArchive.count > LRConstants.iterationArchiveSize {
+            iterationArchive.removeFirst()
+        }
+
+        // 8. Increment iteration counter, update spectral features, apply auto-decay, clear inference flag
+        let centroid = spectralProcessor.spectralCentroid
+        let flatness = spectralProcessor.spectralFlatness
+        let flux = spectralProcessor.spectralFlux
         await MainActor.run { [weak self] in
-            self?.iterationCount += 1
-            self?.isInferring = false
+            guard let self = self else { return }
+            self.iterationCount += 1
+            self.isInferring = false
+
+            // Publish spectral features for UI and prompt evolution
+            self.spectralCentroidNormalized = centroid
+            self.spectralFlatnessNormalized = flatness
+
+            // Append spectral feature snapshot to telemetry log
+            let snapshot = SpectralFeatureSnapshot(
+                iteration: self.iterationCount,
+                centroid: centroid,
+                flatness: flatness,
+                flux: flux,
+                promptPhase: self.currentPromptPhase,
+                inputStrength: self.inputStrength,
+                timestamp: ProcessInfo.processInfo.systemUptime
+            )
+            self.featureLog.append(snapshot)
+            if self.featureLog.count > LRConstants.featureLogMaxEntries {
+                self.featureLog.removeFirst()
+            }
+
+            // Auto-decay: interpolate inputStrength toward preset target (?4.2.2)
+            if self.autoDecayEnabled, self.autoDecayIterations > 0 {
+                let progress = min(Float(self.iterationCount) / self.autoDecayIterations, 1.0)
+                self.inputStrength = self.autoDecayOrigin
+                    + (self.autoDecayTarget - self.autoDecayOrigin) * progress
+            }
         }
     }
 
@@ -988,7 +1183,7 @@ final class ResonatorLane: ObservableObject, Identifiable {
         )
     }
 
-    // MARK: - LFO Modulation (§5.2)
+    // MARK: - LFO Modulation (?5.2)
 
     private func applyLFOModulation(
         value: Float, target: LFOTarget,
@@ -1009,7 +1204,7 @@ final class ResonatorLane: ObservableObject, Identifiable {
         }
     }
 
-    // MARK: - Delay Line (The Lucier Chamber -- §1.2)
+    // MARK: - Delay Line (The Lucier Chamber -- ?1.2)
 
     /// Internal for @testable access in knob-check tests.
     func applyDelayLine(_ samples: inout [Float]) {
@@ -1037,7 +1232,7 @@ final class ResonatorLane: ObservableObject, Identifiable {
         }
     }
 
-    // MARK: - Prompt Evolution (§4.2.2 -- Per-Lane Recursive Drift)
+    // MARK: - Prompt Evolution (?4.2.2 -- Per-Lane Recursive Drift)
 
     /// Resolve the active prompt for this lane's current iteration phase.
     ///
@@ -1047,8 +1242,12 @@ final class ResonatorLane: ObservableObject, Identifiable {
     /// SYNTH stays spectral, NOISE stays entropic.
     ///
     /// When prompt evolution is disabled, returns the manual `promptText`.
+    /// When promptOverride is set (Drum Lane drumVoice P-Lock §0), returns it directly.
     /// When promptPhaseOverride is set (performance step lock), uses that phase instead of currentPromptPhase.
     private func resolveActivePrompt() -> String {
+        if let override = promptOverride, !override.isEmpty {
+            return override
+        }
         guard promptEvolutionEnabled else { return promptText }
         let phase = promptPhaseOverride ?? currentPromptPhase
         let phaseIndex = min(phase - 1, promptPhases.count - 1)
@@ -1111,12 +1310,26 @@ final class ResonatorLane: ObservableObject, Identifiable {
     /// Internal for @testable knob-check tests.
     func applyMacroWarmth() {
         let w = warmth
-        let newSat: SaturationMode = w < 0.33 ? .clean : (w < 0.66 ? .tube : .transistor)
+        // Continuous saturation morphing: each mode occupies a 1/3 band of warmth.
+        // Within each band, saturationMorph crossfades toward the next mode.
+        let newSat: SaturationMode
+        let morph: Float
+        if w < 0.33 {
+            newSat = .clean
+            morph = w / 0.33             // 0 at w=0, 1 at w=0.33
+        } else if w < 0.66 {
+            newSat = .tube
+            morph = (w - 0.33) / 0.33    // 0 at w=0.33, 1 at w=0.66
+        } else {
+            newSat = .transistor
+            morph = (w - 0.66) / 0.34    // 0 at w=0.66, 1 at w=1.0
+        }
         let newRes = lerp3(0.0, 0.3, 0.6, w)
         let newDecay = lerp3(0.3, 0.6, 0.85, w)
         let newMix = lerp3(0.0, 0.2, 0.4, w)
         objectWillChange.send()
         saturationMode = newSat
+        saturationMorph = min(morph, 1.0)
         filterResonance = newRes
         resonatorDecay = newDecay
         delayMix = newMix
