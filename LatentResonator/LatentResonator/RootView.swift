@@ -13,7 +13,7 @@ struct RootView: View {
 
     @ObservedObject var engine: NeuralEngine
     @State private var showPerformanceView: Bool = false
-    @State private var showSettings: Bool = false
+    @State private var showModeTransitionAlert: Bool = false
     @AppStorage("LatentResonator.hasSeenOnboarding") private var hasSeenOnboarding = false
     @State private var showOnboarding = false
 
@@ -26,11 +26,20 @@ struct RootView: View {
                 LatentResonatorView(engine: engine)
             }
         }
-        .sheet(isPresented: $showSettings) {
-            SettingsView(engine: engine)
-        }
         .sheet(isPresented: $showOnboarding) {
             onboardingSheet
+        }
+        .alert("ENTERING PERFORM MODE", isPresented: $showModeTransitionAlert) {
+            Button("CONTINUE", role: .destructive) {
+                engine.stopProcessing()
+                showPerformanceView = true
+            }
+            Button("CANCEL", role: .cancel) {}
+        } message: {
+            Text(
+                "The current Setup session will stop. Lane parameters and presets are preserved -- "
+                + "you can return to Setup to adjust them at any time."
+            )
         }
         .background(KeyEventHandler(handler: handleKeyEvent))
         .onAppear {
@@ -98,21 +107,16 @@ struct RootView: View {
     private var modeToggleBar: some View {
         HStack(spacing: 0) {
             modeTab(label: "SETUP", isActive: !showPerformanceView, activeColor: DS.success) {
+                if showPerformanceView && engine.isProcessing {
+                    engine.processingStartedInPerformMode = true  // returning later won't stop
+                }
                 showPerformanceView = false
             }
+            .help("Sound design mode -- configure lanes, presets, and parameters (Tab)")
             modeTab(label: "PERFORM", isActive: showPerformanceView, activeColor: DS.warning) {
-                showPerformanceView = true
+                requestPerformMode()
             }
-
-            Button(action: { showSettings = true }) {
-                Image(systemName: "gearshape")
-                    .font(DS.font(11))
-                    .foregroundColor(DS.textSecondary)
-                    .frame(width: 32)
-                    .padding(.vertical, 10)
-            }
-            .buttonStyle(.plain)
-            .help("Settings (Cmd+,)")
+            .help("Live performance mode -- scenes, crossfader, step sequencer (Tab)")
         }
         .overlay(
             Rectangle().fill(DS.border).frame(height: DS.dividerHeight),
@@ -145,27 +149,25 @@ struct RootView: View {
 
     private func handleKeyEvent(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let hasCmd = flags.contains(.command)
         let hasShift = flags.contains(.shift)
         let noMod = flags.isEmpty
         let key = event.charactersIgnoringModifiers ?? ""
 
-        // Cmd+, -- Settings
-        if hasCmd && key == "," {
-            showSettings = true
-            return true
-        }
-
         // Tab -- Toggle SETUP / PERFORM
         if noMod && event.keyCode == 48 { // Tab key
-            showPerformanceView.toggle()
+            if showPerformanceView {
+                if engine.isProcessing { engine.processingStartedInPerformMode = true }
+                showPerformanceView = false
+            } else {
+                requestPerformMode()
+            }
             return true
         }
 
         // Space -- Transport toggle (Start/Stop)
         if noMod && event.keyCode == 49 { // Space
             if engine.bridgeProcess.state == .running || engine.isProcessing {
-                engine.toggleProcessing()
+                engine.toggleProcessing(initiatedFromPerformMode: showPerformanceView)
             }
             return true
         }
@@ -238,42 +240,39 @@ struct RootView: View {
             return true
         }
 
-        // . (period) -- Manual step advance
+        // . (period) -- Manual step advance (focus lane only)
         if noMod && key == "." {
-            let chain = engine.stepGrid.chainLength
-            guard chain > 0 else { return true }
-            let next = (engine.stepGrid.currentStepIndex + 1) % chain
-            var grid = engine.stepGrid
-            grid.currentStepIndex = next
-            engine.stepGrid = grid
-            engine.applyCurrentStepLocks()
+            guard let lane = engine.focusLane else { return true }
+            engine.advanceLaneManually(lane: lane)
             return true
         }
 
-        // , (comma) and Shift+, / Shift+. -- Chain length -/+
+        // , (comma) and Shift+, / Shift+. -- Chain length -/+ (focus lane)
         if noMod && key == "," {
-            engine.stepGrid.chainLength = max(
-                LRConstants.chainLengthRange.lowerBound,
-                engine.stepGrid.chainLength - 1
-            )
+            guard let lane = engine.focusLane else { return true }
+            var grid = lane.stepGrid
+            grid.chainLength = max(LRConstants.chainLengthRange.lowerBound, grid.chainLength - 1)
+            lane.stepGrid = grid
             return true
         }
 
-        // Up / Down -- BPM +/- 10 (when in time mode)
+        // Up / Down -- BPM +/- 10 (when in time mode, focus lane)
         if noMod && event.keyCode == 126 { // Up arrow
-            if engine.stepGrid.advanceMode == .time {
-                var grid = engine.stepGrid
+            guard let lane = engine.focusLane else { return true }
+            if lane.stepGrid.advanceMode == .time {
+                var grid = lane.stepGrid
                 grid.stepTimeBPM = min(grid.stepTimeBPM + 10, LRConstants.stepTimeBPMRange.upperBound)
-                engine.stepGrid = grid
+                lane.stepGrid = grid
                 engine.syncStepTimer()
             }
             return true
         }
         if noMod && event.keyCode == 125 { // Down arrow
-            if engine.stepGrid.advanceMode == .time {
-                var grid = engine.stepGrid
+            guard let lane = engine.focusLane else { return true }
+            if lane.stepGrid.advanceMode == .time {
+                var grid = lane.stepGrid
                 grid.stepTimeBPM = max(grid.stepTimeBPM - 10, LRConstants.stepTimeBPMRange.lowerBound)
-                engine.stepGrid = grid
+                lane.stepGrid = grid
                 engine.syncStepTimer()
             }
             return true
@@ -291,16 +290,26 @@ struct RootView: View {
             return true
         }
 
-        // Shift+. -- Chain length +
+        // Shift+. -- Chain length + (focus lane)
         if hasShift && key == "." {
-            engine.stepGrid.chainLength = min(
-                LRConstants.chainLengthRange.upperBound,
-                engine.stepGrid.chainLength + 1
-            )
+            guard let lane = engine.focusLane else { return true }
+            var grid = lane.stepGrid
+            grid.chainLength = min(LRConstants.chainLengthRange.upperBound, grid.chainLength + 1)
+            lane.stepGrid = grid
             return true
         }
 
         return false
+    }
+
+    private func requestPerformMode() {
+        if showPerformanceView { return }
+        // Only show stop-warning when Setup was playing. Returning from Perform→Setup→Perform keeps sound.
+        if engine.isProcessing && !engine.processingStartedInPerformMode {
+            showModeTransitionAlert = true
+        } else {
+            showPerformanceView = true
+        }
     }
 
     private func navigateFocusLane(direction: Int) {
@@ -357,20 +366,38 @@ private final class KeyEventNSView: NSView {
 // Configuration, keyboard shortcut reference, and MIDI CC map.
 // Three-tab layout: CONFIG, SHORTCUTS, MIDI.
 
-private struct SettingsView: View {
+struct LRSettingsView: View {
 
     @ObservedObject var engine: NeuralEngine
 
     @AppStorage(LRConstants.ModelConfig.userDefaultsKey)
     private var customModelPath: String = ""
 
-    @Environment(\.dismiss) private var dismiss
-
     private let defaultPath = LRConstants.ModelConfig.appSupportModelsDir.path
 
-    enum SettingsTab: String, CaseIterable { case config, shortcuts, midi }
+    enum SettingsTab: String, CaseIterable { case config, shortcuts, midi, osc }
     @State private var selectedTab: SettingsTab = .config
     @State private var midiLearnTarget: ControlParameter?
+
+    private var localIPAddress: String {
+        var address = "unknown"
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return address }
+        defer { freeifaddrs(ifaddr) }
+        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let sa = ptr.pointee.ifa_addr.pointee
+            guard sa.sa_family == UInt8(AF_INET) else { continue }
+            let name = String(cString: ptr.pointee.ifa_name)
+            guard name == "en0" || name == "en1" else { continue }
+            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            getnameinfo(ptr.pointee.ifa_addr, socklen_t(sa.sa_len),
+                        &hostname, socklen_t(hostname.count),
+                        nil, 0, NI_NUMERICHOST)
+            address = String(cString: hostname)
+            break
+        }
+        return address
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -393,6 +420,7 @@ private struct SettingsView: View {
                     case .config:    configPanel
                     case .shortcuts: shortcutsPanel
                     case .midi:      midiPanel
+                    case .osc:       oscPanel
                     }
                 }
                 .padding(20)
@@ -405,13 +433,11 @@ private struct SettingsView: View {
                     .font(DS.font(DS.fontCaption2))
                     .foregroundColor(DS.textDisabled)
                 Spacer()
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, DS.spacingMD)
         }
-        .frame(width: 600, height: 520)
+        .frame(width: 640, height: 560)
         .background(DS.surfaceOverlay)
     }
 
@@ -493,6 +519,39 @@ private struct SettingsView: View {
                     .font(DS.font(11))
                     .foregroundColor(DS.textPrimary.opacity(0.7))
             }
+
+            HStack {
+                Text("Inference Device")
+                    .font(DS.font(DS.fontBody, weight: .semibold))
+                    .foregroundColor(DS.textSecondary)
+                Spacer()
+                HStack(spacing: DS.spacingSM) {
+                    Circle()
+                        .fill(inferenceDeviceColor)
+                        .frame(width: DS.dotMD, height: DS.dotMD)
+                    Text(inferenceDeviceLabel)
+                        .font(DS.font(11))
+                        .foregroundColor(inferenceDeviceColor)
+                }
+            }
+        }
+    }
+
+    private var inferenceDeviceLabel: String {
+        switch engine.aceBridge.remoteDevice.lowercased() {
+        case "mps": return "MPS (GPU)"
+        case "cuda": return "CUDA (GPU)"
+        case "cpu": return "CPU"
+        default: return engine.aceBridge.status == .disconnected || engine.aceBridge.status == .error
+            ? "—" : engine.aceBridge.remoteDevice
+        }
+    }
+
+    private var inferenceDeviceColor: Color {
+        switch engine.aceBridge.remoteDevice.lowercased() {
+        case "mps", "cuda": return DS.success
+        case "cpu": return DS.warning
+        default: return DS.textTertiary
         }
     }
 
@@ -512,7 +571,7 @@ private struct SettingsView: View {
 
             shortcutSection("NAVIGATION", shortcuts: [
                 ("Tab", "Switch between SETUP and PERFORM views"),
-                ("Cmd + ,", "Open Settings"),
+                ("Cmd + ,", "Open Settings (macOS menu)"),
                 ("[", "Focus previous lane"),
                 ("]", "Focus next lane"),
             ])
@@ -569,7 +628,40 @@ private struct SettingsView: View {
                 Text("MIDI INPUT STATUS")
                     .font(DS.font(DS.fontCaption, weight: .bold))
                     .foregroundColor(DS.success.opacity(0.7))
-                Text("Latent Resonator listens on all connected MIDI sources. CC messages are routed to the focus lane. Connect any class-compliant USB or network MIDI controller.")
+                HStack(spacing: DS.spacingLG) {
+                    Text(
+                        "Latent Resonator listens on all connected MIDI sources. CC messages are routed to the "
+                        + "focus lane. Connect any class-compliant USB, network, or Bluetooth MIDI controller."
+                    )
+                        .font(DS.font(DS.fontCaption))
+                        .foregroundColor(DS.textTertiary)
+                }
+
+                HStack(spacing: DS.spacingMD) {
+                    HStack(spacing: DS.spacingSM) {
+                        Circle()
+                            .fill(midiActivityLedColor)
+                            .frame(width: DS.dotMD, height: DS.dotMD)
+                        Text("MIDI IN")
+                            .font(DS.font(DS.fontCaption, weight: .bold))
+                            .foregroundColor(DS.textSecondary)
+                    }
+                    .help("Flashes green when a valid MIDI message is received — proves connection is alive even if mapping is wrong.")
+
+                    Spacer()
+
+                    Button("OPEN MIDI STUDIO") {
+                        if let url = URL(string: "file:///System/Applications/Utilities/Audio%20MIDI%20Setup.app") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(DS.success)
+                    .buttonStyle(.plain)
+                    .help("Opens macOS Audio MIDI Setup. Go to Window > Show MIDI Studio > Bluetooth to pair devices.")
+                }
+
+                Text("For Bluetooth: 1. Click Open MIDI Studio. 2. Click Bluetooth Icon. 3. Connect Device.")
                     .font(DS.font(DS.fontCaption))
                     .foregroundColor(DS.textTertiary)
             }
@@ -590,7 +682,10 @@ private struct SettingsView: View {
                     .foregroundColor(DS.textTertiary)
                     .buttonStyle(.plain)
                 }
-                Text("All CC values are scaled linearly to the parameter range. Toggle parameters: CC < 64 = OFF, CC >= 64 = ON. Tap LEARN to assign a CC.")
+                Text(
+                    "All CC values are scaled linearly to the parameter range. Toggle parameters: "
+                    + "CC < 64 = OFF, CC >= 64 = ON. Tap LEARN to assign a CC."
+                )
                     .font(DS.font(DS.fontCaption))
                     .foregroundColor(DS.textTertiary)
             }
@@ -675,6 +770,184 @@ private struct SettingsView: View {
         return String(format: "%.1f -- %.1f", lo, hi)
     }
 
+    private var midiActivityLedColor: Color {
+        guard let last = engine.midiInput.lastActivityTime else { return DS.textTertiary }
+        return Date().timeIntervalSince(last) < 0.3 ? DS.success : DS.textTertiary
+    }
+
+    private var oscMonitorLedColor: Color {
+        if engine.oscInput.lastTrafficDescription.isEmpty { return DS.textTertiary }
+        return engine.oscInput.lastTrafficIsValid ? DS.success : DS.danger
+    }
+
+    // MARK: - OSC Panel
+
+    private var oscPanel: some View {
+        VStack(alignment: .leading, spacing: DS.spacingLG) {
+            VStack(alignment: .leading, spacing: DS.spacingSM) {
+                Text("OSC INPUT (UDP + TCP)")
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(DS.success.opacity(0.7))
+                Text(
+                    "Receive Open Sound Control messages over UDP or TCP. The service is advertised via Bonjour so compatible apps (TouchOSC, Max/MSP, SuperCollider, PureData, etc.) can discover it automatically on the network. Messages must use OSC format: /lr/<parameter> <float_value>"
+                )
+                    .font(DS.font(DS.fontCaption))
+                    .foregroundColor(DS.textTertiary)
+            }
+
+            LRDivider()
+
+            HStack(spacing: DS.spacingMD) {
+                Toggle("ENABLED", isOn: $engine.oscInput.isEnabled)
+                    .toggleStyle(.switch)
+                    .font(DS.font(DS.fontBody, weight: .semibold))
+                    .foregroundColor(DS.textSecondary)
+                    .onChange(of: engine.oscInput.isEnabled) { _, _ in
+                        engine.oscInput.saveSettings()
+                    }
+
+                Spacer()
+
+                Text("PORT")
+                    .font(DS.font(DS.fontBody, weight: .semibold))
+                    .foregroundColor(DS.textSecondary)
+
+                TextField("9000", value: $engine.oscInput.port, format: .number)
+                    .font(DS.font(11))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 70)
+                    .onSubmit {
+                        engine.oscInput.saveSettings()
+                        if engine.oscInput.isEnabled {
+                            engine.oscInput.start()
+                        }
+                    }
+            }
+
+            if engine.oscInput.isEnabled {
+                VStack(alignment: .leading, spacing: DS.spacingSM) {
+                    HStack(spacing: DS.spacingMD) {
+                        Circle()
+                            .fill(DS.success)
+                            .frame(width: DS.dotMD, height: DS.dotMD)
+                        Text("Listening on UDP+TCP port \(engine.oscInput.port)")
+                            .font(DS.font(DS.fontCaption, weight: .medium))
+                            .foregroundColor(DS.success.opacity(0.7))
+                        Spacer()
+                        if !engine.oscInput.lastReceivedAddress.isEmpty {
+                            Text("Last: \(engine.oscInput.lastReceivedAddress)")
+                                .font(DS.font(DS.fontCaption))
+                                .foregroundColor(DS.textTertiary)
+                        }
+                    }
+
+                    HStack(spacing: DS.spacingMD) {
+                        Text("YOUR IP:")
+                            .font(DS.font(DS.fontCaption, weight: .bold))
+                            .foregroundColor(DS.textTertiary)
+                        Text(localIPAddress)
+                            .font(DS.font(DS.fontCaption, weight: .bold))
+                            .foregroundColor(DS.success)
+                            .textSelection(.enabled)
+                        Text("-- use this address from your mobile OSC client")
+                            .font(DS.font(DS.fontCaption))
+                            .foregroundColor(DS.textTertiary)
+                    }
+
+                    Text(
+                        "If your device cannot connect, check: System Settings > Network > Firewall and "
+                        + "allow incoming connections for Latent Resonator."
+                    )
+                        .font(DS.font(DS.fontCaption))
+                        .foregroundColor(DS.warning.opacity(0.6))
+                }
+
+                LRDivider()
+
+                VStack(alignment: .leading, spacing: DS.spacingSM) {
+                    Text("OSC MONITOR")
+                        .font(DS.font(DS.fontCaption, weight: .bold))
+                        .foregroundColor(DS.success.opacity(0.7))
+                    HStack(spacing: DS.spacingMD) {
+                        Circle()
+                            .fill(oscMonitorLedColor)
+                            .frame(width: DS.dotMD, height: DS.dotMD)
+                        Text(oscMonitorLedColor == DS.success ? "Valid OSC" : "Invalid Protocol")
+                            .font(DS.font(DS.fontCaption, weight: .medium))
+                            .foregroundColor(oscMonitorLedColor.opacity(0.8))
+                        Spacer()
+                    }
+                    if !engine.oscInput.lastTrafficDescription.isEmpty {
+                        Text(engine.oscInput.lastTrafficDescription)
+                            .font(DS.font(DS.fontCaption2))
+                            .foregroundColor(DS.textSecondary)
+                            .lineLimit(2)
+                    }
+                    Text("If LED is Red, your app is sending MIDI/Raw data, not OSC. Check app settings.")
+                        .font(DS.font(DS.fontCaption))
+                        .foregroundColor(DS.warning.opacity(0.6))
+                }
+            }
+
+            LRDivider()
+
+            VStack(alignment: .leading, spacing: DS.spacingSM) {
+                Text("OSC ADDRESS MAP")
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(DS.success.opacity(0.7))
+                Text(
+                    "All addresses use the /lr/ prefix with a single float argument. Values are clamped to the "
+                    + "parameter range. Toggles: >= 0.5 = ON, < 0.5 = OFF."
+                )
+                    .font(DS.font(DS.fontCaption))
+                    .foregroundColor(DS.textTertiary)
+            }
+
+            oscAddressTable
+        }
+    }
+
+    private var oscAddressTable: some View {
+        VStack(spacing: 1) {
+            HStack(spacing: 0) {
+                Text("ADDRESS")
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(DS.textPrimary)
+                    .frame(width: 200, alignment: .leading)
+                Text("PARAMETER")
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(DS.textPrimary)
+                    .frame(width: 150, alignment: .leading)
+                Text("RANGE")
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(DS.textPrimary)
+                Spacer()
+            }
+            .padding(.vertical, 2)
+            .padding(.horizontal, DS.spacingSM)
+            .background(Color.white.opacity(0.05))
+
+            ForEach(ControlParameter.allCases, id: \.rawValue) { param in
+                HStack(spacing: 0) {
+                    Text("/lr/\(param.rawValue)")
+                        .font(DS.font(DS.fontCaption, weight: .medium))
+                        .foregroundColor(DS.success.opacity(0.8))
+                        .frame(width: 200, alignment: .leading)
+                    Text(param.rawValue)
+                        .font(DS.font(DS.fontCaption, weight: .medium))
+                        .foregroundColor(DS.textSecondary)
+                        .frame(width: 150, alignment: .leading)
+                    Text(param.isToggle ? "0 / 1" : formatRange(param.floatRange))
+                        .font(DS.font(DS.fontCaption))
+                        .foregroundColor(DS.textTertiary)
+                    Spacer()
+                }
+                .padding(.vertical, 2)
+                .padding(.horizontal, DS.spacingSM)
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     private var resolvedPathDescription: String {
@@ -707,3 +980,8 @@ private struct SettingsView: View {
         }
     }
 }
+
+// MARK: - Bluetooth MIDI View (CoreAudioKit wrapper)
+//
+// Note: CABTMIDICentralViewController is not available in macOS AppKit (only Catalyst/iOS).
+// We launch Audio MIDI Setup instead.

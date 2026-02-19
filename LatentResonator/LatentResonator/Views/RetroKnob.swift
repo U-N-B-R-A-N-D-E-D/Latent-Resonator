@@ -15,6 +15,7 @@ struct RetroKnob: View {
     var accentColor: Color = .orange
     var size: CGFloat = LRConstants.knobSize
     var modulationRange: ClosedRange<Float>? = nil
+    var helpText: String? = nil
 
     @State private var previousTranslation: CGFloat = 0
     @State private var isHovered = false
@@ -120,6 +121,7 @@ struct RetroKnob: View {
                 .foregroundColor(DS.textSecondary)
                 .tracking(1)
         }
+        .ifLet(helpText) { view, text in view.help(text) }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
         .accessibilityValue(String(format: "%.1f", value))

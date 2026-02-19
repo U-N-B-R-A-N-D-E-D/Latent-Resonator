@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import AVFoundation
 import CoreAudio
 import Combine
@@ -88,7 +89,8 @@ final class AudioRecorder {
         recordingURL: URL,
         iterationCount: Int,
         laneName: String,
-        parameters: [String: Any]
+        parameters: [String: Any],
+        featureLog: [SpectralFeatureSnapshot] = []
     ) {
         let meta: [String: Any] = [
             "lane": laneName,
@@ -105,6 +107,19 @@ final class AudioRecorder {
         if let data = try? JSONSerialization.data(withJSONObject: meta, options: .prettyPrinted) {
             try? data.write(to: sidecarURL)
             print(">> AudioRecorder: Metadata exported -> \(sidecarURL.lastPathComponent)")
+        }
+
+        // Export spectral feature telemetry as a separate CSV for analysis tools
+        if !featureLog.isEmpty {
+            let csvURL = recordingURL
+                .deletingPathExtension()
+                .appendingPathExtension("features.csv")
+            var csv = "iteration,centroid,flatness,flux,promptPhase,inputStrength,timestamp\n"
+            for s in featureLog {
+                csv += "\(s.iteration),\(s.centroid),\(s.flatness),\(s.flux),\(s.promptPhase),\(s.inputStrength),\(s.timestamp)\n"
+            }
+            try? csv.write(to: csvURL, atomically: true, encoding: .utf8)
+            print(">> AudioRecorder: Feature log exported -> \(csvURL.lastPathComponent)")
         }
     }
 }
@@ -161,6 +176,10 @@ final class NeuralEngine: ObservableObject {
     private var lastStartTime: Date?
     private let startDebounceInterval: TimeInterval = 3.0
 
+    /// True when processing was started in Perform mode and user briefly switched to Setup.
+    /// Used to avoid stopping when returning to Perform (no warning, keep playing).
+    var processingStartedInPerformMode: Bool = false
+
     // MARK: - ACE-Step Bridge (Shared)
 
     /// HTTP bridge to the Python ACE-Step inference server.
@@ -180,9 +199,12 @@ final class NeuralEngine: ObservableObject {
     // MARK: - Performance / Motherbase
 
     @Published var sceneBank: SceneBank = SceneBank()
-    @Published var stepGrid: StepGrid = StepGrid()
     @Published var pLockEditingStepIndex: Int? = nil
     @Published var focusLaneId: UUID?
+
+    /// Step grid for the focused lane (Focus Lane UX). Each lane has its own stepGrid;
+    /// this exposes the focused lane's grid for UI binding. Nil when no lanes exist.
+    var focusStepGrid: StepGrid? { focusLane?.stepGrid }
 
 
     /// Total iteration count across all lanes (for step advance).
@@ -207,6 +229,14 @@ final class NeuralEngine: ObservableObject {
 
     private let audioEngine = AVAudioEngine()
     private let masterMixerNode = AVAudioMixerNode()
+
+    // MARK: - Audio Input (Shared Ring Buffer for .audioInput Excitation)
+
+    /// Shared ring buffer fed by the hardware input tap. Lanes configured
+    /// as .audioInput read from this buffer instead of their oscillator.
+    let audioInputBuffer = CircularAudioBuffer(capacity: LRConstants.audioInputBufferCapacity)
+    /// Whether an input tap is currently installed on the audio engine.
+    private var inputTapInstalled: Bool = false
 
     /// H19: Pre-allocated lane slots. All nodes attached to the graph at init.
     /// No audioEngine.attach/connect/stop calls ever happen after engine.start().
@@ -235,6 +265,7 @@ final class NeuralEngine: ObservableObject {
     /// CoreMIDI input manager -- routes CC messages through ParameterRouter
     /// into the focus lane's parameters and engine-global controls.
     let midiInput = MIDIInputManager()
+    var oscInput = OSCInputManager()
 
     // MARK: - Processing Format
 
@@ -247,34 +278,68 @@ final class NeuralEngine: ObservableObject {
 
     // MARK: - MIDI Routing Setup
 
-    /// Connect MIDI CC input to the focus lane and engine-global parameters.
+    /// Shared routing logic for both MIDI CC and OSC input.
+    private func applyParameter(_ param: ControlParameter, value: Float) {
+        let lane: ResonatorLane? = (param == .crossfader) ? nil : focusLane
+        guard param == .crossfader || lane != nil else { return }
+
+        switch param {
+        case .volume:              lane!.volume = value
+        case .guidanceScale:       lane!.guidanceScale = value
+        case .feedback:            lane!.feedbackAmount = value
+        case .texture:             lane!.texture = value
+        case .chaos:               lane!.chaos = value
+        case .warmth:              lane!.warmth = value
+        case .filterCutoff:        lane!.filterCutoff = value
+        case .filterResonance:     lane!.filterResonance = value
+        case .delayMix:            lane!.delayMix = value
+        case .delayTime:           lane!.delayTime = value
+        case .delayFeedback:       lane!.delayFeedback = value
+        case .bitCrushDepth:       lane!.bitCrushDepth = value
+        case .resonatorNote:       lane!.resonatorNote = value
+        case .resonatorDecay:      lane!.resonatorDecay = value
+        case .entropy:             lane!.entropyLevel = value
+        case .granularity:         lane!.granularity = value
+        case .shift:               lane!.shift = value
+        case .inputStrength:       lane!.inputStrength = value
+        case .inferenceSteps:      lane!.inferenceSteps = Int(value.rounded())
+        case .sineFrequency:       lane!.sineFrequency = value
+        case .pulseWidth:          lane!.pulseWidth = value
+        case .lfoRate:             lane!.lfoRate = value
+        case .lfoDepth:            lane!.lfoDepth = value
+        case .crossfader:
+            crossfaderPosition = value
+            applyCrossfader()
+        case .mute:
+            lane!.isMuted = value >= 0.5
+            updateLaneMixerState()
+        case .solo:
+            lane!.isSoloed = value >= 0.5
+            updateLaneMixerState()
+        case .spectralMorphActive: lane!.spectralFreezeActive = value >= 0.5
+        case .autoDecayToggle:     lane!.autoDecayEnabled = value >= 0.5
+        case .promptEvolution:     lane!.promptEvolutionEnabled = value >= 0.5
+        case .inferMethodSDE:      lane!.inferMethod = value >= 0.5 ? "sde" : "ode"
+        case .laneRecord:
+            if value >= 0.5 && !lane!.isLaneRecording { lane!.toggleLaneRecording() }
+            else if value < 0.5 && lane!.isLaneRecording { lane!.toggleLaneRecording() }
+        case .archiveRecall:
+            let idx = Int(value.rounded())
+            lane!.archiveRecallIndex = idx < lane!.iterationArchive.count ? idx : nil
+        }
+    }
+
+    /// Connect MIDI CC and OSC input to the focus lane and engine-global parameters.
     private func setupMIDIRouting() {
         midiInput.onParameterChange = { [weak self] param, value in
-            guard let self = self else { return }
-            guard let lane = self.focusLane else { return }
-
-            switch param {
-            case .volume:              lane.volume = value
-            case .guidanceScale:       lane.guidanceScale = value
-            case .feedback:            lane.feedbackAmount = value
-            case .texture:             lane.texture = value
-            case .chaos:               lane.chaos = value
-            case .warmth:              lane.warmth = value
-            case .filterCutoff:        lane.filterCutoff = value
-            case .filterResonance:     lane.filterResonance = value
-            case .delayMix:            lane.delayMix = value
-            case .delayTime:           lane.delayTime = value
-            case .delayFeedback:       lane.delayFeedback = value
-            case .bitCrushDepth:       lane.bitCrushDepth = value
-            case .entropy:             lane.entropyLevel = value
-            case .granularity:         lane.granularity = value
-            case .crossfader:          self.crossfaderPosition = value
-            case .mute:                lane.isMuted = value >= 0.5
-            case .solo:                lane.isSoloed = value >= 0.5
-            case .spectralMorphActive: lane.spectralFreezeActive = value >= 0.5
-            }
+            self?.applyParameter(param, value: value)
         }
         midiInput.start()
+
+        oscInput.onParameterChange = { [weak self] param, value in
+            self?.applyParameter(param, value: value)
+        }
+        if oscInput.isEnabled { oscInput.start() }
     }
 
     init() {
@@ -290,6 +355,7 @@ final class NeuralEngine: ObservableObject {
         for _ in 0..<LRConstants.maxLanes {
             let slot = ResonatorLane(preset: defaultPreset, bridge: aceBridge)
             slot.coreMLInference = coreMLInference
+            slot.audioInputBuffer = audioInputBuffer
             slot.isMuted = true
             laneSlots.append(slot)
 
@@ -321,7 +387,14 @@ final class NeuralEngine: ObservableObject {
         if let saved = PerformanceStateStore.load() {
             sceneBank = saved.sceneBank
             sceneBank.ensureCapacity()
-            stepGrid = saved.stepGrid
+            for (i, lane) in lanes.enumerated() {
+                if i < saved.stepGrids.count {
+                    lane.stepGrid = saved.stepGrids[i]
+                } else if !saved.stepGrids.isEmpty {
+                    // Migration: legacy single grid -> copy to extra lanes
+                    lane.stepGrid = saved.stepGrids[0]
+                }
+            }
             crossfaderSceneAIndex = saved.crossfaderSceneAIndex
             crossfaderSceneBIndex = saved.crossfaderSceneBIndex
         } else {
@@ -350,6 +423,24 @@ final class NeuralEngine: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Forward aceBridge changes so Settings > Config device indicator updates
+        aceBridge.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        // Forward midiInput changes so Settings > MIDI activity LED updates
+        midiInput.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        // Forward oscInput changes so Settings > OSC Monitor updates
+        oscInput.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
         // Wire step grid advance to lane iteration changes (not SwiftUI onChange)
         subscribeLaneIterations()
         syncStepTimer()
@@ -359,6 +450,8 @@ final class NeuralEngine: ObservableObject {
         stepTimer?.cancel()
         savePerformanceState()
         midiInput.stop()
+        oscInput.saveSettings()
+        oscInput.stop()
         aceBridge.stopHealthPolling()
         bridgeProcess.terminateServer()
         if isProcessing {
@@ -369,11 +462,11 @@ final class NeuralEngine: ObservableObject {
 
     // MARK: - Performance State Persistence
 
-    /// Save the current performance state (scenes, step grid, crossfader) to disk.
+    /// Save the current performance state (scenes, step grids per lane, crossfader) to disk.
     func savePerformanceState() {
         let snapshot = PerformanceStateSnapshot(
             sceneBank: sceneBank,
-            stepGrid: stepGrid,
+            stepGrids: lanes.map { $0.stepGrid },
             crossfaderSceneAIndex: crossfaderSceneAIndex,
             crossfaderSceneBIndex: crossfaderSceneBIndex
         )
@@ -539,8 +632,24 @@ final class NeuralEngine: ObservableObject {
         slot.laneMixer.outputVolume = slot.volume
         lanes.append(slot)
 
+        // Sync scene bank: new lane gets its own fresh snapshot, not another lane's (Ley 4)
+        var bank = sceneBank
+        let freshSnapshot = slot.makeSnapshot()
+        for i in bank.scenes.indices {
+            while bank.scenes[i].laneSnapshots.count < lanes.count {
+                bank.scenes[i].laneSnapshots.append(freshSnapshot)
+            }
+        }
+        sceneBank = bank
+
         // If engine is already running, start the lane's inference loop
         if isProcessing {
+            if slot.excitationMode == .audioInput && !inputTapInstalled {
+                audioEngine.stop()
+                updateAudioInputTap()
+                audioEngine.prepare()
+                try? audioEngine.start()
+            }
             slot.installCaptureTap()
             slot.startInferenceLoop()
         }
@@ -566,8 +675,31 @@ final class NeuralEngine: ObservableObject {
         lane.resetState()
 
         lanes.remove(at: index)
+
+        // Sync scene bank: remove this lane's snapshot so indices stay aligned (Ley 4)
+        var bank = sceneBank
+        for i in bank.scenes.indices {
+            if index < bank.scenes[i].laneSnapshots.count {
+                bank.scenes[i].laneSnapshots.remove(at: index)
+            }
+            // Clear or decrement feedbackSourceLaneIndex pointing to removed lane
+            for j in bank.scenes[i].laneSnapshots.indices {
+                var snap = bank.scenes[i].laneSnapshots[j]
+                if let src = snap.feedbackSourceLaneIndex {
+                    if src == index {
+                        snap.feedbackSourceLaneIndex = nil
+                    } else if src > index {
+                        snap.feedbackSourceLaneIndex = src - 1
+                    }
+                    bank.scenes[i].laneSnapshots[j] = snap
+                }
+            }
+        }
+        sceneBank = bank
+
         print(">> Neural Engine: Removed lane '\(lane.name)' (total: \(lanes.count))")
         subscribeLaneIterations()
+        updateLaneMixerState()
     }
 
     /// Reorder lanes (for UI drag).
@@ -609,8 +741,16 @@ final class NeuralEngine: ObservableObject {
         for (i, lane) in lanes.enumerated() {
             if i < scene.laneSnapshots.count {
                 lane.applySnapshot(scene.laneSnapshots[i])
+                // Restore cross-lane feedback from stored index
+                if let srcIdx = scene.laneSnapshots[i].feedbackSourceLaneIndex,
+                   srcIdx >= 0, srcIdx < lanes.count {
+                    lane.feedbackSourceLaneId = lanes[srcIdx].id
+                } else {
+                    lane.feedbackSourceLaneId = nil
+                }
             }
         }
+        updateFeedbackRouting()
         sceneBank.currentSceneIndex = index
         updateLaneMixerState()
     }
@@ -642,16 +782,53 @@ final class NeuralEngine: ObservableObject {
             filterModeRaw: t < 0.5 ? start.filterModeRaw : end.filterModeRaw,
             saturationModeRaw: t < 0.5 ? start.saturationModeRaw : end.saturationModeRaw,
             spectralFreezeActive: t < 0.5 ? start.spectralFreezeActive : end.spectralFreezeActive,
-            denoiseStrength: lerp(start.denoiseStrength ?? 1.0, end.denoiseStrength ?? 1.0)
+            denoiseStrength: lerp(start.denoiseStrength ?? 1.0, end.denoiseStrength ?? 1.0),
+            autoDecayEnabled: t < 0.5 ? start.autoDecayEnabled : end.autoDecayEnabled,
+            feedbackSourceLaneIndex: t < 0.5 ? start.feedbackSourceLaneIndex : end.feedbackSourceLaneIndex,
+            archiveRecallIndex: t < 0.5 ? start.archiveRecallIndex : end.archiveRecallIndex,
+            saturationMorph: lerp(start.saturationMorph ?? 0.0, end.saturationMorph ?? 0.0)
         )
+    }
+
+    /// Capture focus lane's current parameters into step at index.
+    /// Lets you record live tweaks (XY pad, knobs) into the sequencer.
+    /// Per-lane: only the focused lane's step grid is modified.
+    func captureCurrentToStep(at index: Int) {
+        guard let lane = focusLane else { return }
+        guard index >= 0, index < lane.stepGrid.steps.count else { return }
+        let existing = lane.stepGrid.step(at: index) ?? PerformanceStep()
+        let step = PerformanceStep(
+            trigType: existing.trigType,
+            probability: existing.probability,
+            cfg: lane.guidanceScale,
+            feedback: lane.feedbackAmount,
+            promptPhase: lane.promptPhaseOverride,
+            denoiseStrength: lane.denoiseStrengthDefault,
+            texture: lane.texture,
+            chaos: lane.chaos,
+            warmth: lane.warmth,
+            filterCutoff: lane.filterCutoff,
+            filterResonance: lane.filterResonance,
+            excitationMode: lane.excitationMode.rawValue,
+            delayMix: lane.delayMix,
+            bitCrushDepth: lane.bitCrushDepth,
+            microtiming: existing.microtiming
+        )
+        lane.stepGrid.setStep(step, at: index)
     }
 
     /// Capture current lane state into scene at index.
     func captureCurrentToScene(at index: Int) {
         guard index >= 0, index < sceneBank.scenes.count else { return }
         var snapshots: [LaneSnapshot] = []
-        for lane in lanes {
-            snapshots.append(lane.makeSnapshot())
+        for (_, lane) in lanes.enumerated() {
+            var snap = lane.makeSnapshot()
+            // Resolve cross-lane feedback UUID -> index for serialization
+            if let srcId = lane.feedbackSourceLaneId,
+               let srcIdx = lanes.firstIndex(where: { $0.id == srcId }) {
+                snap.feedbackSourceLaneIndex = srcIdx
+            }
+            snapshots.append(snap)
         }
         var bank = sceneBank
         while bank.scenes.count <= index {
@@ -670,8 +847,7 @@ final class NeuralEngine: ObservableObject {
     private let stepTimerQueue = DispatchQueue(label: "com.latentresonator.stepTimer", qos: .userInteractive)
 
     /// Subscribe to each active lane's iteration count so step advance fires
-    /// directly from the engine, not relying on SwiftUI onChange (which can't
-    /// observe computed properties derived from child ObservableObjects).
+    /// per-lane. Each lane advances its own step grid independently (polirhythm).
     func subscribeLaneIterations() {
         laneIterationCancellables.removeAll()
         for lane in lanes {
@@ -680,20 +856,21 @@ final class NeuralEngine: ObservableObject {
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] newCount in
                     guard newCount > 0 else { return }
-                    self?.advanceStepToMatchGlobalCycle()
+                    self?.advanceLaneStep(lane: lane)
                 }
                 .store(in: &laneIterationCancellables)
         }
     }
 
-    /// Start or stop the step timer based on the current advance mode.
+    /// Start or stop the step timer based on the focus lane's advance mode.
+    /// Uses focus lane's BPM; when timer fires, advances all lanes.
     func syncStepTimer() {
         stepTimer?.cancel()
         stepTimer = nil
 
-        guard stepGrid.advanceMode == .time else { return }
+        guard let grid = focusStepGrid, grid.advanceMode == .time else { return }
 
-        let bpm = Double(stepGrid.stepTimeBPM)
+        let bpm = Double(grid.stepTimeBPM)
         let intervalNs = UInt64((60.0 / bpm) * 1_000_000_000)
         print(">> StepTimer: Starting at \(bpm) BPM (interval: \(String(format: "%.2f", 60.0 / bpm))s)")
 
@@ -704,165 +881,188 @@ final class NeuralEngine: ObservableObject {
         timer.setEventHandler { [weak self] in
             guard let self = self, self.isProcessing else { return }
             DispatchQueue.main.async {
-                self.advanceStep()
+                self.advanceAllLanesSteps()
             }
         }
         timer.resume()
         stepTimer = timer
     }
 
-    /// Advance step grid to match global cycle (iteration-based).
-    /// Trig-aware: respects chainLength, probability gate, skip, and one-shot logic.
-    func advanceStepToMatchGlobalCycle() {
-        guard stepGrid.advanceMode == .iteration else { return }
-        let total = globalCycleCount
-        let chain = stepGrid.chainLength
+    /// Advance one lane's step grid (iteration-based). Per-lane: each lane advances
+    /// based on its own iteration count, enabling polirhythm.
+    func advanceLaneStep(lane: ResonatorLane) {
+        let grid = lane.stepGrid
+        guard grid.advanceMode == .iteration else { return }
+        let total = lane.iterationCount
+        let chain = grid.chainLength
         guard chain > 0 else { return }
 
-        let candidateIndex = (total / stepGrid.stepAdvanceDivisor) % chain
-        guard candidateIndex != stepGrid.currentStepIndex else { return }
+        let candidateIndex = (total / grid.stepAdvanceDivisor) % chain
+        guard candidateIndex != grid.currentStepIndex else { return }
 
-        advanceToStep(candidateIndex)
+        advanceLaneToStep(lane: lane, candidateIndex: candidateIndex)
     }
 
-    /// Common step-advance logic shared by iteration, time, and manual modes.
-    private func advanceToStep(_ candidateIndex: Int) {
-        let chain = stepGrid.chainLength
+    /// Common step-advance logic for one lane. Applies that lane's step locks to that lane only.
+    private func advanceLaneToStep(lane: ResonatorLane, candidateIndex: Int) {
+        var grid = lane.stepGrid
+        let chain = grid.chainLength
         guard chain > 0, candidateIndex >= 0, candidateIndex < chain else { return }
-        guard candidateIndex != stepGrid.currentStepIndex else { return }
+        guard candidateIndex != grid.currentStepIndex else { return }
 
-        let previousIndex = stepGrid.currentStepIndex
+        let previousIndex = grid.currentStepIndex
 
-        var grid = stepGrid
         grid.currentStepIndex = candidateIndex
 
         if candidateIndex < previousIndex {
             grid.oneShotFired.removeAll()
         }
 
-        stepGrid = grid
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            lane.stepGrid = grid
+        }
 
-        guard let step = stepGrid.step(at: candidateIndex) else { return }
+        guard let step = grid.step(at: candidateIndex) else { return }
 
         if step.trigType == .skip { return }
-        if step.trigType == .oneShot && stepGrid.oneShotFired.contains(candidateIndex) { return }
+        if step.trigType == .oneShot && grid.oneShotFired.contains(candidateIndex) { return }
 
         if let prob = step.probability, prob < 1.0 {
             if Float.random(in: 0...1) > prob { return }
         }
 
-        applyCurrentStepLocks()
+        applyLaneStepLocks(lane: lane)
 
         if step.trigType == .oneShot {
-            stepGrid.oneShotFired.insert(candidateIndex)
+            var g = lane.stepGrid
+            g.oneShotFired.insert(candidateIndex)
+            lane.stepGrid = g
         }
     }
 
-    /// Step advance for `.time` mode -- moves to next step in chain.
-    private func advanceStep() {
-        let chain = stepGrid.chainLength
-        guard chain > 0 else { return }
-        let next = (stepGrid.currentStepIndex + 1) % chain
-
-        // Microtiming: offset the actual step fire by a fraction of the step interval.
-        // Range: -0.5...0.5 step units. Negative = push (early), positive = drag (late).
-        if let step = stepGrid.step(at: next), abs(step.microtiming) > 0.001,
-           stepGrid.advanceMode == .time {
-            let bpm = Double(stepGrid.stepTimeBPM)
-            let stepInterval = 60.0 / bpm
-            let offsetSeconds = step.microtiming * stepInterval
-            let delayNs = max(0, Int(offsetSeconds * 1_000_000_000))
-            stepTimerQueue.asyncAfter(deadline: .now() + .nanoseconds(delayNs)) { [weak self] in
-                DispatchQueue.main.async {
-                    self?.advanceToStep(next)
-                }
-            }
-        } else {
-            advanceToStep(next)
-        }
-    }
-
-    /// Apply current step's parameter locks to all lanes (13 lockable params).
-    func applyCurrentStepLocks() {
-        guard let step = stepGrid.step(at: stepGrid.currentStepIndex) else { return }
+    /// Step advance for `.time` mode -- advances all lanes to next step.
+    private func advanceAllLanesSteps() {
         for lane in lanes {
-            // -- Inference locks --
-            if let v = step.cfg {
-                lane.guidanceScale = min(max(v, LRConstants.cfgScaleRange.lowerBound), LRConstants.cfgScaleRange.upperBound)
-            }
-            if let v = step.feedback {
-                lane.feedbackAmount = min(max(v, 0), 1)
-            }
-            if let phase = step.promptPhase {
-                lane.promptPhaseOverride = min(max(phase, 1), 3)
-            }
+            let grid = lane.stepGrid
+            let chain = grid.chainLength
+            guard chain > 0 else { continue }
+            let next = (grid.currentStepIndex + 1) % chain
 
-            // -- DSP / macro locks (clamped to each parameter's native range) --
-            if let v = step.texture       { lane.texture = min(max(v, 0), 1) }
-            if let v = step.chaos         { lane.chaos = min(max(v, 0), 1) }
-            if let v = step.warmth        { lane.warmth = min(max(v, 0), 1) }
-            if let v = step.filterCutoff  {
-                lane.filterCutoff = min(max(v, LRConstants.filterCutoffRange.lowerBound),
-                                        LRConstants.filterCutoffRange.upperBound)
+            if let step = grid.step(at: next), abs(step.microtiming) > 0.001,
+               let focusGrid = focusStepGrid, focusGrid.advanceMode == .time {
+                let bpm = Double(focusGrid.stepTimeBPM)
+                let stepInterval = 60.0 / bpm
+                let offsetSeconds = step.microtiming * stepInterval
+                let delayNs = max(0, Int(offsetSeconds * 1_000_000_000))
+                stepTimerQueue.asyncAfter(deadline: .now() + .nanoseconds(delayNs)) { [weak self] in
+                    DispatchQueue.main.async {
+                        self?.advanceLaneToStep(lane: lane, candidateIndex: next)
+                    }
+                }
+            } else {
+                advanceLaneToStep(lane: lane, candidateIndex: next)
             }
-            if let v = step.filterResonance {
-                lane.filterResonance = min(max(v, LRConstants.filterResonanceRange.lowerBound),
-                                           LRConstants.filterResonanceRange.upperBound)
-            }
-            if let v = step.excitationMode,
-               let mode = ExcitationMode(rawValue: v) {
-                lane.excitationMode = mode
-            }
-            if let v = step.delayMix      { lane.delayMix = min(max(v, 0), 1) }
-            if let v = step.bitCrushDepth {
-                lane.bitCrushDepth = min(max(v, LRConstants.bitCrushRange.lowerBound),
-                                         LRConstants.bitCrushRange.upperBound)
-            }
-
-            // -- Trig behavior --
-            if step.trigType == .lock {
-                lane.dspOnlyForNextCycle = true
-            }
-
-            let effectiveDenoise: Float = {
-                if step.trigType == .lock { return 0 }
-                if let s = step.denoiseStrength { return min(max(s, 0), 1) }
-                return min(max(lane.denoiseStrengthDefault, 0), 1)
-            }()
-            lane.denoiseStrengthForInference = effectiveDenoise
         }
+    }
+
+    /// Manual step advance for one lane (tap or keyboard). Advances to next step and applies locks.
+    func advanceLaneManually(lane: ResonatorLane) {
+        let chain = lane.stepGrid.chainLength
+        guard chain > 0 else { return }
+        let next = (lane.stepGrid.currentStepIndex + 1) % chain
+        advanceLaneToStep(lane: lane, candidateIndex: next)
+    }
+
+    /// Apply current step's parameter locks to one lane only (per-lane independence).
+    func applyLaneStepLocks(lane: ResonatorLane) {
+        let grid = lane.stepGrid
+        guard let step = grid.step(at: grid.currentStepIndex) else { return }
+
+        // -- Inference locks --
+        if let v = step.cfg {
+            lane.guidanceScale = min(max(v, LRConstants.cfgScaleRange.lowerBound), LRConstants.cfgScaleRange.upperBound)
+        }
+        if let v = step.feedback {
+            lane.feedbackAmount = min(max(v, 0), 1)
+        }
+        if let phase = step.promptPhase {
+            lane.promptPhaseOverride = min(max(phase, 1), 3)
+        }
+
+        // -- DSP / macro locks (clamped to each parameter's native range) --
+        if let v = step.texture       { lane.texture = min(max(v, 0), 1) }
+        if let v = step.chaos         { lane.chaos = min(max(v, 0), 1) }
+        if let v = step.warmth        { lane.warmth = min(max(v, 0), 1) }
+        if let v = step.filterCutoff  {
+            lane.filterCutoff = min(max(v, LRConstants.filterCutoffRange.lowerBound),
+                                    LRConstants.filterCutoffRange.upperBound)
+        }
+        if let v = step.filterResonance {
+            lane.filterResonance = min(max(v, LRConstants.filterResonanceRange.lowerBound),
+                                       LRConstants.filterResonanceRange.upperBound)
+        }
+        if let v = step.excitationMode,
+           let mode = ExcitationMode(rawValue: v) {
+            lane.excitationMode = mode
+        }
+        if let v = step.delayMix      { lane.delayMix = min(max(v, 0), 1) }
+        if let v = step.bitCrushDepth {
+            lane.bitCrushDepth = min(max(v, LRConstants.bitCrushRange.lowerBound),
+                                     LRConstants.bitCrushRange.upperBound)
+        }
+
+        // -- Trig behavior --
+        if step.trigType == .lock {
+            lane.dspOnlyForNextCycle = true
+        }
+
+        let effectiveDenoise: Float = {
+            if step.trigType == .lock { return 0 }
+            if let s = step.denoiseStrength { return min(max(s, 0), 1) }
+            return min(max(lane.denoiseStrengthDefault, 0), 1)
+        }()
+        lane.denoiseStrengthForInference = effectiveDenoise
     }
 
     // MARK: - Step Lock API (Sequencer v2)
+    //
+    // All step mutations operate on the focus lane's step grid only.
 
     /// Set a single Float? lock on a step via KeyPath.
     func setStepLock(at index: Int, _ keyPath: WritableKeyPath<PerformanceStep, Float?>, value: Float?) {
-        guard index >= 0, index < stepGrid.steps.count else { return }
-        stepGrid.steps[index][keyPath: keyPath] = value
+        guard let lane = focusLane else { return }
+        guard index >= 0, index < lane.stepGrid.steps.count else { return }
+        lane.stepGrid.steps[index][keyPath: keyPath] = value
     }
 
     /// Set trig type for a step.
     func setStepTrigType(at index: Int, _ type: TrigType) {
-        guard index >= 0, index < stepGrid.steps.count else { return }
-        stepGrid.steps[index].trigType = type
+        guard let lane = focusLane else { return }
+        guard index >= 0, index < lane.stepGrid.steps.count else { return }
+        lane.stepGrid.steps[index].trigType = type
     }
 
     /// Set prompt phase lock for a step (Int?, not Float).
     func setStepPromptPhase(at index: Int, phase: Int?) {
-        guard index >= 0, index < stepGrid.steps.count else { return }
-        stepGrid.steps[index].promptPhase = phase
+        guard let lane = focusLane else { return }
+        guard index >= 0, index < lane.stepGrid.steps.count else { return }
+        lane.stepGrid.steps[index].promptPhase = phase
     }
 
     /// Set probability gate for a step (nil = always fire).
     func setStepProbability(at index: Int, probability: Float?) {
-        guard index >= 0, index < stepGrid.steps.count else { return }
-        stepGrid.steps[index].probability = probability
+        guard let lane = focusLane else { return }
+        guard index >= 0, index < lane.stepGrid.steps.count else { return }
+        lane.stepGrid.steps[index].probability = probability
     }
 
     /// Clear all locks on a step (reset to default note trig).
     func clearStep(at index: Int) {
-        guard index >= 0, index < stepGrid.steps.count else { return }
-        stepGrid.steps[index] = PerformanceStep()
+        guard let lane = focusLane else { return }
+        guard index >= 0, index < lane.stepGrid.steps.count else { return }
+        lane.stepGrid.steps[index] = PerformanceStep()
     }
 
     /// Apply crossfader blend between scene A and B (position 0 = A, 1 = B).
@@ -883,7 +1083,9 @@ final class NeuralEngine: ObservableObject {
 
     // MARK: - Processing Control
 
-    func toggleProcessing() {
+    /// - Parameter initiatedFromPerformMode: True when START was pressed in Perform view.
+    ///   Used so returning from Setup to Perform doesn't stop (no warning).
+    func toggleProcessing(initiatedFromPerformMode: Bool = false) {
         if isProcessing {
             // Debounce: ignore stop for 3s after start so first inference isn't killed by accidental tap
             if let t = lastStartTime, Date().timeIntervalSince(t) < startDebounceInterval {
@@ -892,15 +1094,21 @@ final class NeuralEngine: ObservableObject {
             print(">> Neural Engine: STOP requested (toggle)")
             stopProcessing()
         } else {
-            startProcessing()
+            startProcessing(initiatedFromPerformMode: initiatedFromPerformMode)
         }
     }
 
-    private func startProcessing() {
+    private func startProcessing(initiatedFromPerformMode: Bool = false) {
         do {
+            let needsAudioInput = lanes.contains { $0.excitationMode == .audioInput }
+            if needsAudioInput {
+                updateAudioInputTap()
+            }
+
             audioEngine.prepare()
             try audioEngine.start()
             isProcessing = true
+            processingStartedInPerformMode = initiatedFromPerformMode
 
             // Start all lane inference loops + taps
             for lane in lanes {
@@ -914,6 +1122,9 @@ final class NeuralEngine: ObservableObject {
                 self?.canAbort = true
             }
             syncStepTimer()
+            for lane in lanes {
+                applyLaneStepLocks(lane: lane)
+            }
             let laneNames = lanes.map { $0.name }.joined(separator: ", ")
             print(">> Neural Engine: Multi-lane loop INITIATED -- lanes: [\(laneNames)]")
 
@@ -926,6 +1137,8 @@ final class NeuralEngine: ObservableObject {
     func stopProcessing() {
         guard isProcessing else { return }
 
+        processingStartedInPerformMode = false
+
         // Stop all lane inference loops
         for lane in lanes {
             lane.stopInferenceLoop()
@@ -933,11 +1146,52 @@ final class NeuralEngine: ObservableObject {
             lane.resetState()
         }
 
+        removeAudioInputTap()
         audioEngine.stop()
         isProcessing = false
         stepTimer?.cancel()
         stepTimer = nil
         print(">> Neural Engine: All lanes ABORTED -- state reset")
+    }
+
+    // MARK: - Audio Input Tap (Shared Buffer for .audioInput Excitation)
+
+    /// Install an input tap on the audio engine's input node to feed
+    /// the shared audioInputBuffer. The tap writes mono samples into
+    /// the ring buffer; lanes configured as .audioInput read from it.
+    private func updateAudioInputTap() {
+        guard !inputTapInstalled else { return }
+        let inputNode = audioEngine.inputNode
+        let hwFormat = inputNode.inputFormat(forBus: 0)
+        guard hwFormat.sampleRate > 0, hwFormat.channelCount > 0 else { return }
+        let buf = audioInputBuffer
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { buffer, _ in
+            guard let channelData = buffer.floatChannelData else { return }
+            let frameCount = Int(buffer.frameLength)
+            buf.write(channelData[0], count: frameCount)
+        }
+        inputTapInstalled = true
+    }
+
+    private func removeAudioInputTap() {
+        guard inputTapInstalled else { return }
+        audioEngine.inputNode.removeTap(onBus: 0)
+        inputTapInstalled = false
+    }
+
+    // MARK: - Cross-Lane Feedback Routing
+
+    /// Resolve each lane's feedbackSourceLaneId to a concrete buffer pointer.
+    /// Called after scene recall or whenever the user changes routing.
+    func updateFeedbackRouting() {
+        for lane in lanes {
+            if let srcId = lane.feedbackSourceLaneId,
+               let srcLane = lanes.first(where: { $0.id == srcId }), srcLane.id != lane.id {
+                lane.externalFeedbackBuffer = srcLane.feedbackBuffer
+            } else {
+                lane.externalFeedbackBuffer = nil
+            }
+        }
     }
 
     // MARK: - Master Recording Control (§5)
@@ -971,6 +1225,7 @@ final class NeuralEngine: ObservableObject {
             // Export metadata sidecar with aggregate state
             let totalCycles = lanes.reduce(0) { $0 + $1.iterationCount }
             let laneNames = lanes.map { $0.name }
+            let allFeatures = lanes.flatMap { $0.featureLog }
             AudioRecorder.exportMetadata(
                 recordingURL: url,
                 iterationCount: totalCycles,
@@ -978,7 +1233,8 @@ final class NeuralEngine: ObservableObject {
                 parameters: [
                     "activeLanes": laneNames,
                     "laneCount": lanes.count
-                ]
+                ],
+                featureLog: allFeatures
             )
         } else {
             isMasterRecording = false

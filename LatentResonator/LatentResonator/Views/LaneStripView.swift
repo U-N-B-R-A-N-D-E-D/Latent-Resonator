@@ -80,6 +80,7 @@ struct LaneStripView: View {
             }
             .buttonStyle(.plain)
             .animation(DS.stateTransition, value: lane.isLaneRecording)
+            .help("Record this lane's audio output to a WAV file (R)")
 
             Spacer(minLength: DS.spacingSM)
 
@@ -96,6 +97,7 @@ struct LaneStripView: View {
                     )
             }
             .buttonStyle(.plain)
+            .help("Open full parameter editor for this lane")
             .popover(isPresented: $showDetail) {
                 LaneDetailPopover(lane: lane, engine: engine, accent: accent)
             }
@@ -109,6 +111,7 @@ struct LaneStripView: View {
                     .padding(.vertical, DS.togglePaddingV)
             }
             .buttonStyle(.plain)
+            .help("Remove this lane from the mixer")
         }
         .padding(DS.spacingMD)
         .frame(width: LRConstants.laneStripWidth)
@@ -145,11 +148,14 @@ struct LaneStripView: View {
 
     private var muteSoloButtons: some View {
         HStack(spacing: DS.spacingSM) {
-            LRToggle(label: "M", isActive: lane.isMuted, activeColor: DS.danger, fullWidth: true) {
+            LRToggle(label: "M", isActive: lane.isMuted, activeColor: DS.danger, fullWidth: true, helpText: "Mute -- silence this lane's output") {
                 lane.isMuted.toggle()
                 engine.updateLaneMixerState()
             }
-            LRToggle(label: "S", isActive: lane.isSoloed, activeColor: DS.warning, fullWidth: true) {
+            LRToggle(
+                label: "S", isActive: lane.isSoloed, activeColor: DS.warning, fullWidth: true,
+                helpText: "Solo -- isolate this lane, muting all others"
+            ) {
                 lane.isSoloed.toggle()
                 engine.updateLaneMixerState()
             }
@@ -175,6 +181,7 @@ struct LaneStripView: View {
                 .font(DS.font(DS.fontCaption, weight: .medium))
                 .foregroundColor(accent.opacity(0.6))
         }
+        .help("Output level for this lane")
     }
 
     // MARK: - RMS Meter (Horizontal bar below volume -- spatial correlation)
@@ -241,13 +248,16 @@ struct LaneStripView: View {
         VStack(spacing: DS.spacingSM) {
             HStack(spacing: DS.spacingXS) {
                 RetroKnob(label: "TXT", value: $lane.texture,
-                          range: LRConstants.macroRange, accentColor: .orange, size: 38)
+                          range: LRConstants.macroRange, accentColor: .orange, size: 38,
+                          helpText: "Texture -- spectral density and harmonic complexity. Drives filter, noise, and granularity together")
                 RetroKnob(label: "CHS", value: $lane.chaos,
-                          range: LRConstants.macroRange, accentColor: .red, size: 38)
+                          range: LRConstants.macroRange, accentColor: .red, size: 38,
+                          helpText: "Chaos -- randomness and instability. Drives entropy, stochastic noise, and parameter drift")
             }
             HStack(spacing: DS.spacingXS) {
                 RetroKnob(label: "WRM", value: $lane.warmth,
-                          range: LRConstants.macroRange, accentColor: .yellow, size: 38)
+                          range: LRConstants.macroRange, accentColor: .yellow, size: 38,
+                          helpText: "Warmth -- analog-style saturation and harmonic richness. Drives filter warmth and waveshaping")
             }
         }
     }
@@ -399,6 +409,7 @@ struct LaneDetailPopover: View {
                         .foregroundColor(lane.promptEvolutionEnabled ? DS.warning.opacity(0.6) : DS.textTertiary)
                 }
                 .buttonStyle(.plain)
+                .help("AUTO: prompt mutates each cycle. MANUAL: you control the text")
             }
 
             TextField("semantic prompt...", text: $lane.promptText)
@@ -410,6 +421,7 @@ struct LaneDetailPopover: View {
                 .overlay(RoundedRectangle(cornerRadius: DS.radiusSM).stroke(DS.warning.opacity(0.2)))
                 .disabled(lane.promptEvolutionEnabled)
                 .opacity(lane.promptEvolutionEnabled ? 0.4 : 1.0)
+                .help("Semantic text that conditions the neural model. Describe the sound you want")
         }
     }
 
@@ -424,11 +436,14 @@ struct LaneDetailPopover: View {
                 labelForItem: { String($0.rawValue.prefix(4)) },
                 onSelect: { lane.excitationMode = $0 }
             )
+            .help("Excitation source -- the raw signal fed into the neural processor")
 
             LRParamSlider(label: "FREQUENCY", value: $lane.sineFrequency,
-                          range: LRConstants.sineFrequencyRange, format: "%.0f Hz", color: DS.info)
+                          range: LRConstants.sineFrequencyRange, format: "%.0f Hz", color: DS.info,
+                          hint: "Base frequency of the oscillator excitation source in Hz")
             LRParamSlider(label: "PULSE W", value: $lane.pulseWidth,
-                          range: LRConstants.pulseWidthRange, format: "%.2f", color: DS.info)
+                          range: LRConstants.pulseWidthRange, format: "%.2f", color: DS.info,
+                          hint: "Pulse width for square wave excitation. 0.5 = square, extremes = narrow pulse")
         }
         .padding(.top, DS.spacingSM)
     }
@@ -444,11 +459,14 @@ struct LaneDetailPopover: View {
                 labelForItem: { $0.rawValue },
                 onSelect: { lane.filterMode = $0 }
             )
+            .help("Filter topology -- LP (low-pass), HP (high-pass), BP (band-pass)")
 
             LRParamSlider(label: "CUTOFF", value: $lane.filterCutoff,
-                          range: LRConstants.filterCutoffRange, format: "%.0f Hz", color: DS.warning)
+                          range: LRConstants.filterCutoffRange, format: "%.0f Hz", color: DS.warning,
+                          hint: "Filter cutoff frequency. Controls which frequencies pass through")
             LRParamSlider(label: "RESONANCE", value: $lane.filterResonance,
-                          range: LRConstants.filterResonanceRange, format: "%.2f", color: DS.warning)
+                          range: LRConstants.filterResonanceRange, format: "%.2f", color: DS.warning,
+                          hint: "Filter resonance peak at the cutoff. High values create a sharp, ringing emphasis")
 
             LRSectionHeader(title: "SATURATION", color: DS.danger)
 
@@ -459,6 +477,7 @@ struct LaneDetailPopover: View {
                 labelForItem: { $0.rawValue },
                 onSelect: { lane.saturationMode = $0 }
             )
+            .help("Waveshaping circuit model -- tube, transistor, or diode saturation character")
         }
         .padding(.top, DS.spacingSM)
     }
@@ -467,12 +486,18 @@ struct LaneDetailPopover: View {
 
     private var aceStepContent: some View {
         VStack(spacing: DS.spacingMD) {
-            LRParamSlider(label: "GUIDANCE (CFG)", value: $lane.guidanceScale,
-                          range: LRConstants.cfgScaleRange, format: "%.1f", color: accent)
+            LRParamSlider(
+                label: "GUIDANCE (CFG)", value: $lane.guidanceScale,
+                range: LRConstants.cfgScaleRange, format: "%.1f", color: accent,
+                hint: "Classifier-Free Guidance -- how strongly the model follows the semantic prompt. "
+                    + "Higher = more literal, lower = more abstract"
+            )
             LRParamSlider(label: "SHIFT", value: $lane.shift,
-                          range: LRConstants.aceShiftRange, format: "%.1f", color: accent)
+                          range: LRConstants.aceShiftRange, format: "%.1f", color: accent,
+                          hint: "ACE-Step frequency shift. Transposes the spectral content of the generated audio")
             LRParamSlider(label: "INPUT STRENGTH", value: $lane.inputStrength,
-                          range: LRConstants.inputStrengthRange, format: "%.2f", color: accent)
+                          range: LRConstants.inputStrengthRange, format: "%.2f", color: accent,
+                          hint: "How much the input audio influences neural generation. 0 = ignore input, 1 = strongly condition on it")
 
             HStack {
                 Text("STEPS")
@@ -493,6 +518,7 @@ struct LaneDetailPopover: View {
                     .foregroundColor(accent.opacity(0.7))
                     .frame(width: 36, alignment: .trailing)
             }
+            .help("Diffusion inference steps. More steps = higher quality but slower generation")
 
             HStack {
                 Text("METHOD")
@@ -502,7 +528,8 @@ struct LaneDetailPopover: View {
                 LRToggle(
                     label: lane.inferMethod.uppercased(),
                     isActive: lane.inferMethod == "sde",
-                    activeColor: DS.warning
+                    activeColor: DS.warning,
+                    helpText: "ODE = deterministic, consistent results. SDE = stochastic, adds randomness each cycle"
                 ) {
                     lane.inferMethod = lane.inferMethod == "ode" ? "sde" : "ode"
                 }
@@ -516,11 +543,14 @@ struct LaneDetailPopover: View {
     private var stochasticMassContent: some View {
         VStack(spacing: DS.spacingMD) {
             LRParamSlider(label: "ENTROPY", value: $lane.entropyLevel,
-                          range: LRConstants.entropyRange, format: "%.0f", color: DS.warning)
+                          range: LRConstants.entropyRange, format: "%.0f", color: DS.warning,
+                          hint: "Spectral noise injection. Adds random variation to the frequency spectrum each cycle")
             LRParamSlider(label: "GRANULARITY", value: $lane.granularity,
-                          range: LRConstants.granularityRange, format: "%.0f", color: DS.warning)
+                          range: LRConstants.granularityRange, format: "%.0f", color: DS.warning,
+                          hint: "Spectral resolution -- how many frequency bins are processed independently. Higher = finer detail")
             LRParamSlider(label: "FEEDBACK", value: $lane.feedbackAmount,
-                          range: LRConstants.feedbackRange, format: "%.2f", color: DS.warning)
+                          range: LRConstants.feedbackRange, format: "%.2f", color: DS.warning,
+                          hint: "Output fed back as input for the next cycle. Higher = more self-referential, recursive evolution")
         }
         .padding(.top, DS.spacingSM)
     }
@@ -530,23 +560,30 @@ struct LaneDetailPopover: View {
     private var effectsContent: some View {
         VStack(spacing: DS.spacingMD) {
             LRParamSlider(label: "DELAY TIME", value: $lane.delayTime,
-                          range: LRConstants.delayTimeRange, format: "%.2fs", color: .purple)
+                          range: LRConstants.delayTimeRange, format: "%.2fs", color: .purple,
+                          hint: "Time between delay repeats. Longer = spacious, shorter = tight echoes")
             LRParamSlider(label: "DELAY FDBK", value: $lane.delayFeedback,
-                          range: LRConstants.delayFeedbackRange, format: "%.2f", color: .purple)
+                          range: LRConstants.delayFeedbackRange, format: "%.2f", color: .purple,
+                          hint: "Delay feedback amount. High values create cascading, self-building repeats")
             LRParamSlider(label: "DELAY MIX", value: $lane.delayMix,
-                          range: LRConstants.delayMixRange, format: "%.2f", color: .purple)
+                          range: LRConstants.delayMixRange, format: "%.2f", color: .purple,
+                          hint: "Wet/dry blend for the delay effect. 0 = dry only, 1 = full wet")
             LRParamSlider(label: "BIT CRUSH", value: $lane.bitCrushDepth,
-                          range: LRConstants.bitCrushRange, format: "%.0f", color: .purple)
+                          range: LRConstants.bitCrushRange, format: "%.0f", color: .purple,
+                          hint: "Bit depth reduction for lo-fi digital texture. Lower values = more aggressive quantization")
             LRParamSlider(label: "RES NOTE", value: $lane.resonatorNote,
-                          range: LRConstants.resonatorNoteRange, format: "%.0f", color: .purple)
+                          range: LRConstants.resonatorNoteRange, format: "%.0f", color: .purple,
+                          hint: "Tunable resonator pitch (MIDI note). Adds a pitched, ringing resonance to the signal")
             LRParamSlider(label: "RES DECAY", value: $lane.resonatorDecay,
-                          range: LRConstants.resonatorDecayRange, format: "%.2f", color: .purple)
+                          range: LRConstants.resonatorDecayRange, format: "%.2f", color: .purple,
+                          hint: "Resonator ring-out time. Longer = sustained drone, shorter = percussive ping")
 
             LRToggle(
                 label: lane.spectralFreezeActive ? "FROZEN" : "THAWED",
                 isActive: lane.spectralFreezeActive,
                 activeColor: DS.info,
-                fullWidth: true
+                fullWidth: true,
+                helpText: "Spectral freeze -- holds the current frequency snapshot as a sustained, evolving drone (F)"
             ) {
                 lane.spectralFreezeActive.toggle()
             }
@@ -565,12 +602,15 @@ struct LaneDetailPopover: View {
                 labelForItem: { String($0.rawValue.prefix(4)) },
                 onSelect: { lane.lfoTarget = $0 }
             )
+            .help("LFO target -- which parameter the low-frequency oscillator modulates")
 
             LRParamSlider(label: "RATE", value: $lane.lfoRate,
-                          range: LRConstants.lfoRateRange, format: "%.2f Hz", color: .yellow)
+                          range: LRConstants.lfoRateRange, format: "%.2f Hz", color: .yellow,
+                          hint: "LFO speed in Hz. How fast the modulation cycles")
             LRParamSlider(label: "DEPTH", value: $lane.lfoDepth,
                           range: LRConstants.lfoDepthRange, format: "%.0f%%",
-                          multiplier: 100, color: .yellow)
+                          multiplier: 100, color: .yellow,
+                          hint: "LFO intensity. How much the target parameter is affected by the modulation")
         }
         .padding(.top, DS.spacingSM)
     }

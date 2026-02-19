@@ -38,9 +38,24 @@ jobs:
             -scheme LatentResonator \
             -destination 'platform=macOS' \
             -configuration Debug \
+            -derivedDataPath ./build \
             CODE_SIGNING_ALLOWED=NO \
             ONLY_ACTIVE_ARCH=YES \
             | xcpretty --color
+
+      - name: Zip app for testing
+        working-directory: LatentResonator
+        run: |
+          APP_PATH="build/Build/Products/Debug/LatentResonator.app"
+          mkdir -p dist
+          cp -R "$APP_PATH" "dist/LatentResonator.app"
+          cd dist && zip -r "../LatentResonator-macOS.zip" LatentResonator.app && cd ..
+
+      - name: Upload app zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: LatentResonator-macOS
+          path: LatentResonator/LatentResonator-macOS.zip
 
   # ----------------------------------------------------------------
   # Job 2: Run Python bridge codec tests

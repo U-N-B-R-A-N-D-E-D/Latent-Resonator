@@ -38,71 +38,40 @@ import traceback
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# MPS Safety — MUST be set before any torch import
+# MPS Safety — Configuration for ACE-Step 1.5 v0.1.0+
 # ---------------------------------------------------------------------------
-# INVESTIGATION (Phase 4 — MPS Crash Analysis):
-#
-# Root cause: PyTorch's MPS (Metal Performance Shaders) backend on Apple
-# Silicon triggers SIGABRT in the Metal compute shader dispatch for certain
-# tensor operations used by ACE-Step 1.5:
-#   rsub_Scalar → sub_Tensor → validateComputeFunctionArguments → SIGABRT
-#
-# Crash stack trace signature:
-#   MTLComputeCommandEncoder::setBuffer → validateComputeFunctionArguments
-#   → assertion failure in Metal kernel argument binding
-#
-# This is a known PyTorch issue (pytorch/pytorch#77764, #99272) affecting:
-#   - torch.rsub() with scalar operands
-#   - torch.where() with MPS tensors  
-#   - Certain in-place operations on strided MPS tensors
-#
-# Status & path forward:
-#   1. PyTorch >= 2.3 significantly improved MPS coverage; many previously
-#      crashing ops are now supported. Re-test with latest nightly.
-#   2. The PYTORCH_ENABLE_MPS_FALLBACK=1 env var handles most cases but
-#      does NOT prevent ACE-Step's internal code from explicitly requesting
-#      MPS tensors via torch.backends.mps.is_available() checks.
-#   3. For production: the Core ML on-device path (CoreMLInference.swift)
-#      bypasses Python entirely and should be the long-term solution.
-#   4. CPU inference on M1/M2/M3 is adequate for the 2-30s cycle time.
-#
-# Current mitigation: monkey-patch MPS out of existence when --device != mps.
-# This is safe and effective. The flag below is the first line of defense.
-# Additionally, the --device flag defaults to "cpu" to avoid the hard crash.
+# ACE-Step 1.5 v0.1.0 officially supports Apple Silicon (MPS) but requires
+# disabling the memory cap to avoid "MPS backend out of memory" errors.
+# We set this BEFORE any torch import.
+os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+
+# Also enable the fallback for any ops not yet fully implemented in MPS
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 # ---------------------------------------------------------------------------
-# Nuclear MPS disable — monkey-patch BEFORE any model code
+# Force CPU when LATENT_RESONATOR_FORCE_CPU=1 (avoids MPS rsub crash)
 # ---------------------------------------------------------------------------
-# Setting device="cpu" and .to("cpu") is NOT enough because ACE-Step's
-# internal code checks torch.backends.mps.is_available() and creates MPS
-# tensors during inference. The only reliable way to prevent MPS usage is
-# to make PyTorch believe MPS doesn't exist at all.
-#
-# We parse --device early: if it's NOT "mps" or "auto", we disable MPS
-# completely so no library code can accidentally use it.
-_raw_device = "cpu"
-for _i, _a in enumerate(sys.argv):
-    if _a == "--device" and _i + 1 < len(sys.argv):
-        _raw_device = sys.argv[_i + 1]
-        break
-
-if _raw_device not in ("mps", "auto"):
+# Must run BEFORE any other code imports torch. Disables MPS entirely so
+# no tensor ever touches Metal (PyTorch MPS rsub triggers Metal validation abort).
+if os.environ.get("LATENT_RESONATOR_FORCE_CPU") == "1":
+    import torch
     try:
-        import torch
-        import torch.backends.mps as _mps_mod
-        # Overwrite the C-backed functions with lambdas that always say "no"
-        _mps_mod.is_available = lambda: False
-        _mps_mod.is_built = lambda: False
+        torch.set_default_device("cpu")
+    except AttributeError:
+        pass  # PyTorch < 2.1
+    if hasattr(torch.backends, "mps"):
         torch.backends.mps.is_available = lambda: False
         torch.backends.mps.is_built = lambda: False
-        logging.basicConfig(level=logging.INFO)
-        logging.info(
-            "MPS disabled via monkey-patch (--device %s). "
-            "All operations will use CPU.", _raw_device
-        )
-    except ImportError:
-        pass  # torch not installed yet; will fail later with a clear message
+
+# ---------------------------------------------------------------------------
+# Legacy Nuclear MPS disable — REMOVED for v0.1.0
+# ---------------------------------------------------------------------------
+# Previous versions of ACE-Step/PyTorch crashed on MPS with SIGABRT.
+# We now trust the v0.1.0 fix and the watermark ratio workaround.
+#
+# _raw_device = "cpu"
+# ... (monkey-patch removed) ...
+
 
 import numpy as np
 
@@ -180,8 +149,12 @@ class ACEStepWrapper:
             # Device selection: honour the explicit --device flag.
             # MPS (Metal) crashes with SIGABRT on certain tensor ops (rsub /
             # sub_Tensor). Defaulting to CPU avoids the hard crash entirely.
+            # Parent app can set LATENT_RESONATOR_FORCE_CPU=1 to override.
             # ---------------------------------------------------------------
-            target_device = self._requested_device
+            if os.environ.get("LATENT_RESONATOR_FORCE_CPU") == "1":
+                target_device = "cpu"
+            else:
+                target_device = self._requested_device
             if target_device == "auto":
                 if torch.backends.mps.is_available():
                     target_device = "mps"
@@ -220,6 +193,13 @@ class ACEStepWrapper:
 
                 self.device = target_device
                 logging.info(f"Using device: {self.device}")
+
+                # Ensure new tensors (e.g. scheduler) are created on CPU when in CPU mode
+                if target_device == "cpu":
+                    try:
+                        torch.set_default_device("cpu")
+                    except AttributeError:
+                        pass
 
                 self.is_loaded = True
                 self.load_error = None
@@ -773,13 +753,11 @@ def main():
         help='Enable Flask debug mode'
     )
     parser.add_argument(
-        '--device', type=str, default='cpu',
+        '--device', type=str, default='auto',
         choices=['cpu', 'mps', 'cuda', 'auto'],
         help=(
-            'PyTorch device for inference. Defaults to "cpu" because the '
-            'MPS (Metal) backend crashes on Apple Silicon with certain '
-            'tensor operations. Use "auto" to let the pipeline detect the '
-            'best available device (may crash on MPS).'
+            'PyTorch device for inference. Defaults to "auto". '
+            'ACE-Step v0.1.0+ supports Apple Silicon (MPS) properly.'
         )
     )
     args = parser.parse_args()
@@ -837,7 +815,8 @@ def main():
         try:
             from waitress import serve
             logging.info("Using waitress WSGI server (multi-threaded)")
-            serve(app, host=args.host, port=args.port, threads=4)
+            # 6 threads: 2+ lanes × inference + health checks; reduces "Task queue depth" warnings
+            serve(app, host=args.host, port=args.port, threads=6)
         except ImportError:
             logging.warning(
                 "waitress not installed — falling back to Flask dev server. "

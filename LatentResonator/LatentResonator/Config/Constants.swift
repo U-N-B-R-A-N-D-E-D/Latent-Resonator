@@ -55,6 +55,47 @@ enum LRConstants {
     static let inputStrengthRange: ClosedRange<Float> = 0.0...1.0
     static let inputStrengthDefault: Float = 0.6
 
+    // MARK: - Auto Decay (White Paper §4.2.2 -- Recursive Drift Trajectory)
+    //
+    // When enabled, inputStrength decays automatically toward a target value
+    // over N iterations, implementing the whitepaper's protocol where input
+    // strength lowers from 0.60 to 0.45 for recursive drift. The performer
+    // toggles one switch; target and rate are preset-level configuration.
+
+    /// Number of iterations to reach the auto-decay target.
+    static let autoDecayIterationsRange: ClosedRange<Float> = 1.0...50.0
+    static let autoDecayIterationsDefault: Float = 10.0
+    /// Default target inputStrength for auto-decay (whitepaper §4.2.2 value).
+    static let autoDecayTargetDefault: Float = 0.45
+
+    // MARK: - Spectral Feature Logging
+
+    /// Maximum number of spectral feature snapshots retained per lane.
+    /// At ~1 snapshot per inference cycle (~20s), 256 entries ~ 85 min of data.
+    static let featureLogMaxEntries: Int = 256
+
+    // MARK: - Iteration Archive
+
+    /// Max number of past iteration audio buffers to retain per lane.
+    static let iterationArchiveSize: Int = 16
+
+    // MARK: - Spectral Prompt Evolution Thresholds
+
+    /// Flatness threshold to transition from Phase 1 -> Phase 2.
+    /// Below this the signal is tonal/structured; above it the signal
+    /// becomes noisy enough to warrant the "recursive drift" prompt.
+    static let spectralPhase2Threshold: Float = 0.35
+
+    /// Flatness threshold to transition from Phase 2 -> Phase 3.
+    /// Above this the signal is fully entropic; "deep saturation" prompt.
+    static let spectralPhase3Threshold: Float = 0.65
+
+    // MARK: - Audio Input Buffer
+
+    /// Capacity (in samples) for the shared audio input ring buffer.
+    /// Sized for ~2.7s at 48kHz to match the inference window.
+    static let audioInputBufferCapacity: Int = 131072
+
     static let inferenceSteps: Int = 8
     static let latentDimensions: Int = 64
 
@@ -139,6 +180,10 @@ enum LRConstants {
     static let fftSize: Int = 1024
     /// Log2 of FFT size.
     static let fftLog2n: Int = 10   // log2(1024)
+    /// Available FFT sizes for preset-level configuration.
+    /// 512 = fast/low-latency, 2048 = high-resolution/higher latency.
+    static let availableFFTSizes: [Int] = [512, 1024, 2048]
+    static let fftSizeDefault: Int = 1024
     /// Spectral smoothing coefficient for recursive spectral memory.
     /// 0.85 gives stronger spectral persistence -- frequencies that recur
     /// across iterations build up more obviously, making the recursive
@@ -428,6 +473,10 @@ enum LRConstants {
     // MARK: - ACE-Step Bridge Server
 
     enum ACEBridge {
+        /// When true, pass --device cpu to the bridge. Use when MPS crashes
+        /// (e.g. Metal validation in rsub). Set to false to try MPS for faster inference.
+        static let forceCPU: Bool = true
+
         /// Default base URL for the Python bridge server.
         static let baseURL: String = "http://127.0.0.1:8976"
         /// Health check endpoint.
@@ -441,6 +490,15 @@ enum LRConstants {
         /// Health polling interval in seconds.
         /// 10s reduces CPU churn during inference-heavy workloads.
         static let healthPollInterval: TimeInterval = 10.0
+        /// Health check request timeout in seconds.
+        /// When the bridge is busy with inference (40–70s per step), /health can be queued
+        /// behind infer requests. 2s was too short and caused false "disconnected" status.
+        static let healthTimeout: TimeInterval = 15.0
+        /// Delay before first health poll during bridge startup (seconds).
+        /// Model load takes ~4–7s; avoid hammering the port before the server can possibly respond.
+        static let bridgeStartupInitialDelay: TimeInterval = 3.0
+        /// Poll interval during bridge startup (seconds). 2s reduces "Connection refused" spam.
+        static let bridgeStartupPollInterval: TimeInterval = 2.0
         /// Inference timeout in seconds.
         /// CPU-only inference takes 45-95s per diffusion step; with multi-lane concurrent
         /// requests, total wait can exceed 120s even with threaded serving. 300s safety net.
@@ -507,6 +565,7 @@ enum LRConstants {
         "Crossfader": "Blend between Scene A and Scene B parameter states",
         "LFO Rate": "Modulation oscillator speed in Hz",
         "LFO Depth": "Modulation amount applied to the LFO target parameter",
+        "Auto Decay": "When on, inputStrength drifts toward the preset target over iterations (whitepaper §4.2.2)",
     ]
 
     // MARK: - Semantic Filter Profiles
@@ -605,6 +664,17 @@ struct LanePreset: Identifiable {
     let chaos: Float
     let warmth: Float
 
+    // FFT size (preset-level spectral resolution configuration)
+    let fftSize: Int
+
+    // Auto-decay trajectory (White Paper §4.2.2 -- Recursive Drift)
+    //
+    // Preset-level configuration for the automatic inputStrength decay.
+    // When autoDecayEnabled is toggled on, inputStrength interpolates
+    // from its current value toward autoDecayTarget over autoDecayIterations.
+    let autoDecayTarget: Float
+    let autoDecayIterations: Float
+
     // Per-lane prompt evolution chain (White Paper §4.2.2)
     //
     // Each lane defines its own 3-phase prompt trajectory, tuned to
@@ -661,6 +731,9 @@ extension LanePreset {
         texture: 0.3,
         chaos: 0.2,
         warmth: 0.7,
+        fftSize: 1024,
+        autoDecayTarget: 0.55,
+        autoDecayIterations: 20.0,
         promptPhase1: "deep analog bass, warm sub, minimoog, fat low end, vintage synthesizer",
         promptPhase2: "analog decay artifacts, saturated sub-harmonics, moog filter sweep, warm tape bass",
         promptPhase3: "sub-frequency dissolution, infrasonic rumble, vintage bass saturation, analog entropy"
@@ -696,6 +769,9 @@ extension LanePreset {
         texture: 0.4,
         chaos: 0.3,
         warmth: 0.4,
+        fftSize: 1024,
+        autoDecayTarget: 0.40,
+        autoDecayIterations: 12.0,
         promptPhase1: "bright analog lead, arp synthesizer, cutting, sequential circuits, sharp attack",
         promptPhase2: "analog lead decay, filter sweep, PWM modulation, resonant peak drift",
         promptPhase3: "dissolved lead fragments, spectral lead saturation, broken analog circuit"
@@ -731,6 +807,9 @@ extension LanePreset {
         texture: 0.5,
         chaos: 0.4,
         warmth: 0.3,
+        fftSize: 512,
+        autoDecayTarget: 0.40,
+        autoDecayIterations: 10.0,
         promptPhase1: "percussive organic pluck, buchla, metallic, west coast synthesis, complex waveform",
         promptPhase2: "industrial degradation, mechanical rhythm, fragmented percussion, metallic decay",
         promptPhase3: "granular rhythmic dust, scattered impulses, stochastic percussion, broken machinery"
@@ -766,6 +845,9 @@ extension LanePreset {
         texture: 0.25,
         chaos: 0.2,
         warmth: 0.6,
+        fftSize: 2048,
+        autoDecayTarget: 0.50,
+        autoDecayIterations: 25.0,
         promptPhase1: "ambient analog pad, lush strings, warm drift, juno chorus, vintage atmosphere",
         promptPhase2: "evolving pad texture, spectral drift, analog warmth, tape saturation, slow morph",
         promptPhase3: "dissolved pad mass, spectral blur, formless analog warmth, infinite sustain"
@@ -801,6 +883,9 @@ extension LanePreset {
         texture: 0.5,
         chaos: 0.3,
         warmth: 0.5,
+        fftSize: 1024,
+        autoDecayTarget: 0.35,
+        autoDecayIterations: 10.0,
         promptPhase1: "acid bass, squelchy resonance, 303 machine, analog acid line, resonant filter",
         promptPhase2: "acid line mutation, filter squelch, resonant peak, distorted bass pattern",
         promptPhase3: "dissolved acid mass, 303 entropy, resonant noise, analog circuit overload"
@@ -837,6 +922,9 @@ extension LanePreset {
         texture: 0.8,
         chaos: 0.9,
         warmth: 0.2,
+        fftSize: 2048,
+        autoDecayTarget: 0.15,
+        autoDecayIterations: 15.0,
         promptPhase1: "abstract noise texture, granular entropy, digital decay, spectral mass, stochastic cloud",
         promptPhase2: "static dissolution, white noise degradation, spectral erosion, entropic decay, formless hiss",
         promptPhase3: "white noise saturation, complete entropy, stochastic cloud, total spectral mass, heat death signal"
