@@ -29,6 +29,12 @@ jobs:
       - name: Install xcpretty
         run: gem install xcpretty
 
+      - name: Get version
+        id: version
+        run: |
+          V=$(grep -m1 'MARKETING_VERSION = ' LatentResonator/LatentResonator.xcodeproj/project.pbxproj | sed 's/.*= //;s/;//')
+          echo "version=$V" >> $GITHUB_OUTPUT
+
       - name: Build
         working-directory: LatentResonator
         run: |
@@ -38,12 +44,55 @@ jobs:
             -scheme LatentResonator \
             -destination 'platform=macOS' \
             -configuration Debug \
+            -derivedDataPath ./build \
             CODE_SIGNING_ALLOWED=NO \
             ONLY_ACTIVE_ARCH=YES \
             | xcpretty --color
 
+      - name: Zip app for testing
+        working-directory: LatentResonator
+        run: |
+          APP_PATH="build/Build/Products/Debug/LatentResonator.app"
+          mkdir -p dist
+          cp -R "$APP_PATH" "dist/LatentResonator.app"
+          ZIP_NAME="LatentResonator-${{ steps.version.outputs.version }}-macOS.zip"
+          cd dist && zip -r "../$ZIP_NAME" LatentResonator.app && cd ..
+
+      - name: Upload app zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: LatentResonator-${{ steps.version.outputs.version }}-macOS
+          path: LatentResonator/LatentResonator-${{ steps.version.outputs.version }}-macOS.zip
+
   # ----------------------------------------------------------------
-  # Job 2: Run Python bridge codec tests
+  # Job 2: Run Swift unit tests
+  # ----------------------------------------------------------------
+  test-swift:
+    name: Test (Swift)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app \
+            || sudo xcode-select -s /Applications/Xcode_15.2.app \
+            || sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Run Swift tests
+        working-directory: LatentResonator
+        run: |
+          xcodebuild test \
+            -project LatentResonator.xcodeproj \
+            -scheme LatentResonator \
+            -destination 'platform=macOS' \
+            -configuration Debug \
+            -derivedDataPath ./build \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=YES
+
+  # ----------------------------------------------------------------
+  # Job 3: Run Python bridge codec tests
   # ----------------------------------------------------------------
   test-python:
     name: Test (Python)
@@ -63,17 +112,46 @@ jobs:
         run: pytest LatentResonator/LatentResonator/Scripts/test_bridge.py -v
 
   # ----------------------------------------------------------------
-  # Job 3: SwiftLint (advisory, non-blocking)
+  # Job 4: SwiftLint (blocking)
   # ----------------------------------------------------------------
-  lint:
+  lint-swift:
     name: Lint (SwiftLint)
     runs-on: macos-14
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
       - name: Install SwiftLint
-        run: brew install swiftlint 2>/dev/null || true
+        run: brew install swiftlint
 
       - name: Run SwiftLint
         run: swiftlint lint --config .swiftlint.yml --reporter github-actions-logging
+
+  # ----------------------------------------------------------------
+  # Job 5: Python quality (black, flake8, pylint)
+  # ----------------------------------------------------------------
+  lint-python:
+    name: Lint (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install lint tools
+        run: |
+          pip install black flake8 pylint pip-audit
+
+      - name: Pip-audit (dependency vulnerability check)
+        run: pip-audit -r LatentResonator/LatentResonator/Scripts/requirements_bridge.txt
+
+      - name: Black (format check)
+        run: black --check LatentResonator/LatentResonator/Scripts/
+
+      - name: Flake8 (style + errors)
+        run: flake8 LatentResonator/LatentResonator/Scripts/
+
+      - name: Pylint (static analysis)
+        run: pylint LatentResonator/LatentResonator/Scripts/*.py

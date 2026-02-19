@@ -54,5 +54,9 @@ struct LatentResonatorApp: App {
             width: LRConstants.windowWidth,
             height: LRConstants.windowHeight
         )
+
+        Settings {
+            LRSettingsView(engine: engine)
+        }
     }
 }

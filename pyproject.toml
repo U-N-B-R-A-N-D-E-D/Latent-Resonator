@@ -1,0 +1,59 @@
+# Latent Resonator — Python tooling config
+# black, flake8, pylint
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # defaults
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.pylint.messages_control]
+disable = [
+    "E0401",  # import-error — optional deps (coremltools, diffusers) not in bridge
+    "E0611",  # no-name-in-module — AutoPipelineForText2Audio optional in diffusers
+    "E1101",  # no-member — wave.Wave_write methods; pylint confuses read/write
+    "C0115",  # missing-class-docstring
+    "C0116",  # missing-function-docstring
+    "C0301",  # line-too-long — black/flake8 handle
+    "C0415",  # import-outside-toplevel — MPS/env setup before torch
+    "R0402",  # consider-using-from-import
+    "R0911",  # too-many-return-statements — infer endpoint validation branches
+    "R0912",  # too-many-branches
+    "R0913",  # too-many-arguments
+    "R0914",  # too-many-locals
+    "R0915",  # too-many-statements
+    "R0917",  # too-many-positional-arguments
+    "R1702",  # too-many-nested-blocks
+    "R1705",  # no-else-return
+    "R1735",  # use-dict-literal
+    "R0902",  # too-many-instance-attributes
+    "W0611",  # unused-import — handled by flake8
+    "W0612",  # unused-variable
+    "W0613",  # unused-argument
+    "W0718",  # broad-exception-caught
+    "W1203",  # logging-fstring-interpolation
+    "W1309",  # f-string-without-interpolation
+    "W0621",  # redefined-outer-name
+    "W0404",  # reimported
+    "W0603",  # global-statement
+    "W1404",  # implicit-str-concat
+    "C0413",  # wrong-import-position
+]
+fail-on = "E"
+
+[tool.pylint.format]
+max-line-length = 100

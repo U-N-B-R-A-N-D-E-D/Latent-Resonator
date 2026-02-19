@@ -105,9 +105,7 @@ def _make_placeholder_dit():
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=hidden_dim, nhead=num_heads, batch_first=True
             )
-            self.transformer = nn.TransformerEncoder(
-                encoder_layer, num_layers=num_layers
-            )
+            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
             self.output_proj = nn.Linear(hidden_dim, latent_dim)
 
         def forward(self, latent_sample, timestep, guidance_scale):
@@ -235,9 +233,7 @@ def convert_dit(model_path: str, output_dir: str, quantize: str = "float16"):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Convert ACE-Step 1.5 to Core ML (.mlpackage)"
-    )
+    parser = argparse.ArgumentParser(description="Convert ACE-Step 1.5 to Core ML (.mlpackage)")
     parser.add_argument(
         "--model-path",
         type=str,

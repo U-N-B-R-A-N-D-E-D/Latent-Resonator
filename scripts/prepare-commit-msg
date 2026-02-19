@@ -1,0 +1,6 @@
+#!/bin/sh
+# Strip Co-authored-by lines (Cursor adds them; we don't want them in the repo).
+# Install: cp scripts/prepare-commit-msg .git/hooks/prepare-commit-msg && chmod +x .git/hooks/prepare-commit-msg
+COMMIT_MSG_FILE=$1
+grep -v "Co-authored-by:" "$COMMIT_MSG_FILE" > "${COMMIT_MSG_FILE}.tmp"
+mv "${COMMIT_MSG_FILE}.tmp" "$COMMIT_MSG_FILE"
