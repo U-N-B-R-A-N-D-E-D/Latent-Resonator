@@ -5,6 +5,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.0.0 or v1.0.2)'
+        required: true
+        type: string
 
 permissions:
   contents: write  # Required to create releases and upload assets
@@ -15,6 +21,21 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+
+      - name: Set version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${INPUT_TAG#v}" >> $GITHUB_OUTPUT
+            echo "tag_name=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+            echo "tag_name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
 
       - name: Select Xcode
         run: |
@@ -38,7 +59,7 @@ jobs:
       - name: Zip app
         working-directory: LatentResonator
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          VERSION="${{ steps.version.outputs.version }}"
           APP_PATH="build/Build/Products/Debug/LatentResonator.app"
           mkdir -p dist
           cp -R "$APP_PATH" "dist/LatentResonator.app"
@@ -49,6 +70,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.tag_name }}
           files: ${{ env.ZIP_PATH }}
           generate_release_notes: true
           draft: false
