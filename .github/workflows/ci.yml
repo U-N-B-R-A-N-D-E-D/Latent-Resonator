@@ -64,35 +64,11 @@ jobs:
           name: LatentResonator-${{ steps.version.outputs.version }}-macOS
           path: LatentResonator/LatentResonator-${{ steps.version.outputs.version }}-macOS.zip
 
-  # ----------------------------------------------------------------
-  # Job 2: Run Swift unit tests
-  # ----------------------------------------------------------------
-  test-swift:
-    name: Test (Swift)
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Select Xcode
-        run: |
-          sudo xcode-select -s /Applications/Xcode_15.4.app \
-            || sudo xcode-select -s /Applications/Xcode_15.2.app \
-            || sudo xcode-select -s /Applications/Xcode.app
-
-      - name: Run Swift tests
-        working-directory: LatentResonator
-        run: |
-          xcodebuild test \
-            -project LatentResonator.xcodeproj \
-            -scheme LatentResonator \
-            -destination 'platform=macOS' \
-            -configuration Debug \
-            -derivedDataPath ./build \
-            CODE_SIGNING_ALLOWED=NO \
-            ONLY_ACTIVE_ARCH=YES
+  # Swift unit tests skipped: LatentResonatorTests/ is gitignored (private suite).
+  # See README Testing section.
 
   # ----------------------------------------------------------------
-  # Job 3: Run Python bridge codec tests
+  # Job 2: Run Python bridge codec tests
   # ----------------------------------------------------------------
   test-python:
     name: Test (Python)
@@ -112,7 +88,7 @@ jobs:
         run: pytest LatentResonator/LatentResonator/Scripts/test_bridge.py -v
 
   # ----------------------------------------------------------------
-  # Job 4: SwiftLint (blocking)
+  # Job 3: SwiftLint (blocking)
   # ----------------------------------------------------------------
   lint-swift:
     name: Lint (SwiftLint)
@@ -127,7 +103,7 @@ jobs:
         run: swiftlint lint --config .swiftlint.yml --reporter github-actions-logging
 
   # ----------------------------------------------------------------
-  # Job 5: Python quality (black, flake8, pylint)
+  # Job 4: Python quality (black, flake8, pylint)
   # ----------------------------------------------------------------
   lint-python:
     name: Lint (Python)
