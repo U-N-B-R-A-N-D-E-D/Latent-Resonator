@@ -56,6 +56,13 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             ONLY_ACTIVE_ARCH=YES
 
+      - name: Ad-hoc sign app
+        working-directory: LatentResonator
+        run: |
+          APP_PATH="build/Build/Products/Debug/LatentResonator.app"
+          codesign --force --deep --sign - "$APP_PATH"
+        # Ad-hoc signing avoids "damaged" Gatekeeper message for unsigned downloads
+
       - name: Zip app
         working-directory: LatentResonator
         run: |
