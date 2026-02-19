@@ -36,6 +36,17 @@ Euclidean impulses (Koenig Seed) enter the Neural Feedback Loop and emerge as se
 
 ---
 
+## Download
+
+Pre-built macOS apps are available in [Releases](https://github.com/U-N-B-R-A-N-D-E-D/Latent-Resonator/releases). Download the zip, unzip, and drag `LatentResonator.app` to Applications (or run from anywhere).
+
+**If macOS says the app is "damaged":** Gatekeeper blocks unsigned downloads. In Terminal:
+```bash
+xattr -cr /path/to/LatentResonator.app
+```
+
+---
+
 ## Architecture
 
 The system runs on two independent clocks. The **real-time DSP path** (solid lines) processes audio at buffer rate (<5 ms latency). The **async inference path** (dotted lines) sends captured audio to ACE-Step or Core ML in the background (2-30 s per cycle) and feeds the hallucinated result back into the mix. When no neural engine is connected, the DSP path operates standalone as the "Black Box Resonator."
