@@ -2,27 +2,6 @@
 
 All notable changes to Latent Resonator are documented here.
 
-## [1.0.3] — 2026-02-20
-
-### Added
-
-- **Settings > Config** — Configurable ACE-Step model path and recording output directory. Defaults: `~/Documents/LatentResonatorModels/` and `~/Documents/LatentResonator/`. Browse and Reset buttons.
-- **Drum Lane preset** — 808-focused preset with entropy/granularity caps, DrumVoice prompts, Euclidean E(4,8).
-- **Perform UI clarity** — Lane headers (CHANNELS → CONTROLLING, DRIFT), ACTIVE badge on focus lane, muted/soloed visual states.
-
-### Changed
-
-- **Sequencer** — Step timer uses first time-mode lane (fixes lane-switch breaking sequencer).
-- **Model discovery** — Documents directory checked first; Application Support second.
-- **Design system** — LRComponents, RetroKnob, LatentXYPad, SceneCrossfaderView use centralized tokens.
-
-### Fixed
-
-- Lane switching no longer breaks step sequencer timing.
-- Drum Lane parameters capped to preserve punch (entropy/granularity ≤ 28).
-
----
-
 ## [1.0.2] — 2026-02-19
 
 ### Added

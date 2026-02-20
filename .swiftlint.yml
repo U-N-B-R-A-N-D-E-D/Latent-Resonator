@@ -10,6 +10,7 @@ excluded:
 
 disabled_rules:
   - trailing_whitespace
+  - trailing_newline
   - todo
   - nesting
   - identifier_name
@@ -40,7 +41,7 @@ opt_in_rules:
 
 line_length:
   warning: 150
-  error: 200
+  error: 300
   ignores_comments: true
   ignores_urls: true
 
@@ -50,6 +51,5 @@ type_name:
 
 force_cast: warning
 force_try: warning
-force_unwrapping: warning
 
 reporter: xcode

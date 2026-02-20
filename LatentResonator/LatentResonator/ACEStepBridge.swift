@@ -127,14 +127,14 @@ final class ACEStepBridge: ObservableObject {
     // MARK: - Init
 
     init(
-        baseURL: URL = URL(string: LRConstants.ACEBridge.baseURL)!
+        baseURL: URL = LRConstants.ACEBridge.baseURLAsURL
     ) {
         self.baseURL = baseURL
 
-        // Health check session: short timeout
+        // Health check session: longer timeout when bridge is busy with inference
         let healthConfig = URLSessionConfiguration.ephemeral
-        healthConfig.timeoutIntervalForRequest = 2.0
-        healthConfig.timeoutIntervalForResource = 3.0
+        healthConfig.timeoutIntervalForRequest = LRConstants.ACEBridge.healthTimeout
+        healthConfig.timeoutIntervalForResource = LRConstants.ACEBridge.healthTimeout + 5.0
         self.healthSession = URLSession(configuration: healthConfig)
 
         // Inference session: longer timeout for model processing

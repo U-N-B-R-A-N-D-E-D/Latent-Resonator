@@ -11,7 +11,7 @@ import SwiftUI
 //   |  HEADER BAR                                      |
 //   |  BRIDGE STATUS                                   |
 //   +--------------------------------------------------+
-//   |  MASTER VECTORSCOPE                              |
+//   |  XY DRIFT PAD (Vectorscope TBI)                  |
 //   +--------------------------------------------------+
 //   |  +--------+ +--------+ +--------+ +--------+   |
 //   |  | DRUMS  | | BASS   | | SYNTH  | | NOISE  |   |
@@ -100,6 +100,7 @@ struct LatentResonatorView: View {
                 }
                 .buttonStyle(.plain)
                 .animation(DS.stateTransition, value: engine.isMasterRecording)
+                .help("Master record -- capture the combined output of all lanes to a WAV file (R)")
 
                 Text("\(engine.lanes.count) LANE\(engine.lanes.count == 1 ? "" : "S")")
                     .font(DS.font(DS.fontCaption, weight: .bold))
@@ -233,6 +234,10 @@ struct LatentResonatorView: View {
                     onDragStarted: {
                         lane.suppressMacroApplication = true
                     },
+                    onCommit: {
+                        lane.applyMacroTexture()
+                        lane.applyMacroChaos()
+                    },
                     onDragEnded: {
                         lane.suppressMacroApplication = false
                         lane.applyMacroTexture()
@@ -241,6 +246,7 @@ struct LatentResonatorView: View {
                 )
                 .padding(.horizontal, DS.spacingXL)
                 .padding(.bottom, DS.spacingMD)
+                .help("Drift field -- drag to control Texture (X) and Chaos (Y) macros for the focus lane")
             }
         }
     }
@@ -303,6 +309,7 @@ struct LatentResonatorView: View {
                             )
                     }
                     .buttonStyle(.plain)
+                    .help("Add a new \(preset.name) lane with tuned default parameters")
                 }
             }
         }
@@ -326,9 +333,10 @@ struct LatentResonatorView: View {
                         label: "ABORT ALL LANES",
                         icon: "stop.fill",
                         color: DS.danger,
-                        style: .primary
+                        style: .primary,
+                        helpText: "Stop all lanes and reset the feedback loop (Space / Esc)"
                     ) {
-                        engine.toggleProcessing()
+                        engine.toggleProcessing(initiatedFromPerformMode: false)
                     }
                 } else {
                     HStack(spacing: 10) {
@@ -349,9 +357,10 @@ struct LatentResonatorView: View {
                     label: "INITIATE ALL LANES",
                     icon: "waveform.path",
                     color: DS.danger,
-                    style: .destructive
+                    style: .destructive,
+                    helpText: "Start the recursive neural feedback loop on all lanes (Space)"
                 ) {
-                    engine.toggleProcessing()
+                    engine.toggleProcessing(initiatedFromPerformMode: false)
                 }
             } else {
                 bridgeStatusPanel
@@ -415,7 +424,7 @@ struct LatentResonatorView: View {
 
             Spacer()
 
-            Text("48kHz / STEREO / v1.0.0")
+            Text("48kHz / STEREO / v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.2")")
                 .font(DS.font(DS.fontCaption2))
                 .foregroundColor(DS.textDisabled)
         }

@@ -317,6 +317,8 @@ if [[ "$START_ONLY" == false ]]; then
 
         if [[ -d "$ACE_STEP_REPO_DIR" ]] && [[ -f "$ACE_STEP_REPO_DIR/setup.py" || -f "$ACE_STEP_REPO_DIR/pyproject.toml" ]]; then
             log_info "ACE-Step repo already cloned: $ACE_STEP_REPO_DIR"
+            log_info "Updating to latest version..."
+            (cd "$ACE_STEP_REPO_DIR" && git pull)
         else
             log_info "Cloning ACE-Step from GitHub..."
             git clone https://github.com/ace-step/ACE-Step.git "$ACE_STEP_REPO_DIR" 2>&1 | tail -3

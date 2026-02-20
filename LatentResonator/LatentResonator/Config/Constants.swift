@@ -55,6 +55,54 @@ enum LRConstants {
     static let inputStrengthRange: ClosedRange<Float> = 0.0...1.0
     static let inputStrengthDefault: Float = 0.6
 
+    // MARK: - Auto Decay (White Paper §4.2.2 -- Recursive Drift Trajectory)
+    //
+    // When enabled, inputStrength decays automatically toward a target value
+    // over N iterations, implementing the whitepaper's protocol where input
+    // strength lowers from 0.60 to 0.45 for recursive drift. The performer
+    // toggles one switch; target and rate are preset-level configuration.
+
+    /// Number of iterations to reach the auto-decay target.
+    static let autoDecayIterationsRange: ClosedRange<Float> = 1.0...50.0
+    static let autoDecayIterationsDefault: Float = 10.0
+    /// Default target inputStrength for auto-decay (whitepaper §4.2.2 value).
+    static let autoDecayTargetDefault: Float = 0.45
+
+    // MARK: - Spectral Feature Logging
+
+    /// Maximum number of spectral feature snapshots retained per lane.
+    /// At ~1 snapshot per inference cycle (~20s), 256 entries ~ 85 min of data.
+    static let featureLogMaxEntries: Int = 256
+
+    // MARK: - Iteration Archive
+
+    /// Max number of past iteration audio buffers to retain per lane.
+    static let iterationArchiveSize: Int = 16
+
+    // MARK: - Timing Intervals (nanoseconds)
+
+    /// Throttle RMS/spectral UI updates to ~15 Hz. mach_absolute_time() delta.
+    static let rmsDispatchIntervalNs: UInt64 = 66_000_000
+    /// Yield interval between inference cycles (50 ms) to let audio thread breathe.
+    static let inferenceYieldIntervalNs: UInt64 = 50_000_000
+
+    // MARK: - Spectral Prompt Evolution Thresholds
+
+    /// Flatness threshold to transition from Phase 1 -> Phase 2.
+    /// Below this the signal is tonal/structured; above it the signal
+    /// becomes noisy enough to warrant the "recursive drift" prompt.
+    static let spectralPhase2Threshold: Float = 0.35
+
+    /// Flatness threshold to transition from Phase 2 -> Phase 3.
+    /// Above this the signal is fully entropic; "deep saturation" prompt.
+    static let spectralPhase3Threshold: Float = 0.65
+
+    // MARK: - Audio Input Buffer
+
+    /// Capacity (in samples) for the shared audio input ring buffer.
+    /// Sized for ~2.7s at 48kHz to match the inference window.
+    static let audioInputBufferCapacity: Int = 131072
+
     static let inferenceSteps: Int = 8
     static let latentDimensions: Int = 64
 
@@ -139,6 +187,10 @@ enum LRConstants {
     static let fftSize: Int = 1024
     /// Log2 of FFT size.
     static let fftLog2n: Int = 10   // log2(1024)
+    /// Available FFT sizes for preset-level configuration.
+    /// 512 = fast/low-latency, 2048 = high-resolution/higher latency.
+    static let availableFFTSizes: [Int] = [512, 1024, 2048]
+    static let fftSizeDefault: Int = 1024
     /// Spectral smoothing coefficient for recursive spectral memory.
     /// 0.85 gives stronger spectral persistence -- frequencies that recur
     /// across iterations build up more obviously, making the recursive
@@ -428,8 +480,19 @@ enum LRConstants {
     // MARK: - ACE-Step Bridge Server
 
     enum ACEBridge {
+        /// When true, pass --device cpu to the bridge. Use when MPS crashes
+        /// (e.g. Metal validation in rsub). Set to false to try MPS for faster inference.
+        static let forceCPU: Bool = true
+
         /// Default base URL for the Python bridge server.
         static let baseURL: String = "http://127.0.0.1:8976"
+        /// baseURL as URL. FatalError if malformed (should never happen with default).
+        static var baseURLAsURL: URL {
+            guard let url = URL(string: baseURL) else {
+                fatalError("ACEBridge: invalid baseURL '\(baseURL)'")
+            }
+            return url
+        }
         /// Health check endpoint.
         static let healthEndpoint: String = "health"
         /// Inference endpoint.
@@ -441,6 +504,15 @@ enum LRConstants {
         /// Health polling interval in seconds.
         /// 10s reduces CPU churn during inference-heavy workloads.
         static let healthPollInterval: TimeInterval = 10.0
+        /// Health check request timeout in seconds.
+        /// When the bridge is busy with inference (40–70s per step), /health can be queued
+        /// behind infer requests. 2s was too short and caused false "disconnected" status.
+        static let healthTimeout: TimeInterval = 15.0
+        /// Delay before first health poll during bridge startup (seconds).
+        /// Model load takes ~4–7s; avoid hammering the port before the server can possibly respond.
+        static let bridgeStartupInitialDelay: TimeInterval = 3.0
+        /// Poll interval during bridge startup (seconds). 2s reduces "Connection refused" spam.
+        static let bridgeStartupPollInterval: TimeInterval = 2.0
         /// Inference timeout in seconds.
         /// CPU-only inference takes 45-95s per diffusion step; with multi-lane concurrent
         /// requests, total wait can exceed 120s even with threaded serving. 300s safety net.
@@ -456,18 +528,31 @@ enum LRConstants {
 
     enum ModelConfig {
         /// Standard macOS Application Support location for model weights.
+        /// Falls back to /tmp/LatentResonator/Models if Application Support is unavailable.
         static let appSupportModelsDir: URL = {
-            guard let base = FileManager.default.urls(
+            if let base = FileManager.default.urls(
                 for: .applicationSupportDirectory,
                 in: .userDomainMask
-            ).first else {
-                fatalError("Could not locate Application Support directory")
+            ).first {
+                return base.appendingPathComponent("LatentResonator/Models")
             }
-            return base.appendingPathComponent("LatentResonator/Models")
+            print(">> ModelConfig: Application Support unavailable, using /tmp fallback")
+            return URL(fileURLWithPath: "/tmp/LatentResonator/Models", isDirectory: true)
         }()
 
         /// UserDefaults key for user-configured custom model path.
         static let userDefaultsKey = "customModelPath"
+
+        /// Rejects path traversal and restricts custom model path to allowed roots.
+        /// Safe if path is under user home, /tmp, or a known project root.
+        static func isModelPathSafe(_ path: String, projectRoot: URL) -> Bool {
+            guard !path.contains("..") else { return false }
+            let url = URL(fileURLWithPath: path).standardized
+            let p = url.path
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            let proj = projectRoot.path
+            return p.hasPrefix(home) || p.hasPrefix("/tmp") || p.hasPrefix(proj)
+        }
 
         /// Ensures the default Application Support models directory exists on disk.
         static func ensureDefaultDirectoryExists() {
@@ -507,6 +592,8 @@ enum LRConstants {
         "Crossfader": "Blend between Scene A and Scene B parameter states",
         "LFO Rate": "Modulation oscillator speed in Hz",
         "LFO Depth": "Modulation amount applied to the LFO target parameter",
+        "Auto Decay": "When on, inputStrength drifts toward the preset target over iterations (whitepaper §4.2.2)",
+        "Microtiming": "Per-step timing offset. Negative = early (push), positive = late (drag)",
     ]
 
     // MARK: - Semantic Filter Profiles
@@ -557,6 +644,52 @@ enum LRConstants {
     ]
 }
 
+// MARK: - Drum Voice (Drum Lane P-Lock)
+//
+// Per-step prompt override for percussion-oriented lanes. Each case maps to a
+// semantic prompt that steers ACE-Step toward a distinct drum character.
+// References: Plan "Drum Lane" §0.2; Elektron sound-lock paradigm (prompt = sample).
+//
+// When locked on a step, the lane uses this prompt for the next inference cycle
+// instead of the preset's prompt phase chain. Enables one mono lane to produce
+// kick / snare / hat / cymbal texture variation per step without extra memory.
+enum DrumVoice: String, CaseIterable, Codable, Identifiable {
+    case kick
+    case snare
+    case hiHat
+    case cymbal
+    case mixed
+
+    var id: String { rawValue }
+
+    /// Semantic prompt steering ACE-Step toward this drum type.
+    /// Iconic references (808, TR-909) help models trained on electronic music.
+    var prompt: String {
+        switch self {
+        case .kick:
+            return "TR-808 kick drum, sub bass, low thump, punchy transient, bass drum"
+        case .snare:
+            return "TR-909 snare, snare crack, mid punch, rimshot, clap, body"
+        case .hiHat:
+            return "hi-hat sizzle, closed hat, bright metallic, short decay, cymbal"
+        case .cymbal:
+            return "cymbal crash, shimmer, metallic decay, open cymbal"
+        case .mixed:
+            return "drum kit, percussion, kick snare hats layered, groove, full kit"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .kick:  return "KICK"
+        case .snare: return "SNARE"
+        case .hiHat: return "HAT"
+        case .cymbal: return "CYMBAL"
+        case .mixed: return "MIXED"
+        }
+    }
+}
+
 // MARK: - Lane Preset
 //
 // Encapsulates a complete parameter snapshot for one ResonatorLane.
@@ -605,6 +738,17 @@ struct LanePreset: Identifiable {
     let chaos: Float
     let warmth: Float
 
+    // FFT size (preset-level spectral resolution configuration)
+    let fftSize: Int
+
+    // Auto-decay trajectory (White Paper §4.2.2 -- Recursive Drift)
+    //
+    // Preset-level configuration for the automatic inputStrength decay.
+    // When autoDecayEnabled is toggled on, inputStrength interpolates
+    // from its current value toward autoDecayTarget over autoDecayIterations.
+    let autoDecayTarget: Float
+    let autoDecayIterations: Float
+
     // Per-lane prompt evolution chain (White Paper §4.2.2)
     //
     // Each lane defines its own 3-phase prompt trajectory, tuned to
@@ -616,235 +760,280 @@ struct LanePreset: Identifiable {
     let promptPhase3: String    // iterations 9+:  deep saturation
 }
 
-// MARK: - Factory Presets (Analog Personality Engine)
+// MARK: - Factory Presets (Layer Carving — §2.11)
 //
-// Presets designed around classic analog synth character, each tuned
-// to elicit a distinct sonic personality through ACE-Step inference.
-// Together they form a complete live performance palette spanning
-// the vocabulary of 50s-80s analog synthesis:
-//   MOOG BASS    -- deep, round, subtractive (Minimoog 1970)
-//   ARP LEAD     -- cutting, vocal, PWM-driven (ARP 2600 1971)
-//   BUCHLA PERC  -- organic, plucky, West Coast (Buchla 200 1964)
-//   ROLAND PAD   -- lush, atmospheric, drifting (Juno-60 1982)
-//   TB-303 ACID  -- squelchy, resonant, the acid sound (Roland 1981)
-//   NOISE SCAPE  -- experimental, pure AI hallucination, entropic
+// Presets carve distinct frequency slots to prevent "reverberant landscape"
+// convergence. Each lane occupies a band; polarized prompts push the model
+// toward opposite latent regions (sub vs air vs mids). Filter + feedback
+// differentiation yields separable layers in the mix.
+//
+// Slot map: BASS 20–120Hz | ACID 120–350Hz | DRUM 350–500Hz | PERC 500–2k |
+// LEAD 800–5k | PAD 400–6k (highpass 400) | NOISE 2.5k+ (air only)
 
 extension LanePreset {
 
-    /// MOOG BASS -- Deep, round, the 70s bass. Saw oscillator through
-    /// lowpass filter at 200Hz with tube saturation. The Minimoog sound.
+    /// MOOG BASS — Slot: sub 20–120Hz. Polarized: sub only, NO highs.
     static let moogBass = LanePreset(
         id: "moog_bass",
         name: "MOOG BASS",
-        prompt: "deep analog bass, warm sub, minimoog, fat low end, vintage synthesizer",
+        prompt: "sub bass only, fundamental, sine-like, fat low end, NO high frequencies, NO shimmer",
         accentColor: "blue",
         guidanceScale: 10.0,
         shift: 4.0,
         inferMethod: "sde",
         inferenceSteps: 8,
-        inputStrength: 0.65,
-        entropyLevel: 15.0,
-        granularity: 10.0,
-        feedbackAmount: 0.55,
+        inputStrength: 0.62,
+        entropyLevel: 12.0,
+        granularity: 8.0,
+        feedbackAmount: 0.50,
         excitationMode: .sawOsc,
         delayTime: 0.5,
         delayFeedback: 0.4,
-        delayMix: 0.2,
+        delayMix: 0.15,
         bitCrushDepth: 16.0,
         resonatorNote: 28.0,
         resonatorDecay: 0.8,
-        filterCutoff: 200.0,
-        filterResonance: 0.4,
+        filterCutoff: 120.0,
+        filterResonance: 0.35,
         filterMode: .lowpass,
         saturationMode: .tube,
         pulseWidth: 0.5,
-        texture: 0.3,
-        chaos: 0.2,
-        warmth: 0.7,
-        promptPhase1: "deep analog bass, warm sub, minimoog, fat low end, vintage synthesizer",
-        promptPhase2: "analog decay artifacts, saturated sub-harmonics, moog filter sweep, warm tape bass",
-        promptPhase3: "sub-frequency dissolution, infrasonic rumble, vintage bass saturation, analog entropy"
+        texture: 0.25,
+        chaos: 0.15,
+        warmth: 0.75,
+        fftSize: 1024,
+        autoDecayTarget: 0.50,
+        autoDecayIterations: 18.0,
+        promptPhase1: "sub bass only, fundamental, sine-like, fat low end, NO highs",
+        promptPhase2: "sub harmonics, saturated bass, moog filter, NO midrange",
+        promptPhase3: "infrasonic dissolution, sub rumble, low frequency entropy"
     )
 
-    /// ARP LEAD -- Cutting, vocal, PWM-driven. Square oscillator with
-    /// bandpass filter sweep and transistor saturation. The ARP 2600 sound.
+    /// ARP LEAD — Slot: mids 800–5k (bandpass). Polarized: NO sub, NO air.
     static let arpLead = LanePreset(
         id: "arp_lead",
         name: "ARP LEAD",
-        prompt: "bright analog lead, arp synthesizer, cutting, sequential circuits, sharp attack",
+        prompt: "midrange lead, cutting, vocal, PWM, NO sub bass, NO high shimmer",
         accentColor: "cyan",
         guidanceScale: 12.0,
         shift: 5.0,
         inferMethod: "ode",
         inferenceSteps: 8,
-        inputStrength: 0.50,
-        entropyLevel: 25.0,
-        granularity: 20.0,
-        feedbackAmount: 0.45,
+        inputStrength: 0.48,
+        entropyLevel: 22.0,
+        granularity: 18.0,
+        feedbackAmount: 0.42,
         excitationMode: .squareOsc,
         delayTime: 0.15,
         delayFeedback: 0.5,
-        delayMix: 0.35,
+        delayMix: 0.30,
         bitCrushDepth: 14.0,
         resonatorNote: 60.0,
         resonatorDecay: 0.6,
-        filterCutoff: 3000.0,
-        filterResonance: 0.5,
+        filterCutoff: 2500.0,
+        filterResonance: 0.52,
         filterMode: .bandpass,
         saturationMode: .transistor,
         pulseWidth: 0.35,
         texture: 0.4,
-        chaos: 0.3,
+        chaos: 0.28,
         warmth: 0.4,
-        promptPhase1: "bright analog lead, arp synthesizer, cutting, sequential circuits, sharp attack",
-        promptPhase2: "analog lead decay, filter sweep, PWM modulation, resonant peak drift",
-        promptPhase3: "dissolved lead fragments, spectral lead saturation, broken analog circuit"
+        fftSize: 1024,
+        autoDecayTarget: 0.38,
+        autoDecayIterations: 12.0,
+        promptPhase1: "midrange lead, cutting, vocal, PWM, NO sub NO air",
+        promptPhase2: "lead decay, filter sweep, resonant mid peak",
+        promptPhase3: "dissolved lead fragments, midrange saturation"
     )
 
-    /// BUCHLA PERC -- Organic, plucky, West Coast synthesis. Koenig Seed
-    /// excitation through highpass filter with diode saturation.
+    /// BUCHLA PERC — Slot: mids 500–2.5k (bandpass). Polarized: pluck, NO sub.
     static let buchlaPerc = LanePreset(
         id: "buchla_perc",
         name: "BUCHLA PERC",
-        prompt: "percussive organic pluck, buchla, metallic, west coast synthesis, complex waveform",
+        prompt: "midrange pluck, metallic, west coast, NO sub bass, NO high air",
         accentColor: "red",
         guidanceScale: 13.0,
         shift: 3.0,
         inferMethod: "ode",
         inferenceSteps: 8,
-        inputStrength: 0.55,
-        entropyLevel: 30.0,
-        granularity: 35.0,
-        feedbackAmount: 0.40,
+        inputStrength: 0.52,
+        entropyLevel: 28.0,
+        granularity: 32.0,
+        feedbackAmount: 0.38,
         excitationMode: .koenigSeed,
         delayTime: 0.125,
-        delayFeedback: 0.45,
-        delayMix: 0.3,
+        delayFeedback: 0.42,
+        delayMix: 0.28,
         bitCrushDepth: 10.0,
         resonatorNote: 48.0,
         resonatorDecay: 0.5,
-        filterCutoff: 800.0,
-        filterResonance: 0.3,
-        filterMode: .highpass,
+        filterCutoff: 1400.0,
+        filterResonance: 0.35,
+        filterMode: .bandpass,
         saturationMode: .diode,
         pulseWidth: 0.5,
-        texture: 0.5,
-        chaos: 0.4,
-        warmth: 0.3,
-        promptPhase1: "percussive organic pluck, buchla, metallic, west coast synthesis, complex waveform",
-        promptPhase2: "industrial degradation, mechanical rhythm, fragmented percussion, metallic decay",
-        promptPhase3: "granular rhythmic dust, scattered impulses, stochastic percussion, broken machinery"
+        texture: 0.48,
+        chaos: 0.38,
+        warmth: 0.32,
+        fftSize: 512,
+        autoDecayTarget: 0.38,
+        autoDecayIterations: 10.0,
+        promptPhase1: "mid pluck, metallic, buchla, NO sub",
+        promptPhase2: "industrial degradation, mechanical rhythm, mid percussion",
+        promptPhase3: "granular mid dust, scattered impulses, metallic decay"
     )
 
-    /// ROLAND PAD -- Lush, atmospheric, drifting. Triangle oscillator
-    /// through lowpass filter with tube saturation and long delay.
+    /// ROLAND PAD — Slot: mid-high 400–6k (highpass 400). Polarized: NO sub.
     static let rolandPad = LanePreset(
         id: "roland_pad",
         name: "ROLAND PAD",
-        prompt: "ambient analog pad, lush strings, warm drift, juno chorus, vintage atmosphere",
+        prompt: "high shimmer, air, reverb tail, lush pad, NO bass, NO sub",
         accentColor: "purple",
         guidanceScale: 10.0,
         shift: 6.0,
         inferMethod: "sde",
         inferenceSteps: 8,
-        inputStrength: 0.60,
-        entropyLevel: 20.0,
-        granularity: 15.0,
-        feedbackAmount: 0.55,
+        inputStrength: 0.55,
+        entropyLevel: 18.0,
+        granularity: 14.0,
+        feedbackAmount: 0.58,
         excitationMode: .triangleOsc,
-        delayTime: 0.75,
-        delayFeedback: 0.6,
-        delayMix: 0.45,
+        delayTime: 0.7,
+        delayFeedback: 0.62,
+        delayMix: 0.42,
         bitCrushDepth: 16.0,
         resonatorNote: 64.0,
         resonatorDecay: 0.75,
-        filterCutoff: 5000.0,
-        filterResonance: 0.2,
-        filterMode: .lowpass,
+        filterCutoff: 400.0,
+        filterResonance: 0.18,
+        filterMode: .highpass,
         saturationMode: .tube,
         pulseWidth: 0.5,
-        texture: 0.25,
-        chaos: 0.2,
-        warmth: 0.6,
-        promptPhase1: "ambient analog pad, lush strings, warm drift, juno chorus, vintage atmosphere",
-        promptPhase2: "evolving pad texture, spectral drift, analog warmth, tape saturation, slow morph",
-        promptPhase3: "dissolved pad mass, spectral blur, formless analog warmth, infinite sustain"
+        texture: 0.22,
+        chaos: 0.18,
+        warmth: 0.55,
+        fftSize: 2048,
+        autoDecayTarget: 0.48,
+        autoDecayIterations: 22.0,
+        promptPhase1: "high shimmer, air, lush pad, NO bass",
+        promptPhase2: "evolving pad texture, spectral drift, reverb tail",
+        promptPhase3: "dissolved pad mass, spectral blur, infinite sustain"
     )
 
-    /// TB-303 ACID -- THE acid sound. Saw oscillator through lowpass
-    /// filter with high resonance and transistor saturation.
+    /// TB-303 ACID — Slot: low-mid 120–350Hz. Polarized: squelch, NO air.
     static let tb303Acid = LanePreset(
         id: "tb303_acid",
         name: "TB-303 ACID",
-        prompt: "acid bass, squelchy resonance, 303 machine, analog acid line, resonant filter",
+        prompt: "acid bass, squelchy resonance, 303, low-mid, NO high shimmer NO air",
         accentColor: "green",
         guidanceScale: 14.0,
         shift: 4.0,
         inferMethod: "ode",
         inferenceSteps: 8,
         inputStrength: 0.50,
-        entropyLevel: 20.0,
-        granularity: 25.0,
-        feedbackAmount: 0.50,
+        entropyLevel: 18.0,
+        granularity: 22.0,
+        feedbackAmount: 0.48,
         excitationMode: .sawOsc,
         delayTime: 0.166,
-        delayFeedback: 0.55,
-        delayMix: 0.3,
+        delayFeedback: 0.52,
+        delayMix: 0.28,
         bitCrushDepth: 14.0,
         resonatorNote: 36.0,
         resonatorDecay: 0.65,
-        filterCutoff: 500.0,
-        filterResonance: 0.85,
+        filterCutoff: 350.0,
+        filterResonance: 0.82,
         filterMode: .lowpass,
         saturationMode: .transistor,
         pulseWidth: 0.5,
-        texture: 0.5,
-        chaos: 0.3,
-        warmth: 0.5,
-        promptPhase1: "acid bass, squelchy resonance, 303 machine, analog acid line, resonant filter",
-        promptPhase2: "acid line mutation, filter squelch, resonant peak, distorted bass pattern",
-        promptPhase3: "dissolved acid mass, 303 entropy, resonant noise, analog circuit overload"
+        texture: 0.48,
+        chaos: 0.28,
+        warmth: 0.48,
+        fftSize: 1024,
+        autoDecayTarget: 0.35,
+        autoDecayIterations: 10.0,
+        promptPhase1: "acid bass, squelchy 303, low-mid resonance, NO air",
+        promptPhase2: "acid mutation, filter squelch, resonant peak",
+        promptPhase3: "dissolved acid mass, low-mid entropy"
     )
 
-    /// NOISE SCAPE -- Experimental. Silence excitation forces pure AI
-    /// hallucination. Full chaos, heavy texture. The "deep saturation"
-    /// endpoint described in §4.2.2 Phase 3.
+    /// NOISE SCAPE — Slot: air 2.5k+ (highpass). Polarized: NO body, NO fundamental.
     static let noiseScape = LanePreset(
         id: "noise_scape",
         name: "NOISE SCAPE",
-        prompt: "abstract noise texture, granular entropy, digital decay, spectral mass, stochastic cloud",
+        prompt: "high frequency hiss, air, breath, NO fundamental, NO body, NO bass",
         accentColor: "orange",
         guidanceScale: 16.0,
         shift: 9.0,
         inferMethod: "sde",
         inferenceSteps: 8,
-        inputStrength: 0.35,
-        entropyLevel: 60.0,
-        granularity: 70.0,
-        feedbackAmount: 0.7,
+        inputStrength: 0.32,
+        entropyLevel: 58.0,
+        granularity: 68.0,
+        feedbackAmount: 0.72,
         excitationMode: .silence,
         delayTime: 1.0,
-        delayFeedback: 0.7,
-        delayMix: 0.5,
+        delayFeedback: 0.68,
+        delayMix: 0.48,
         bitCrushDepth: 4.0,
         resonatorNote: 0.0,
         resonatorDecay: 0.0,
-        filterCutoff: 20000.0,
+        filterCutoff: 2500.0,
         filterResonance: 0.0,
-        filterMode: .lowpass,
+        filterMode: .highpass,
         saturationMode: .clean,
         pulseWidth: 0.5,
-        texture: 0.8,
-        chaos: 0.9,
-        warmth: 0.2,
-        promptPhase1: "abstract noise texture, granular entropy, digital decay, spectral mass, stochastic cloud",
-        promptPhase2: "static dissolution, white noise degradation, spectral erosion, entropic decay, formless hiss",
-        promptPhase3: "white noise saturation, complete entropy, stochastic cloud, total spectral mass, heat death signal"
+        texture: 0.78,
+        chaos: 0.88,
+        warmth: 0.18,
+        fftSize: 2048,
+        autoDecayTarget: 0.15,
+        autoDecayIterations: 14.0,
+        promptPhase1: "high frequency hiss, air, breath, NO body",
+        promptPhase2: "static dissolution, spectral erosion, formless hiss",
+        promptPhase3: "white noise saturation, total spectral mass, heat death"
+    )
+
+    /// DRUM LANE — Slot: perc body 350–500Hz. Polarized: transient, NO long reverb (§0).
+    static let drumLane = LanePreset(
+        id: "drum_lane",
+        name: "DRUM LANE",
+        prompt: "percussion transient, punch, 808, NO long reverb tail, NO pad",
+        accentColor: "yellow",
+        guidanceScale: 12.0,
+        shift: 4.0,
+        inferMethod: "ode",
+        inferenceSteps: 8,
+        inputStrength: 0.54,
+        entropyLevel: 22.0,
+        granularity: 28.0,
+        feedbackAmount: 0.38,
+        excitationMode: .koenigSeed,
+        delayTime: 0.12,
+        delayFeedback: 0.38,
+        delayMix: 0.22,
+        bitCrushDepth: 12.0,
+        resonatorNote: 36.0,
+        resonatorDecay: 0.48,
+        filterCutoff: 500.0,
+        filterResonance: 0.38,
+        filterMode: .lowpass,
+        saturationMode: .transistor,
+        pulseWidth: 0.5,
+        texture: 0.38,
+        chaos: 0.32,
+        warmth: 0.42,
+        fftSize: 512,
+        autoDecayTarget: 0.38,
+        autoDecayIterations: 11.0,
+        promptPhase1: "kick drum, punch, transient, NO long reverb",
+        promptPhase2: "snare crack, percussion groove, NO pad smear",
+        promptPhase3: "drum kit layered, metallic decay, tight transients"
     )
 
     /// All factory presets in display order.
     static let allPresets: [LanePreset] = [
         .moogBass, .arpLead, .buchlaPerc,
-        .rolandPad, .tb303Acid, .noiseScape
+        .rolandPad, .tb303Acid, .noiseScape, .drumLane
     ]
 }
