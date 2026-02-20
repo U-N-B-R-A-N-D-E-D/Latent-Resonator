@@ -1,14 +1,9 @@
 import SwiftUI
 
-// MARK: - Latent XY Pad ("Drift Field")
-// X-axis: Guidance / CFG (0-20). Left = clean, Right = hallucination.
-// Y-axis: Feedback / Recursion (0-1). Bottom = one-shot, Top = infinite loop.
-//
-// Visual style: CRT oscilloscope grid with phosphor-green scanlines and vignette.
-//
-// Performance: cursor position uses local @State during drag and commits to
-// the @Binding at a throttled rate (~20 Hz). Static overlays (grid, scanlines,
-// vignette) use .drawingGroup() so Metal caches the rasterized result.
+// MARK: - Latent XY Pad ("Drift Grid")
+// X-axis: Guidance / CFG. Y-axis: Feedback / Recursion.
+// Titanium gradient background, neon grid, semantic trail (neonAmbar).
+// Cursor position throttled ~20 Hz. Overlays use .drawingGroup() for performance.
 
 private typealias DS = LRConstants.DS
 
@@ -74,7 +69,14 @@ struct LatentXYPad: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                Rectangle().fill(Color.black)
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [DS.titanioTop, DS.titanioBottom],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
 
                 gridOverlay(in: geo.size).drawingGroup()
                 trailOverlay(in: geo.size)
@@ -183,10 +185,10 @@ struct LatentXYPad: View {
                 Spacer()
                 Text(String(format: "%@: %.2f  %@: %.2f", xLabel, displayX, yLabel, displayY))
                     .font(DS.font(DS.fontCaption2, weight: .medium))
-                    .foregroundColor(DS.phosphor.opacity(0.5))
+                    .foregroundColor(DS.phosphor.opacity(0.6))
                     .padding(.horizontal, DS.spacingMD)
                     .padding(.vertical, DS.spacingXS)
-                    .background(Color.black.opacity(0.7))
+                    .background(DS.overlayReadout)
                     .cornerRadius(DS.radiusSM)
             }
             .padding(DS.spacingSM)
@@ -201,13 +203,13 @@ struct LatentXYPad: View {
             guard trail.count > 1 else { return }
             let count = trail.count
             for i in 1..<count {
-                let opacity = Double(i) / Double(count) * 0.4
+                let opacity = Double(i) / Double(count) * 0.45
                 let p0 = trail[i - 1]
                 let p1 = trail[i]
                 var path = Path()
                 path.move(to: CGPoint(x: p0.0 * canvasSize.width, y: (1.0 - p0.1) * canvasSize.height))
                 path.addLine(to: CGPoint(x: p1.0 * canvasSize.width, y: (1.0 - p1.1) * canvasSize.height))
-                context.stroke(path, with: .color(DS.phosphor.opacity(opacity)), lineWidth: 1.5)
+                context.stroke(path, with: .color(DS.neonAmbar.opacity(opacity)), lineWidth: 1.5)
             }
         }
         .allowsHitTesting(false)
@@ -227,12 +229,12 @@ struct LatentXYPad: View {
                 var vPath = Path()
                 vPath.move(to: CGPoint(x: xPos, y: 0))
                 vPath.addLine(to: CGPoint(x: xPos, y: canvasSize.height))
-                context.stroke(vPath, with: .color(DS.phosphor.opacity(0.12)), lineWidth: 0.5)
+                context.stroke(vPath, with: .color(DS.phosphor.opacity(DS.gridLineOpacity)), lineWidth: 0.5)
 
                 var hPath = Path()
                 hPath.move(to: CGPoint(x: 0, y: yPos))
                 hPath.addLine(to: CGPoint(x: canvasSize.width, y: yPos))
-                context.stroke(hPath, with: .color(DS.phosphor.opacity(0.12)), lineWidth: 0.5)
+                context.stroke(hPath, with: .color(DS.phosphor.opacity(DS.gridLineOpacity)), lineWidth: 0.5)
             }
         }
     }
@@ -248,13 +250,13 @@ struct LatentXYPad: View {
                 path.move(to: CGPoint(x: 0, y: posY))
                 path.addLine(to: CGPoint(x: size.width, y: posY))
             }
-            .stroke(DS.phosphor.opacity(0.12), lineWidth: 0.5)
+            .stroke(DS.phosphor.opacity(DS.gridLineOpacity), lineWidth: 0.5)
 
             Path { path in
                 path.move(to: CGPoint(x: posX, y: 0))
                 path.addLine(to: CGPoint(x: posX, y: size.height))
             }
-            .stroke(DS.phosphor.opacity(0.12), lineWidth: 0.5)
+            .stroke(DS.phosphor.opacity(DS.gridLineOpacity), lineWidth: 0.5)
         }
     }
 
@@ -302,7 +304,7 @@ struct LatentXYPad: View {
                 var path = Path()
                 path.move(to: CGPoint(x: 0, y: yPos))
                 path.addLine(to: CGPoint(x: canvasSize.width, y: yPos))
-                context.stroke(path, with: .color(.black.opacity(0.12)), lineWidth: 1)
+                context.stroke(path, with: .color(.black.opacity(DS.scanlineOpacity)), lineWidth: 1)
                 yPos += spacing
             }
         }
@@ -317,7 +319,7 @@ struct LatentXYPad: View {
                 RadialGradient(
                     gradient: Gradient(colors: [
                         Color.clear,
-                        Color.black.opacity(0.4)
+                        Color.black.opacity(DS.vignetteOpacity)
                     ]),
                     center: .center,
                     startRadius: min(size.width, size.height) * 0.3,

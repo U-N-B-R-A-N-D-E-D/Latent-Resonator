@@ -92,7 +92,13 @@ struct RootView: View {
             .padding(.bottom, DS.spacingXL)
         }
         .frame(width: 480, height: 380)
-        .background(DS.surfacePrimary)
+        .background(
+            LinearGradient(
+                colors: [DS.titanioTop, DS.titanioBottom],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
     }
 
     private func onboardingBullet(_ text: String) -> some View {
@@ -111,14 +117,14 @@ struct RootView: View {
 
     private var modeToggleBar: some View {
         HStack(spacing: 0) {
-            modeTab(label: "SETUP", isActive: !showPerformanceView, activeColor: DS.success) {
+            modeTab(label: "SETUP", isActive: !showPerformanceView, activeColor: DS.neonTurquesa) {
                 if showPerformanceView && engine.isProcessing {
                     engine.processingStartedInPerformMode = true  // returning later won't stop
                 }
                 showPerformanceView = false
             }
             .help("Sound design mode -- configure lanes, presets, and parameters (Tab)")
-            modeTab(label: "PERFORM", isActive: showPerformanceView, activeColor: DS.warning) {
+            modeTab(label: "PERFORM", isActive: showPerformanceView, activeColor: DS.neonAmbar) {
                 requestPerformMode()
             }
             .help("Live performance mode -- scenes, crossfader, step sequencer (Tab)")
@@ -378,7 +384,11 @@ struct LRSettingsView: View {
     @AppStorage(LRConstants.ModelConfig.userDefaultsKey)
     private var customModelPath: String = ""
 
-    private let defaultPath = LRConstants.ModelConfig.appSupportModelsDir.path
+    @AppStorage(LRConstants.RecordingConfig.userDefaultsKey)
+    private var customRecordingDirectory: String = ""
+
+    private let defaultModelPath = LRConstants.ModelConfig.defaultDirectory.path
+    private let defaultRecordingPath = LRConstants.RecordingConfig.defaultDirectory.path
 
     enum SettingsTab: String, CaseIterable { case config, shortcuts, midi, osc }
     @State private var selectedTab: SettingsTab = .config
@@ -475,7 +485,7 @@ struct LRSettingsView: View {
                     .foregroundColor(DS.textSecondary)
 
                 HStack(spacing: DS.spacingMD) {
-                    TextField("Default: \(defaultPath)", text: $customModelPath)
+                    TextField("Default: \(defaultModelPath)", text: $customModelPath)
                         .font(DS.font(11))
                         .textFieldStyle(.roundedBorder)
 
@@ -488,6 +498,32 @@ struct LRSettingsView: View {
                 }
 
                 Text(resolvedPathDescription)
+                    .font(DS.font(DS.fontCaption))
+                    .foregroundColor(DS.textTertiary)
+                    .lineLimit(2)
+            }
+
+            LRDivider()
+
+            VStack(alignment: .leading, spacing: DS.spacingMD) {
+                Text("Recording Output Directory")
+                    .font(DS.font(DS.fontBody, weight: .semibold))
+                    .foregroundColor(DS.textSecondary)
+
+                HStack(spacing: DS.spacingMD) {
+                    TextField("Default: \(defaultRecordingPath)", text: $customRecordingDirectory)
+                        .font(DS.font(11))
+                        .textFieldStyle(.roundedBorder)
+
+                    Button("Browse...") { browseForRecordingPath() }
+                        .font(DS.font(DS.fontBody))
+
+                    Button("Reset") { customRecordingDirectory = "" }
+                        .font(DS.font(DS.fontBody))
+                        .disabled(customRecordingDirectory.isEmpty)
+                }
+
+                Text(resolvedRecordingPathDescription)
                     .font(DS.font(DS.fontCaption))
                     .foregroundColor(DS.textTertiary)
                     .lineLimit(2)
@@ -960,13 +996,24 @@ struct LRSettingsView: View {
 
     private var resolvedPathDescription: String {
         if customModelPath.isEmpty {
-            return "Using default: \(defaultPath)"
+            return "Using default: \(defaultModelPath)"
         }
         let fm = FileManager.default
         if fm.fileExists(atPath: customModelPath) {
             return "Custom path (exists)"
         }
         return "Custom path (directory not found -- will fall back to default)"
+    }
+
+    private var resolvedRecordingPathDescription: String {
+        if customRecordingDirectory.isEmpty {
+            return "Recordings save to: \(defaultRecordingPath)"
+        }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: customRecordingDirectory) {
+            return "Recordings save to: \(customRecordingDirectory)"
+        }
+        return "Custom path (directory not found -- will create on first record)"
     }
 
     private var appVersion: String {
@@ -985,6 +1032,19 @@ struct LRSettingsView: View {
 
         if panel.runModal() == .OK, let url = panel.url {
             customModelPath = url.path
+        }
+    }
+
+    private func browseForRecordingPath() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Select the folder where recordings will be saved"
+        panel.prompt = "Select"
+
+        if panel.runModal() == .OK, let url = panel.url {
+            customRecordingDirectory = url.path
         }
     }
 }

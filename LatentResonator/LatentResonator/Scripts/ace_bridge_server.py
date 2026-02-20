@@ -512,7 +512,7 @@ MAX_WAV_BYTES = 2_000_000
 # ---------------------------------------------------------------------------
 
 app = Flask(__name__)
-ace_wrapper: ACEStepWrapper = None  # Initialized in main()
+ACE_WRAPPER: ACEStepWrapper = None  # Initialized in main()
 
 
 @app.route("/health", methods=["GET"])
@@ -526,11 +526,11 @@ def health():
     return jsonify(
         {
             "status": "ok",
-            "model_loaded": ace_wrapper.is_loaded if ace_wrapper else False,
-            "model_type": ace_wrapper.model_type if ace_wrapper else "none",
-            "device": ace_wrapper.device if ace_wrapper else "none",
-            "error": ace_wrapper.load_error if ace_wrapper else None,
-            "inference_count": (ace_wrapper.inference_count if ace_wrapper else 0),
+            "model_loaded": ACE_WRAPPER.is_loaded if ACE_WRAPPER else False,
+            "model_type": ACE_WRAPPER.model_type if ACE_WRAPPER else "none",
+            "device": ACE_WRAPPER.device if ACE_WRAPPER else "none",
+            "error": ACE_WRAPPER.load_error if ACE_WRAPPER else None,
+            "inference_count": (ACE_WRAPPER.inference_count if ACE_WRAPPER else 0),
             "timestamp": time.time(),
         }
     )
@@ -542,12 +542,12 @@ def status():
     return jsonify(
         {
             "status": "ok",
-            "model_loaded": ace_wrapper.is_loaded if ace_wrapper else False,
-            "model_type": ace_wrapper.model_type if ace_wrapper else "none",
-            "model_path": ace_wrapper.model_path if ace_wrapper else None,
-            "device": ace_wrapper.device if ace_wrapper else "none",
-            "error": ace_wrapper.load_error if ace_wrapper else None,
-            "inference_count": (ace_wrapper.inference_count if ace_wrapper else 0),
+            "model_loaded": ACE_WRAPPER.is_loaded if ACE_WRAPPER else False,
+            "model_type": ACE_WRAPPER.model_type if ACE_WRAPPER else "none",
+            "model_path": ACE_WRAPPER.model_path if ACE_WRAPPER else None,
+            "device": ACE_WRAPPER.device if ACE_WRAPPER else "none",
+            "error": ACE_WRAPPER.load_error if ACE_WRAPPER else None,
+            "inference_count": (ACE_WRAPPER.inference_count if ACE_WRAPPER else 0),
             "sample_rate": 48000,
             "buffer_size": 48000,
             "version": "0.2.0",
@@ -706,7 +706,7 @@ def infer():
         t0 = time.time()
 
         # Run inference — ALL parameters wired through
-        output_samples = ace_wrapper.infer(
+        output_samples = ACE_WRAPPER.infer(
             audio_samples=samples,
             sample_rate=sr,
             prompt=prompt,
@@ -738,8 +738,8 @@ def infer():
                 "sample_rate": sr,
                 "num_samples": len(output_samples),
                 "duration_ms": round(duration_ms, 2),
-                "model_used": ace_wrapper.is_loaded,
-                "model_type": ace_wrapper.model_type,
+                "model_used": ACE_WRAPPER.is_loaded,
+                "model_type": ACE_WRAPPER.model_type,
             }
         )
 
@@ -754,7 +754,7 @@ def infer():
 
 
 def main():
-    global ace_wrapper
+    global ACE_WRAPPER
 
     parser = argparse.ArgumentParser(description="ACE-Step Bridge Server for Latent Resonator")
     parser.add_argument("--port", type=int, default=8976, help="HTTP port (default: 8976)")
@@ -791,14 +791,14 @@ def main():
     logging.info("=" * 60)
 
     # Initialize model wrapper with explicit device
-    ace_wrapper = ACEStepWrapper(model_path=args.model_path, device=args.device)
+    ACE_WRAPPER = ACEStepWrapper(model_path=args.model_path, device=args.device)
 
-    if ace_wrapper.is_loaded:
-        logging.info(f"✓ Model ready on {ace_wrapper.device} — " f"full neural inference active")
+    if ACE_WRAPPER.is_loaded:
+        logging.info(f"✓ Model ready on {ACE_WRAPPER.device} — " f"full neural inference active")
     else:
         logging.warning("✗ Model NOT loaded — server will run in passthrough mode.")
-        if ace_wrapper.load_error:
-            logging.warning(f"  Reason: {ace_wrapper.load_error}")
+        if ACE_WRAPPER.load_error:
+            logging.warning(f"  Reason: {ACE_WRAPPER.load_error}")
         else:
             logging.warning("  No model path specified. " "Use --model-path to load a model.")
         logging.info("  The Swift app will use its DSP SpectralProcessor as fallback.")
