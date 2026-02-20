@@ -1,0 +1,20 @@
+# Latent Resonator — Flake8 config
+[flake8]
+max-line-length = 100
+extend-ignore = E203, W503
+# E203: whitespace before ':' — conflicts with black
+# W503: line break before binary operator — black style
+# E402: import not at top (ace_bridge MPS setup; test_bridge sys.path)
+per-file-ignores =
+    __init__.py:F401
+    ace_bridge_server.py:E402,E501,C901,F401
+    convert_ace_to_coreml.py:F401,F541
+    generate_koenig_seed.py:F401,F541
+    test_bridge.py:E402
+exclude =
+    .git,
+    __pycache__,
+    .venv,
+    build,
+    dist
+max-complexity = 25

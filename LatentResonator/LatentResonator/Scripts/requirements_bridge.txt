@@ -1,0 +1,20 @@
+# Latent Resonator — ACE-Step Bridge Server Dependencies
+# Install: pip install -r requirements_bridge.txt
+#
+# These power the Python HTTP bridge server (ace_bridge_server.py)
+# that wraps ACE-Step 1.5 inference for the Swift Latent Resonator app.
+
+flask>=3.0.0               # BSD-3-Clause — HTTP server
+waitress>=3.0.0            # ZPL-2.1 — production WSGI server (multi-threaded)
+numpy>=1.24.0              # BSD-3-Clause — array math
+
+soundfile>=0.12.0          # BSD-3-Clause — robust WAV encode/decode (uses libsndfile)
+
+torch>=2.0.0               # BSD-3-Clause — PyTorch for model loading & inference
+# ace-step — NOT on PyPI. Install from GitHub:
+#   git clone https://github.com/ace-step/ACE-Step.git
+#   pip install -e ./ACE-Step
+# The setup_ace_bridge.sh script handles this automatically with --with-model.
+# diffusers>=0.25.0        # Apache-2.0 — alternative pipeline loader (HuggingFace)
+
+huggingface_hub>=0.20.0    # Apache-2.0 — download models from HuggingFace Hub

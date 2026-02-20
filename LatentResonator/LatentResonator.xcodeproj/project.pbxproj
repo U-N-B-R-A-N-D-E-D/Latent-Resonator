@@ -1,0 +1,598 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		FC00000011 /* FiraCode-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000001 /* FiraCode-Regular.ttf */; };
+		FC00000012 /* FiraCode-Medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000002 /* FiraCode-Medium.ttf */; };
+		FC00000013 /* FiraCode-SemiBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000003 /* FiraCode-SemiBold.ttf */; };
+		FC00000014 /* FiraCode-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000004 /* FiraCode-Bold.ttf */; };
+		089C166500000030 /* LatentResonatorApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000020 /* LatentResonatorApp.swift */; };
+		089C166500000031 /* NeuralEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000021 /* NeuralEngine.swift */; };
+		089C166500000032 /* KoenigSeedGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000022 /* KoenigSeedGenerator.swift */; };
+		089C166500000033 /* CircularAudioBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000023 /* CircularAudioBuffer.swift */; };
+		089C166500000034 /* CoreMLInference.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000024 /* CoreMLInference.swift */; };
+		089C166500000035 /* LatentResonatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000025 /* LatentResonatorView.swift */; };
+		089C166500000036 /* RetroKnob.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000026 /* RetroKnob.swift */; };
+		089C166500000037 /* LatentXYPad.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000027 /* LatentXYPad.swift */; };
+
+		089C16650000003B /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000002B /* Constants.swift */; };
+		089C16650000003C /* SpectralProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000040 /* SpectralProcessor.swift */; };
+		089C16650000003D /* SignalGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000041 /* SignalGenerator.swift */; };
+		089C16650000003E /* ACEStepBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000042 /* ACEStepBridge.swift */; };
+		089C16650000003F /* WAVCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000043 /* WAVCodec.swift */; };
+		089C166500000050 /* BridgeProcessManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000044 /* BridgeProcessManager.swift */; };
+		089C166500000051 /* ResonatorLane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000045 /* ResonatorLane.swift */; };
+		089C166500000052 /* LaneStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000046 /* LaneStripView.swift */; };
+		089C166500000053 /* PerformanceState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000054 /* PerformanceState.swift */; };
+		089C166500000055 /* PerformanceMotherbaseView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000056 /* PerformanceMotherbaseView.swift */; };
+		089C166500000057 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000058 /* RootView.swift */; };
+		089C166500000059 /* ParameterRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000005A /* ParameterRouter.swift */; };
+		F1A2B3C400000061 /* LRComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C400000060 /* LRComponents.swift */; };
+		089C166500000080 /* CircularAudioBufferTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000070 /* CircularAudioBufferTests.swift */; };
+		089C166500000081 /* ConstantsValidationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000071 /* ConstantsValidationTests.swift */; };
+		089C166500000082 /* ParameterRoutingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000072 /* ParameterRoutingTests.swift */; };
+		089C166500000083 /* PerformanceStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000073 /* PerformanceStateTests.swift */; };
+		089C166500000084 /* SignalGeneratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000074 /* SignalGeneratorTests.swift */; };
+		089C166500000085 /* SpectralProcessorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000075 /* SpectralProcessorTests.swift */; };
+		089C166500000086 /* WAVCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000076 /* WAVCodecTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		089C166500000020 /* LatentResonatorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatentResonatorApp.swift; sourceTree = "<group>"; };
+		089C166500000021 /* NeuralEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeuralEngine.swift; sourceTree = "<group>"; };
+		089C166500000022 /* KoenigSeedGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KoenigSeedGenerator.swift; sourceTree = "<group>"; };
+		089C166500000023 /* CircularAudioBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CircularAudioBuffer.swift; sourceTree = "<group>"; };
+		089C166500000024 /* CoreMLInference.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreMLInference.swift; sourceTree = "<group>"; };
+		089C166500000025 /* LatentResonatorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatentResonatorView.swift; sourceTree = "<group>"; };
+		089C166500000026 /* RetroKnob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RetroKnob.swift; sourceTree = "<group>"; };
+		089C166500000027 /* LatentXYPad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatentXYPad.swift; sourceTree = "<group>"; };
+
+		089C16650000002B /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
+		089C16650000002C /* LatentResonator.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LatentResonator.entitlements; sourceTree = "<group>"; };
+		089C16650000002D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		089C16650000002E /* LatentResonator.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LatentResonator.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		089C166500000040 /* SpectralProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpectralProcessor.swift; sourceTree = "<group>"; };
+		089C166500000041 /* SignalGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalGenerator.swift; sourceTree = "<group>"; };
+		089C166500000042 /* ACEStepBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ACEStepBridge.swift; sourceTree = "<group>"; };
+		089C166500000043 /* WAVCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WAVCodec.swift; sourceTree = "<group>"; };
+		089C166500000044 /* BridgeProcessManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeProcessManager.swift; sourceTree = "<group>"; };
+		089C166500000045 /* ResonatorLane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResonatorLane.swift; sourceTree = "<group>"; };
+		089C166500000046 /* LaneStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaneStripView.swift; sourceTree = "<group>"; };
+		089C166500000054 /* PerformanceState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceState.swift; sourceTree = "<group>"; };
+		089C166500000056 /* PerformanceMotherbaseView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceMotherbaseView.swift; sourceTree = "<group>"; };
+		089C166500000058 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		089C16650000005A /* ParameterRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParameterRouter.swift; sourceTree = "<group>"; };
+		F1A2B3C400000060 /* LRComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LRComponents.swift; sourceTree = "<group>"; };
+		089C166500000070 /* CircularAudioBufferTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CircularAudioBufferTests.swift; sourceTree = "<group>"; };
+		089C166500000071 /* ConstantsValidationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConstantsValidationTests.swift; sourceTree = "<group>"; };
+		089C166500000072 /* ParameterRoutingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParameterRoutingTests.swift; sourceTree = "<group>"; };
+		089C166500000073 /* PerformanceStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceStateTests.swift; sourceTree = "<group>"; };
+		089C166500000074 /* SignalGeneratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalGeneratorTests.swift; sourceTree = "<group>"; };
+		089C166500000075 /* SpectralProcessorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpectralProcessorTests.swift; sourceTree = "<group>"; };
+		089C166500000076 /* WAVCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WAVCodecTests.swift; sourceTree = "<group>"; };
+		089C166500000066 /* LatentResonatorTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LatentResonatorTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		FC00000001 /* FiraCode-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "FiraCode-Regular.ttf"; sourceTree = "<group>"; };
+		FC00000002 /* FiraCode-Medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "FiraCode-Medium.ttf"; sourceTree = "<group>"; };
+		FC00000003 /* FiraCode-SemiBold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "FiraCode-SemiBold.ttf"; sourceTree = "<group>"; };
+		FC00000004 /* FiraCode-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "FiraCode-Bold.ttf"; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		089C166500000011 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		089C166500000065 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		089C166500000002 = {
+			isa = PBXGroup;
+			children = (
+				089C166500000003 /* LatentResonator */,
+				089C166500000069 /* LatentResonatorTests */,
+				089C166500000008 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		089C166500000003 /* LatentResonator */ = {
+			isa = PBXGroup;
+			children = (
+				089C166500000020 /* LatentResonatorApp.swift */,
+				089C166500000058 /* RootView.swift */,
+				089C166500000021 /* NeuralEngine.swift */,
+				089C166500000022 /* KoenigSeedGenerator.swift */,
+				089C166500000023 /* CircularAudioBuffer.swift */,
+				089C166500000024 /* CoreMLInference.swift */,
+				089C166500000040 /* SpectralProcessor.swift */,
+				089C166500000041 /* SignalGenerator.swift */,
+				089C166500000042 /* ACEStepBridge.swift */,
+				089C166500000043 /* WAVCodec.swift */,
+				089C166500000044 /* BridgeProcessManager.swift */,
+				089C166500000045 /* ResonatorLane.swift */,
+				089C166500000004 /* Views */,
+				089C166500000005 /* Metal */,
+				089C166500000006 /* Config */,
+				089C166500000007 /* Resources */,
+				FC00000020 /* Fonts */,
+				089C16650000002C /* LatentResonator.entitlements */,
+				089C16650000002D /* Info.plist */,
+			);
+			path = LatentResonator;
+			sourceTree = "<group>";
+		};
+		089C166500000004 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				089C166500000025 /* LatentResonatorView.swift */,
+				089C166500000056 /* PerformanceMotherbaseView.swift */,
+				089C166500000026 /* RetroKnob.swift */,
+				089C166500000027 /* LatentXYPad.swift */,
+				089C166500000046 /* LaneStripView.swift */,
+				F1A2B3C400000060 /* LRComponents.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		089C166500000005 /* Metal */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Metal;
+			sourceTree = "<group>";
+		};
+		089C166500000006 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				089C16650000002B /* Constants.swift */,
+				089C166500000054 /* PerformanceState.swift */,
+				089C16650000005A /* ParameterRouter.swift */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
+		089C166500000007 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		FC00000020 /* Fonts */ = {
+			isa = PBXGroup;
+			children = (
+				FC00000001 /* FiraCode-Regular.ttf */,
+				FC00000002 /* FiraCode-Medium.ttf */,
+				FC00000003 /* FiraCode-SemiBold.ttf */,
+				FC00000004 /* FiraCode-Bold.ttf */,
+			);
+			path = Fonts;
+			sourceTree = "<group>";
+		};
+		089C166500000008 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				089C16650000002E /* LatentResonator.app */,
+				089C166500000066 /* LatentResonatorTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		089C166500000069 /* LatentResonatorTests */ = {
+			isa = PBXGroup;
+			children = (
+				089C166500000070 /* CircularAudioBufferTests.swift */,
+				089C166500000071 /* ConstantsValidationTests.swift */,
+				089C166500000072 /* ParameterRoutingTests.swift */,
+				089C166500000073 /* PerformanceStateTests.swift */,
+				089C166500000074 /* SignalGeneratorTests.swift */,
+				089C166500000075 /* SpectralProcessorTests.swift */,
+				089C166500000076 /* WAVCodecTests.swift */,
+			);
+			path = LatentResonatorTests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXContainerItemProxy section */
+		089C166500000067 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 089C166500000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 089C166500000009;
+			remoteInfo = LatentResonator;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXTargetDependency section */
+		089C166500000068 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 089C166500000009 /* LatentResonator */;
+			targetProxy = 089C166500000067 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXNativeTarget section */
+		089C166500000009 /* LatentResonator */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 089C16650000000B /* Build configuration list for PBXNativeTarget "LatentResonator" */;
+			buildPhases = (
+				089C166500000010 /* Sources */,
+				089C166500000011 /* Frameworks */,
+				089C166500000012 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = LatentResonator;
+			productName = LatentResonator;
+			productReference = 089C16650000002E /* LatentResonator.app */;
+			productType = "com.apple.product-type.application";
+		};
+		089C166500000060 /* LatentResonatorTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 089C166500000061 /* Build configuration list for PBXNativeTarget "LatentResonatorTests" */;
+			buildPhases = (
+				089C166500000064 /* Sources */,
+				089C166500000065 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				089C166500000068 /* PBXTargetDependency */,
+			);
+			name = LatentResonatorTests;
+			productName = LatentResonatorTests;
+			productReference = 089C166500000066 /* LatentResonatorTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		089C166500000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1540;
+				LastUpgradeCheck = 1640;
+				TargetAttributes = {
+					089C166500000009 = {
+						CreatedOnToolsVersion = 15.4;
+					};
+					089C166500000060 = {
+						CreatedOnToolsVersion = 15.4;
+						TestTargetID = 089C166500000009;
+					};
+				};
+			};
+			buildConfigurationList = 089C16650000000A /* Build configuration list for PBXProject "LatentResonator" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 089C166500000002;
+			productRefGroup = 089C166500000008 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				089C166500000009 /* LatentResonator */,
+				089C166500000060 /* LatentResonatorTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		089C166500000012 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FC00000011 /* FiraCode-Regular.ttf in Resources */,
+				FC00000012 /* FiraCode-Medium.ttf in Resources */,
+				FC00000013 /* FiraCode-SemiBold.ttf in Resources */,
+				FC00000014 /* FiraCode-Bold.ttf in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		089C166500000010 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				089C166500000030 /* LatentResonatorApp.swift in Sources */,
+				089C166500000031 /* NeuralEngine.swift in Sources */,
+				089C166500000032 /* KoenigSeedGenerator.swift in Sources */,
+				089C166500000033 /* CircularAudioBuffer.swift in Sources */,
+				089C166500000034 /* CoreMLInference.swift in Sources */,
+				089C166500000035 /* LatentResonatorView.swift in Sources */,
+				089C166500000036 /* RetroKnob.swift in Sources */,
+				089C166500000037 /* LatentXYPad.swift in Sources */,
+
+				089C16650000003B /* Constants.swift in Sources */,
+				089C16650000003C /* SpectralProcessor.swift in Sources */,
+				089C16650000003D /* SignalGenerator.swift in Sources */,
+				089C16650000003E /* ACEStepBridge.swift in Sources */,
+				089C16650000003F /* WAVCodec.swift in Sources */,
+				089C166500000050 /* BridgeProcessManager.swift in Sources */,
+				089C166500000051 /* ResonatorLane.swift in Sources */,
+				089C166500000052 /* LaneStripView.swift in Sources */,
+				089C166500000053 /* PerformanceState.swift in Sources */,
+				089C166500000055 /* PerformanceMotherbaseView.swift in Sources */,
+				089C166500000057 /* RootView.swift in Sources */,
+				089C166500000059 /* ParameterRouter.swift in Sources */,
+				F1A2B3C400000061 /* LRComponents.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		089C166500000064 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				089C166500000080 /* CircularAudioBufferTests.swift in Sources */,
+				089C166500000081 /* ConstantsValidationTests.swift in Sources */,
+				089C166500000082 /* ParameterRoutingTests.swift in Sources */,
+				089C166500000083 /* PerformanceStateTests.swift in Sources */,
+				089C166500000084 /* SignalGeneratorTests.swift in Sources */,
+				089C166500000085 /* SpectralProcessorTests.swift in Sources */,
+				089C166500000086 /* WAVCodecTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		089C16650000000C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		089C16650000000D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		089C16650000000E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = LatentResonator/LatentResonator.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = LatentResonator/Info.plist;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Leonardo Lambertini · [ U N B R A N D E D ]";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.latentresonator.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		089C16650000000F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = LatentResonator/LatentResonator.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = LatentResonator/Info.plist;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Leonardo Lambertini · [ U N B R A N D E D ]";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.latentresonator.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		089C166500000062 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.latentresonator.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LatentResonator.app/Contents/MacOS/LatentResonator";
+			};
+			name = Debug;
+		};
+		089C166500000063 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.latentresonator.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LatentResonator.app/Contents/MacOS/LatentResonator";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		089C16650000000A /* Build configuration list for PBXProject "LatentResonator" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				089C16650000000C /* Debug */,
+				089C16650000000D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		089C16650000000B /* Build configuration list for PBXNativeTarget "LatentResonator" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				089C16650000000E /* Debug */,
+				089C16650000000F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		089C166500000061 /* Build configuration list for PBXNativeTarget "LatentResonatorTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				089C166500000062 /* Debug */,
+				089C166500000063 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 089C166500000001 /* Project object */;
+}
