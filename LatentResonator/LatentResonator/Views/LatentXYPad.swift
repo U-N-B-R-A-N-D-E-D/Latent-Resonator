@@ -23,17 +23,23 @@ struct LatentXYPad: View {
     var xLabel: String = "TEXTURE"
     var yLabel: String = "CHAOS"
 
+    /// When true, the pad displays the cursor position but disables drag gesture.
+    /// Used for latent space visualization modes (e.g. spectral centroid/flatness).
+    var isReadOnly: Bool = false
+
     /// Called once when a drag begins. Use to set suppressMacroApplication = true.
     var onDragStarted: (() -> Void)?
+    /// Called on each throttled commit tick (~20 Hz) during drag. Apply macros here.
+    var onCommit: (() -> Void)?
     /// Called once when a drag ends (after final commit). Use to apply macros + clear suppress.
     var onDragEnded: (() -> Void)?
 
     private let gridDivisions: Int = 10
     private let cursorSize: CGFloat = 14
 
-    /// Throttled commit interval (seconds). ~20 Hz keeps the macro cascade
-    /// manageable while still feeling responsive during sustained drags.
-    private let commitInterval: TimeInterval = 0.05
+    /// Throttled commit interval (seconds). ~33 Hz keeps the macro cascade
+    /// manageable while feeling responsive during sustained drags.
+    private let commitInterval: TimeInterval = 0.03
 
     @State private var isDragging = false
     @State private var isHovered = false
@@ -102,6 +108,7 @@ struct LatentXYPad: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        guard !isReadOnly else { return }
                         if !isDragging {
                             isDragging = true
                             localX = x
@@ -115,6 +122,7 @@ struct LatentXYPad: View {
                         localY = yRange.lowerBound + ny * (yRange.upperBound - yRange.lowerBound)
                     }
                     .onEnded { _ in
+                        guard !isReadOnly else { return }
                         stopCommitTimer()
                         commitValues()
                         isDragging = false
@@ -133,6 +141,12 @@ struct LatentXYPad: View {
                 localY = y
                 didSyncInitial = true
             }
+        }
+        .onChange(of: x) { _, newVal in
+            if isReadOnly { localX = newVal }
+        }
+        .onChange(of: y) { _, newVal in
+            if isReadOnly { localY = newVal }
         }
     }
 
@@ -153,6 +167,7 @@ struct LatentXYPad: View {
     private func commitValues() {
         x = localX
         y = localY
+        onCommit?()
 
         let nx = CGFloat((localX - xRange.lowerBound) / (xRange.upperBound - xRange.lowerBound))
         let ny = CGFloat((localY - yRange.lowerBound) / (yRange.upperBound - yRange.lowerBound))

@@ -41,7 +41,6 @@ disable = [
     "R1705",  # no-else-return
     "R1735",  # use-dict-literal
     "R0902",  # too-many-instance-attributes
-    "R0903",  # too-few-public-methods — placeholder nn.Module classes
     "W0611",  # unused-import — handled by flake8
     "W0612",  # unused-variable
     "W0613",  # unused-argument

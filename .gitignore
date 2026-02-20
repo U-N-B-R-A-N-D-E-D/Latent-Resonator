@@ -56,6 +56,9 @@ ACE-Step/
 *.aiff
 *.flac
 
+# Exception: curated demo audio committed to docs/
+!docs/audio/*.mp3
+
 # macOS
 .DS_Store
 .AppleDouble

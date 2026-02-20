@@ -55,6 +55,7 @@ Thank you for your interest in contributing to Latent Resonator. This project ex
 - The bridge server (`ace_bridge_server.py`) must remain compatible with Python 3.9--3.12.
 - All JSON payloads between Swift and Python use snake_case keys.
 - The bridge must function in passthrough mode (no model loaded) without errors.
+- Python code must pass `black --check`, `flake8`, and `pylint`. Config: `pyproject.toml`, `.flake8`.
 
 ## Whitepaper Alignment
 
@@ -65,13 +66,26 @@ This project implements the methodology described in [docs/whitepaper.md](docs/w
 - The Non-Linear Spectral Processor as a semantic filter
 - Generative degradation as an aesthetic goal, not a defect
 
+## Git: Avoid Co-authored-by in Commits
+
+Cursor adds `Co-authored-by: Cursor <cursoragent@cursor.com>` to commits made from the IDE. **Disable it:** Cursor Settings → Agents → Attribution → toggle OFF.
+
+To keep the repo clean, also install the hook:
+
+```bash
+cp scripts/prepare-commit-msg .git/hooks/prepare-commit-msg && chmod +x .git/hooks/prepare-commit-msg
+```
+
+This strips Co-authored-by before each commit. To fix an existing commit, run `scripts/fix_commit_coauthor.sh` from Terminal.app (outside Cursor).
+
 ## Pull Request Process
 
 1. Ensure your code builds without warnings (`xcodebuild build`).
 2. Run SwiftLint: `swiftlint lint --config .swiftlint.yml`.
-3. Run Python bridge tests: `pytest LatentResonator/LatentResonator/Scripts/test_bridge.py`.
-4. Describe what whitepaper section(s) your change relates to, if applicable.
-5. A maintainer will review your PR. Expect feedback and iteration -- this is normal.
+3. Run Python quality checks: `black --check LatentResonator/LatentResonator/Scripts/`, `flake8 LatentResonator/LatentResonator/Scripts/`, `pylint LatentResonator/LatentResonator/Scripts/*.py`.
+4. Run Python bridge tests: `pytest LatentResonator/LatentResonator/Scripts/test_bridge.py`.
+5. Describe what whitepaper section(s) your change relates to, if applicable.
+6. A maintainer will review your PR. Expect feedback and iteration -- this is normal.
 
 ## License
 

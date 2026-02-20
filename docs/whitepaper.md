@@ -41,6 +41,95 @@ The primary objective of this study is to formalize the "Neural Feedback Loop" a
 
 ---
 
+## 2. Implementation: The Real-Time Instrument Architecture
+
+The theoretical framework of Section 1 describes the recursive loop as a batch-processing protocol. The Latent Resonator instrument extends this into a real-time, multi-lane performance system built in Swift on Apple's AVAudioEngine. This section documents the expanded architecture as implemented.
+
+### 2.1 Multi-Lane Topology
+
+The system operates N independent feedback lanes simultaneously. Each lane encapsulates:
+
+- An **excitation source** (oscillators, Koenig Seed, live audio input, or silence)
+- A **13-stage SpectralProcessor** (FFT, semantic EQ, spectral noise injection, per-band saturation, spectral memory, granularity, spectral freeze, IFFT, ladder filter, comb filter, tunable resonator, bit crusher, waveshaper)
+- A **recursive feedback buffer** (lock-free SPSC ring buffer)
+- An **ACE-Step / CoreML inference bridge** for neural processing
+
+Lanes are mixed through a master bus with per-lane volume, mute, and solo. Cross-lane feedback routing allows one lane's output to feed another lane's input, creating networked resonant topologies.
+
+### 2.2 Spectral-Conditioned Prompt Evolution
+
+The original protocol (§4.2.2) prescribed fixed iteration thresholds for prompt phase transitions. The instrument replaces this with spectral-conditioned evolution: prompt phases shift based on the real-time **spectral flatness** of the signal. When the signal is tonal (flatness < 0.35), Phase 1 prompts remain active. As the signal becomes noisier (flatness >= 0.35), Phase 2 ("recursive drift") engages. Full entropic saturation (flatness >= 0.65) triggers Phase 3. This creates an autonomous, signal-aware compositional trajectory.
+
+### 2.3 Auto-Decay and the Recursive Drift Trajectory
+
+The whitepaper's inputStrength decay from 0.60 to 0.45 over iterations (§4.2.2) is formalized as an opt-in **auto-decay** system. When enabled, inputStrength interpolates linearly from its current value toward a preset-defined target over a preset-defined number of iterations. This implements the whitepaper protocol as a one-toggle performance gesture.
+
+### 2.4 Spectral Feature Extraction and Telemetry
+
+The SpectralProcessor computes three real-time spectral features per STFT hop:
+
+- **Spectral Centroid** [0..1]: brightness indicator (low = warm, high = metallic)
+- **Spectral Flatness** [0..1]: noisiness indicator (0 = tonal, 1 = white noise)
+- **Spectral Flux**: frame-to-frame magnitude change (rate of timbral evolution)
+
+These features drive prompt evolution, feed the latent space visualization (XY pad in CNT/FLAT mode), and are exported as CSV telemetry alongside recorded audio for post-performance analysis.
+
+### 2.5 Colored Spectral Noise and Per-Band Saturation
+
+Noise injection (§4.1.3) is shaped by the semantic spectral profile: "metallic" prompts inject more high-frequency noise while "warm" prompts concentrate noise in lower bands. Similarly, per-band waveshaping saturates each spectral band proportionally to its semantic weight, creating prompt-dependent harmonic enrichment in the frequency domain.
+
+### 2.6 Iteration Archive and Selective Recall
+
+Each lane maintains a ring buffer of past iteration audio (up to 16 entries). A performer can recall any archived iteration, replaying it through the feedback path. This enables temporal navigation within the recursive drift: jumping back to an earlier state and branching into a new trajectory.
+
+### 2.7 Continuous Saturation Morphing
+
+The WARMTH macro drives a continuous crossfade between saturation circuit models (clean, tube, transistor, diode). Rather than discrete mode switching, the waveshaper interpolates between adjacent modes, eliminating clicks and enabling expressive timbral sweeps through a single control.
+
+### 2.8 Configurable FFT Size
+
+Spectral resolution is configurable per preset: 512 (fast, low-latency percussion), 1024 (default), or 2048 (high-resolution pads). This trades temporal resolution for spectral detail, allowing each lane preset to optimize for its sonic role.
+
+### 2.9 Motherbase Performance Surface and Focus Lane UX
+
+The **Motherbase** is a fixed-layout performance view (Elektron-style) providing scenes, crossfader, step grid, and focus lane controls. Key advances:
+
+- **Per-Lane Step Grid**: Each lane owns its own `StepGrid` (chain length, advance mode, BPM, step locks). The focused lane's grid is displayed and edited. Step advance applies locks per lane; the step timer advances all lanes in sync.
+
+- **Drift Pad (XY) → Knob Binding**: The XY pad controls configurable axes (TXT/CHS macros, CFG/FBK neural, CUT/RES filter, or CNT/FLAT read-only spectral). The focus lane strip observes the lane via `@ObservedObject`, so knob values update immediately when the pad writes to lane parameters. Commit throttle is 30 ms (~33 Hz) for responsive feedback.
+
+- **CNT/FLAT Live Spectral Display**: In read-only mode, the pad displays spectral centroid (X) and flatness (Y). A wrapper view observes the lane so the cursor updates live as the DSP pipeline publishes new feature values.
+
+- **Prompt Phase P-Lock**: P1/P2/P3 toggles set `promptPhaseOverride` on the lane. When editing a step, they also set the step's `promptPhase` lock via `setStepPromptPhase`, so the lock applies when that step plays. The effective phase shown is the step lock when editing, otherwise the lane override.
+
+- **DrumVoice P-Lock (Drum Lane)**: A per-step prompt override that steers ACE-Step toward distinct percussion characters. When `drumVoice` is locked (kick, snare, hiHat, cymbal, or mixed), `promptOverride` injects a semantic prompt optimized for that drum type. The "Drum Lane" preset uses Koenig excitation (E(k,n)) and FFT 512 for temporal punch. One lane thus produces kick-like, snare-like, or hat-like texture per step without additional synthesis—translating the Elektron sound-lock paradigm (per-step sample swap) into prompt-space. See §2.10.
+
+- **Performance State Persistence**: `PerformanceStateSnapshot` stores `stepGrids: [StepGrid]` (one per lane). Legacy `stepGrid` (singular) decodes to a single-element array for backward compatibility.
+
+### 2.10 Drum Lane: Prompt-Space Sound Locking
+
+The Drum Lane extends the P-Lock paradigm to semantic control. Rather than loading distinct samples per step (traditional drum machine), a single ResonatorLane uses the same ACE-Step inference pipeline with a per-step prompt override. The `DrumVoice` enum maps to prompts calibrated for kick (sub-bass, punch), snare (mid punch, rimshot), hi-hat (bright metallic, short decay), cymbal (shimmer, metallic decay), and mixed (layered kit). When the step sequencer advances and applies locks, `promptOverride` is set to the locked `DrumVoice`'s prompt. The next inference cycle conditions the model on that prompt, producing timbral variation aligned with the Euclidean rhythm from the Koenig excitation. This design avoids memory overhead (no polyphonic sample playback) while preserving the compositional benefit of per-step sound selection—the "sound lock" moves from sample-space to prompt-space.
+
+### 2.11 Layer Carving: Painting Distinct Frequency Slots
+
+To prevent all lanes from converging to a single "reverberant frequency landscape," each preset carves a distinct frequency slot and uses polarized prompts that push the model toward opposite regions of the latent space.
+
+**Slot map (approximate bands):**
+
+| Preset | Slot | Filter | Polarization |
+|--------|------|--------|--------------|
+| MOOG BASS | 20–120 Hz | LP 120 Hz | Sub only, "NO high frequencies" |
+| TB-303 ACID | 120–350 Hz | LP 350 Hz | Low-mid squelch, "NO air" |
+| DRUM LANE | 350–500 Hz | LP 500 Hz | Percussive body, "NO long reverb" |
+| BUCHLA PERC | 500–2.5 kHz | BP 1.4 kHz | Mid pluck, "NO sub" |
+| ARP LEAD | 800–5 kHz | BP 2.5 kHz | Vocal mids, "NO sub NO air" |
+| ROLAND PAD | 400 Hz–6 kHz | HP 400 Hz | Shimmer, "NO bass" |
+| NOISE SCAPE | 2.5 kHz+ | HP 2.5 kHz | Air only, "NO body" |
+
+**Feedback differentiation**: Percussion lanes (DRUM, BUCHLA) use lower feedback (0.38–0.42) for tighter transients; pads and noise use higher feedback (0.58–0.72) for smear and drift. This prevents all lanes from sharing the same recursive decay character.
+
+---
+
 ## 3. Technical Architecture: The ACE-Step 1.5 System
 
 To understand how the "Neural Feedback Loop" functions, we must first analyze the architecture of the instrument: the ACE-Step 1.5 model. This model represents a significant evolution in open-source audio synthesis, optimized for consumer hardware while retaining commercial-grade fidelity.
@@ -220,6 +309,24 @@ When analyzing the output, listen for the **Spectral Horizon**.
 - Focus on the frequencies between the rhythmic pulses.
 - Observe how the "room tone" shifts from static to active.
 - Note if the rhythm begins to "swing" or "drag"—an indication that the model is hallucinating a different tempo map based on the complex textures it has generated.
+
+---
+
+### 7.4 Known Issues and Teardown Order
+
+**STOP during inference:** If the user stops processing while ACE-Step inference is in progress, a race between the tap callback (audio thread) and tap removal (main thread) could cause `malloc: double free`. The fix is teardown order: (1) cancel inference tasks, (2) stop the audio engine first, (3) remove taps, (4) reset lane state. See `NeuralEngine.stopProcessing()`.
+
+**Bridge health race:** The app polls `/health` before the bridge finishes loading the model (~7 s on CPU). Early polls return "Connection refused" until the server binds. This is expected; the app retries until connected.
+
+**HALC out-of-order messages:** Under load (long inference, heavy CPU), CoreAudio may log "received an out of order message" or "skipping cycle due to overload". These indicate buffer underruns, not application bugs. Reduce inference steps or lane count to ease load.
+
+**Path traversal:** User-configured model path (UserDefaults) is validated via `ModelConfig.isModelPathSafe` before use. Paths containing `..` or outside allowed roots (home, /tmp, project) are rejected.
+
+**Bridge payload limits:** The Python bridge enforces `MAX_AUDIO_B64_LEN` and `MAX_WAV_BYTES` to prevent DoS from oversized base64/WAV payloads.
+
+### 7.5 SpectralProcessor State (Debug)
+
+SpectralProcessor holds smoothed parameters (`sCfg`, `sFilterCut`, etc.) and magnitude snapshots. Typical ranges: `guidanceScale` 6–18, `filterCutoff` 20–20000 Hz, `filterMode` LP/HP/BP. Values outside these suggest a preset or P-lock override; the processor clamps internally.
 
 ---
 

@@ -17,6 +17,7 @@ import AVFoundation
 //   .sineOsc     -- Single-frequency probe of latent space
 //   .pulseTrain  -- Variable-density impulse stream
 //   .silence     -- Null input; forces pure hallucination from latent priors
+//   .audioInput  -- Live mic/line input routed through the feedback loop
 
 // MARK: - Excitation Mode Enum
 
@@ -29,6 +30,7 @@ enum ExcitationMode: String, CaseIterable, Identifiable {
     case triangleOsc = "TRI"
     case pulseTrain  = "PULSE"
     case silence     = "SILENCE"
+    case audioInput  = "AUDIO IN"
 
     var id: String { rawValue }
 
@@ -235,6 +237,8 @@ final class SignalGenerator {
                            count: frameCount, sampleRate: sampleRate)
         case .silence:
             break  // already zeroed -- forces pure hallucination from latent priors
+        case .audioInput:
+            break  // audio input is handled externally via CircularAudioBuffer in the render callback
         }
     }
 
