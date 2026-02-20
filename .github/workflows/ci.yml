@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ----------------------------------------------------------------
+  # Job 1: Build the macOS app (validates all Swift compiles)
+  # ----------------------------------------------------------------
+  build:
+    name: Build (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app \
+            || sudo xcode-select -s /Applications/Xcode_15.2.app \
+            || sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Install xcpretty
+        run: gem install xcpretty
+
+      - name: Build
+        working-directory: LatentResonator
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project LatentResonator.xcodeproj \
+            -scheme LatentResonator \
+            -destination 'platform=macOS' \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=YES \
+            | xcpretty --color
+
+  # ----------------------------------------------------------------
+  # Job 2: Run Python bridge codec tests
+  # ----------------------------------------------------------------
+  test-python:
+    name: Test (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install numpy pytest flask soundfile
+
+      - name: Run tests
+        run: pytest LatentResonator/LatentResonator/Scripts/test_bridge.py -v
+
+  # ----------------------------------------------------------------
+  # Job 3: SwiftLint (advisory, non-blocking)
+  # ----------------------------------------------------------------
+  lint:
+    name: Lint (SwiftLint)
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SwiftLint
+        run: brew install swiftlint 2>/dev/null || true
+
+      - name: Run SwiftLint
+        run: swiftlint lint --config .swiftlint.yml --reporter github-actions-logging
