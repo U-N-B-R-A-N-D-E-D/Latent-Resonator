@@ -53,14 +53,11 @@ final class BridgeProcessManager: ObservableObject {
     // Fallback: Bundle.main.resourcePath for distributed .app bundles where
     // #filePath points to a non-existent build machine path.
     //
-    //   {projectRoot}/
-    //     LatentResonator/
-    //       LatentResonator/
-    //         BridgeProcessManager.swift   <- #filePath
-    //         Scripts/
-    //           ace_bridge_server.py
-    //           requirements_bridge.txt
-    //     .venv-ace-bridge/                <- created here
+    //   ~/Library/Application Support/LatentResonator/
+    //     venv-ace-bridge/                 <- created here (user-writable)
+    //   Scripts/                          <- from Bundle or #filePath
+    //     ace_bridge_server.py
+    //     requirements_bridge.txt
 
     private static let sourceFileURL = URL(fileURLWithPath: #filePath)
 
@@ -86,7 +83,7 @@ final class BridgeProcessManager: ObservableObject {
     }
 
     private static var projectRoot: URL {
-        // Primary: derive from #filePath
+        // Primary: derive from #filePath (dev builds)
         let devRoot = sourceFileURL
             .deletingLastPathComponent()        // LatentResonator/ (inner)
             .deletingLastPathComponent()        // LatentResonator/ (outer)
@@ -94,7 +91,7 @@ final class BridgeProcessManager: ObservableObject {
         if FileManager.default.fileExists(atPath: devRoot.path) {
             return devRoot
         }
-        // Fallback: Bundle's parent directory
+        // Fallback: Bundle's parent directory (distributed .app)
         if let resourcePath = Bundle.main.resourcePath {
             return URL(fileURLWithPath: resourcePath)
                 .deletingLastPathComponent()    // Contents/
@@ -104,8 +101,10 @@ final class BridgeProcessManager: ObservableObject {
         return devRoot
     }
 
+    /// Venv in Application Support so distributed apps (e.g. in /Applications) can create it
+    /// without permission errors. projectRoot may be read-only for installed apps.
     private var venvDir: URL {
-        Self.projectRoot.appendingPathComponent(".venv-ace-bridge")
+        LRConstants.appSupportVenvDir
     }
 
     private var pythonInVenv: URL {
@@ -145,6 +144,7 @@ final class BridgeProcessManager: ObservableObject {
             searchDirs.append(URL(fileURLWithPath: custom))
         }
 
+        searchDirs.append(LRConstants.ModelConfig.defaultDirectory)
         searchDirs.append(LRConstants.ModelConfig.appSupportModelsDir)
         searchDirs.append(Self.projectRoot.appendingPathComponent("models"))
 
@@ -231,6 +231,18 @@ final class BridgeProcessManager: ObservableObject {
         if needsVenv {
             updateState(.settingUp)
             log("Creating Python virtual environment...")
+
+            // Ensure Application Support/LatentResonator exists (venv parent)
+            let venvParent = venvDir.deletingLastPathComponent()
+            if !fm.fileExists(atPath: venvParent.path) {
+                do {
+                    try fm.createDirectory(at: venvParent, withIntermediateDirectories: true)
+                } catch {
+                    updateState(.error)
+                    setError("Cannot create venv directory: \(error.localizedDescription)")
+                    return
+                }
+            }
 
             // Find system Python 3.9+
             guard let systemPython = findSystemPython() else {

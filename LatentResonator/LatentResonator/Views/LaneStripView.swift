@@ -15,8 +15,7 @@ import SwiftUI
 //   |  [DETAIL >]      |  <- opens parameter popover
 //   +------------------+
 //
-// Aesthetic: 60s electronic laboratory -- monospaced, CRT green,
-// consistent with the existing LatentResonatorView design language.
+// JP-future mecha module aesthetic. Titanium surfaces, neon accents.
 
 private typealias DS = LRConstants.DS
 
@@ -60,8 +59,8 @@ struct LaneStripView: View {
                         .fill(lane.isLaneRecording ? DS.danger : DS.textDisabled)
                         .frame(width: DS.dotMD, height: DS.dotMD)
                         .shadow(
-                            color: lane.isLaneRecording ? DS.danger.opacity(0.8) : .clear,
-                            radius: 3
+                            color: lane.isLaneRecording ? DS.danger.opacity(0.6) : .clear,
+                            radius: 2
                         )
                     Text("REC")
                         .font(DS.font(DS.fontCaption2, weight: .bold))
@@ -69,7 +68,7 @@ struct LaneStripView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, DS.togglePaddingV)
-                .background(lane.isLaneRecording ? DS.danger.opacity(0.1) : Color.clear)
+                .background(lane.isLaneRecording ? DS.danger.opacity(0.15) : DS.surfaceSubtle)
                 .overlay(
                     RoundedRectangle(cornerRadius: DS.radiusSM)
                         .stroke(
@@ -115,13 +114,13 @@ struct LaneStripView: View {
         }
         .padding(DS.spacingMD)
         .frame(width: LRConstants.laneStripWidth)
-        .background(Color.white.opacity(0.02))
+        .background(DS.surfaceSubtle)
         .overlay(
             RoundedRectangle(cornerRadius: DS.radiusMD)
                 .stroke(
                     engine.focusLaneId == lane.id
-                        ? DS.success
-                        : (lane.isSoloed ? DS.warning.opacity(0.6) : DS.border),
+                        ? DS.neonTurquesa.opacity(0.7)
+                        : (lane.isSoloed ? DS.neonAmbar.opacity(0.6) : DS.border),
                     lineWidth: engine.focusLaneId == lane.id ? 2 : 1
                 )
         )
@@ -141,18 +140,18 @@ struct LaneStripView: View {
                 if isFocus {
                     Text("DRIFT →")
                         .font(DS.font(DS.fontCaption2, weight: .bold))
-                        .foregroundColor(DS.success)
+                        .foregroundColor(DS.neonTurquesa)
                 }
             }
             Spacer()
             Button(action: { engine.focusLaneId = lane.id }) {
                 ZStack {
                     Circle()
-                        .fill(isFocus ? DS.success : DS.textDisabled)
+                        .fill(isFocus ? DS.neonTurquesa : DS.textDisabled)
                         .frame(width: DS.dotLG, height: DS.dotLG)
                     if isFocus {
                         Circle()
-                            .stroke(DS.success, lineWidth: 2)
+                            .stroke(DS.neonTurquesa, lineWidth: 2)
                             .frame(width: DS.dotLG + 4, height: DS.dotLG + 4)
                             .opacity(0.8)
                     }
@@ -251,14 +250,14 @@ struct LaneStripView: View {
             if lane.isInferring {
                 Text("INFER")
                     .font(DS.font(DS.fontCaption2, weight: .bold))
-                    .foregroundColor(DS.warning)
+                    .foregroundColor(DS.neonAmbar)
                     .opacity(lane.isInferring ? 1.0 : 0.0)
                     .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: lane.isInferring)
             }
             if lane.lfoDepth > 0 {
                 Text("LFO")
                     .font(DS.font(DS.fontCaption2, weight: .bold))
-                    .foregroundColor(DS.info)
+                    .foregroundColor(DS.neonTurquesa)
             }
         }
         .animation(DS.stateTransition, value: lane.isRunning)
@@ -435,7 +434,7 @@ struct LaneDetailPopover: View {
             .padding(DS.spacingXL)
         }
         .frame(width: 420, height: 700)
-        .background(Color(red: 0.05, green: 0.05, blue: 0.05))
+        .background(DS.surfacePopover)
     }
 
     // MARK: - Prompt Section
@@ -459,7 +458,7 @@ struct LaneDetailPopover: View {
                 .font(DS.font(DS.fontBody))
                 .foregroundColor(DS.warning.opacity(0.8))
                 .padding(DS.spacingMD)
-                .background(Color.black)
+                .background(DS.panelHollow)
                 .overlay(RoundedRectangle(cornerRadius: DS.radiusSM).stroke(DS.warning.opacity(0.2)))
                 .disabled(lane.promptEvolutionEnabled)
                 .opacity(lane.promptEvolutionEnabled ? 0.4 : 1.0)
@@ -594,12 +593,18 @@ struct LaneDetailPopover: View {
 
     private var stochasticMassContent: some View {
         VStack(spacing: DS.spacingMD) {
-            LRParamSlider(label: "ENTROPY", value: $lane.entropyLevel,
-                          range: LRConstants.entropyRange, format: "%.0f", color: DS.warning,
-                          hint: "Spectral noise injection. Adds random variation to the frequency spectrum each cycle")
-            LRParamSlider(label: "GRANULARITY", value: $lane.granularity,
-                          range: LRConstants.granularityRange, format: "%.0f", color: DS.warning,
-                          hint: "Spectral resolution -- how many frequency bins are processed independently. Higher = finer detail")
+            LRParamSlider(label: "ENTROPY", value: Binding(
+                get: { lane.entropyLevel },
+                set: { lane.entropyLevel = lane.isDrumLane ? min($0, LRConstants.drumLaneEntropyCap) : $0 }),
+                range: lane.isDrumLane ? 0...LRConstants.drumLaneEntropyCap : LRConstants.entropyRange,
+                format: "%.0f", color: DS.warning,
+                hint: "Spectral noise injection. Drum Lane capped to preserve punch")
+            LRParamSlider(label: "GRANULARITY", value: Binding(
+                get: { lane.granularity },
+                set: { lane.granularity = lane.isDrumLane ? min($0, LRConstants.drumLaneGranularityCap) : $0 }),
+                range: lane.isDrumLane ? 0...LRConstants.drumLaneGranularityCap : LRConstants.granularityRange,
+                format: "%.0f", color: DS.warning,
+                hint: "Spectral resolution. Drum Lane capped to preserve punch")
             LRParamSlider(label: "FEEDBACK", value: $lane.feedbackAmount,
                           range: LRConstants.feedbackRange, format: "%.2f", color: DS.warning,
                           hint: "Output fed back as input for the next cycle. Higher = more self-referential, recursive evolution")

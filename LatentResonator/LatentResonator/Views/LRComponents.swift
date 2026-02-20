@@ -3,9 +3,8 @@ import AppKit
 
 // MARK: - LR Design System Components
 //
-// Reusable UI primitives that enforce consistent styling across all views.
-// No @Published, no ObservableObject, no new state management.
-// These are pure SwiftUI views that reference LRConstants.DS tokens.
+// Reusable UI primitives. Aesthetic: JP-future mecha module.
+// Titanium surfaces, neon accents, flat panels. No state, no wiring changes.
 
 private typealias DS = LRConstants.DS
 
@@ -33,12 +32,12 @@ struct LRToggle: View {
                 .frame(maxWidth: fullWidth ? .infinity : nil)
                 .padding(.horizontal, DS.togglePaddingH)
                 .padding(.vertical, DS.togglePaddingV)
-                .background(isActive ? activeColor.opacity(DS.activeOpacity) : Color.clear)
+                .background(isActive ? activeColor.opacity(DS.activeOpacity) : DS.surfaceSubtle)
                 .overlay(
                     RoundedRectangle(cornerRadius: DS.toggleCornerRadius)
                         .stroke(
                             isActive
-                                ? activeColor.opacity(0.5)
+                                ? activeColor.opacity(0.6)
                                 : (isHovered ? DS.borderActive : DS.border),
                             lineWidth: 1
                         )
@@ -98,16 +97,16 @@ private struct LRSegmentButton: View {
         Button(action: action) {
             Text(label)
                 .font(DS.font(DS.fontCaption, weight: .bold))
-                .foregroundColor(isSelected ? .black : color.opacity(0.6))
+                .foregroundColor(isSelected ? .black : DS.textSecondary)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, DS.togglePaddingV)
-                .background(isSelected ? color.opacity(DS.activeOpacity) : Color.clear)
+                .background(isSelected ? color.opacity(DS.activeOpacity) : DS.surfaceSubtle)
                 .overlay(
                     RoundedRectangle(cornerRadius: DS.toggleCornerRadius)
                         .stroke(
                             isSelected
-                                ? color.opacity(0.4)
-                                : (isHovered ? color.opacity(0.3) : color.opacity(0.2)),
+                                ? color.opacity(0.6)
+                                : (isHovered ? DS.borderActive : DS.border),
                             lineWidth: 1
                         )
                 )
@@ -142,7 +141,7 @@ struct LRStatusRow: View {
             Circle()
                 .fill(dotColor)
                 .frame(width: DS.dotSM, height: DS.dotSM)
-                .shadow(color: dotColor.opacity(0.5), radius: 2)
+                .shadow(color: dotColor.opacity(0.35), radius: 1)
 
             Text(label)
                 .font(DS.font(DS.fontCaption, weight: .bold))
@@ -188,7 +187,7 @@ struct LRSectionHeader: View {
             Text(title)
                 .font(DS.font(DS.fontCaption, weight: .bold))
                 .foregroundColor(color)
-                .tracking(1)
+                .tracking(DS.trackingLab)
             Spacer()
             if let trailing = trailing {
                 Text(trailing)
@@ -199,15 +198,21 @@ struct LRSectionHeader: View {
     }
 }
 
-// MARK: - LRDivider
+// MARK: - LRDivider (Panel Line)
 //
-// Consistent 1px divider using design tokens.
+// 2px sunken channel: panelHollow + bottom bevel.
 
 struct LRDivider: View {
     var body: some View {
-        Rectangle()
-            .fill(DS.dividerColor)
-            .frame(height: DS.dividerHeight)
+        VStack(spacing: 0) {
+            Rectangle()
+                .fill(DS.panelHollow)
+                .frame(height: 1)
+            Rectangle()
+                .fill(DS.panelBevel)
+                .frame(height: 1)
+        }
+        .frame(height: DS.panelDividerHeight)
     }
 }
 
@@ -263,7 +268,7 @@ struct LRActionButton: View {
     private var backgroundColor: Color {
         switch style {
         case .primary:     return color
-        case .destructive: return Color.black
+        case .destructive: return DS.titanioBottom
         case .ghost:       return Color.clear
         }
     }

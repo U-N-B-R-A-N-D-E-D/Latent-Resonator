@@ -11,8 +11,9 @@ import AVFoundation
 //
 // Thread safety: writeBuffer() dispatches writes to a serial queue
 // so it can be called from audio tap callbacks or inference threads.
+// @unchecked Sendable: all mutable state is synchronized via recordingQueue.
 
-final class AudioRecorder {
+final class AudioRecorder: @unchecked Sendable {
 
     private var audioFile: AVAudioFile?
     private(set) var isRecording: Bool = false
@@ -23,13 +24,13 @@ final class AudioRecorder {
     )
 
     /// Output directory for all Latent Resonator recordings.
-    /// Falls back to /tmp/LatentResonator if Documents is unavailable (e.g. sandbox).
+    /// Uses custom path from Settings when set; else ~/Documents/LatentResonator.
     static var outputDirectory: URL {
-        if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
-            return docs.appendingPathComponent(LRConstants.recordingDirectoryName, isDirectory: true)
+        if let custom = UserDefaults.standard.string(forKey: LRConstants.RecordingConfig.userDefaultsKey),
+           !custom.isEmpty {
+            return URL(fileURLWithPath: custom, isDirectory: true)
         }
-        print(">> AudioRecorder: Documents unavailable, using /tmp fallback")
-        return URL(fileURLWithPath: "/tmp/LatentResonator/Recordings", isDirectory: true)
+        return LRConstants.RecordingConfig.defaultDirectory
     }
 
     /// Start recording to a WAV file.

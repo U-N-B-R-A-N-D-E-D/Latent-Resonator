@@ -140,7 +140,7 @@ The project is designed to run on any Mac without machine-specific paths or secr
 - **Paths**: Model directory uses `~/Library/Application Support/LatentResonator/` by default; Settings lets you choose a custom path.
 - **Bridge**: Binds to `127.0.0.1` only (local use). No authentication; do not expose to the network.
 - **Secrets**: No API keys or credentials in the repo. `.gitignore` excludes `.env`, `*.key`, `*.pem`.
-- **Python venv**: Bridge creates `.venv-ace-bridge/` in the Scripts folder; excluded from git.
+- **Python venv**: App creates `~/Library/Application Support/LatentResonator/venv-ace-bridge/` (user-writable; fixes "Failed to create venv" when app is in /Applications or read-only locations).
 
 ### Optional: Core ML Models
 

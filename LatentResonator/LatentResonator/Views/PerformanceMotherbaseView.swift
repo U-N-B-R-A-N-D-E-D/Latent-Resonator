@@ -30,26 +30,40 @@ struct PerformanceMotherbaseView: View {
 
     var body: some View {
         ZStack {
-            DS.surfacePrimary.ignoresSafeArea()
+            LinearGradient(
+                colors: [DS.titanioTop, DS.titanioBottom],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
 
             VStack(spacing: 0) {
                 topBar
                 LRDivider()
-                masterXYSection
-                    .background(DS.surfaceElevated.opacity(0.5))
-                LRDivider()
-                SceneCrossfaderView(engine: engine)
-                LRDivider()
-                stepGridSectionOrPlaceholder
-                    .background(DS.surfaceElevated.opacity(0.3))
-                LRDivider()
-                laneTabsSection
-                Spacer(minLength: DS.spacingSM)
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: 0) {
+                        masterXYSection
+                            .background(DS.surfaceElevated.opacity(0.5))
+                        LRDivider()
+                        SceneCrossfaderView(engine: engine)
+                        LRDivider()
+                        stepGridSectionOrPlaceholder
+                            .background(DS.surfaceElevated.opacity(0.3))
+                        LRDivider()
+                        laneTabsSection
+                    }
+                }
+                .frame(maxHeight: .infinity)
                 triggerButton
                 statusBar
             }
         }
-        .onChange(of: engine.focusLaneId) { _, _ in
+        .onChange(of: engine.focusLaneId) { oldId, newId in
+            // #region agent log
+            DebugLogger.log(location: "PerformanceMotherbaseView.swift:61", message: "Focus lane switched",
+                data: ["oldId": String(describing: oldId), "newId": String(describing: newId), "laneCount": engine.lanes.count],
+                hypothesisId: "H1")
+            // #endregion
             engine.selectedStepIndices = []
         }
         .onChange(of: engine.focusLane?.stepGrid.chainLength) { _, newLen in
@@ -62,6 +76,9 @@ struct PerformanceMotherbaseView: View {
         .onChange(of: engine.focusLane?.stepGrid.advanceMode) { _, _ in
             engine.syncStepTimer()
         }
+        .onChange(of: engine.focusLane?.stepGrid.stepTimeBPM) { _, _ in
+            engine.syncStepTimer()
+        }
     }
 
     // MARK: - Top Bar (+ PANIC button)
@@ -70,7 +87,7 @@ struct PerformanceMotherbaseView: View {
         HStack(spacing: DS.spacingMD) {
             Text("MOTHERBASE")
                 .font(DS.font(DS.fontTitle, weight: .bold))
-                .foregroundColor(DS.success.opacity(0.7))
+                .foregroundColor(DS.neonTurquesa.opacity(0.85))
 
             Circle()
                 .fill(engine.aceBridge.status == .modelLoaded ? DS.success : (engine.aceBridge.status == .connected ? DS.warning : DS.textTertiary))
@@ -82,7 +99,7 @@ struct PerformanceMotherbaseView: View {
             if engine.aceBridge.lastLatencyMs > 0 {
                 Text(String(format: "%.0fms", engine.aceBridge.lastLatencyMs))
                     .font(DS.font(DS.fontCaption))
-                    .foregroundColor(DS.success.opacity(0.5))
+                    .foregroundColor(DS.neonTurquesa.opacity(0.6))
             }
 
             Spacer()
@@ -114,7 +131,7 @@ struct PerformanceMotherbaseView: View {
             .help("Master record -- capture the combined output of all lanes to a WAV file (R)")
         }
         .padding(.horizontal, DS.spacingXL)
-        .padding(.vertical, DS.spacingMD)
+        .padding(.vertical, DS.spacingSM)
     }
 
     // MARK: - Master XY (Focus Lane) -- Configurable Axes
@@ -122,9 +139,20 @@ struct PerformanceMotherbaseView: View {
     private var masterXYSection: some View {
         VStack(spacing: DS.spacingSM) {
             HStack(spacing: 0) {
-                Text("DRIFT // FOCUS LANE")
-                    .font(DS.font(DS.fontCaption, weight: .bold))
-                    .foregroundColor(DS.success.opacity(0.5))
+                Group {
+                    Text("DRIFT")
+                        .font(DS.font(DS.fontCaption, weight: .bold))
+                        .foregroundColor(DS.neonTurquesa.opacity(0.65))
+                    if let lane = engine.focusLane {
+                        Text(" // \(lane.name)")
+                            .font(DS.font(DS.fontCaption, weight: .bold))
+                            .foregroundColor(DS.accentColor(for: lane.accentColorName))
+                    } else {
+                        Text(" // NO LANE")
+                            .font(DS.font(DS.fontCaption, weight: .bold))
+                            .foregroundColor(DS.textTertiary)
+                    }
+                }
                 Spacer()
                 xyAxisModePicker
             }
@@ -135,20 +163,20 @@ struct PerformanceMotherbaseView: View {
                     xyLabelX: xyLabelX, xyLabelY: xyLabelY)
             } else {
                 RoundedRectangle(cornerRadius: DS.radiusSM)
-                    .fill(Color.black.opacity(0.5))
+                    .fill(DS.panelHollow)
                     .frame(height: LRConstants.xyPadHeight)
                     .overlay(Text("NO LANE").font(DS.font(DS.fontBody)).foregroundColor(DS.textTertiary))
             }
         }
         .padding(.horizontal, DS.spacingXL)
-        .padding(.vertical, DS.spacingMD)
+        .padding(.vertical, DS.spacingSM)
     }
 
     private var xyAxisModePicker: some View {
         LRSegmentPicker(
             items: XYAxisMode.allCases,
             selected: xyAxisMode,
-            color: DS.success,
+            color: DS.neonTurquesa,
             labelForItem: { $0.rawValue },
             onSelect: { xyAxisMode = $0 }
         )
@@ -264,27 +292,41 @@ struct PerformanceMotherbaseView: View {
 
     private var stepGridPlaceholder: some View {
         VStack(spacing: DS.spacingSM) {
-            LRSectionHeader(title: "STEP GRID", color: DS.success.opacity(0.5))
+            LRSectionHeader(title: "STEP GRID", color: DS.neonTurquesa.opacity(0.6))
             RoundedRectangle(cornerRadius: DS.radiusSM)
-                .fill(Color.black.opacity(0.5))
+                .fill(DS.panelHollow)
                 .frame(height: 120)
                 .overlay(Text("SELECT A LANE").font(DS.font(DS.fontBody)).foregroundColor(DS.textTertiary))
         }
         .padding(.horizontal, DS.spacingXL)
-        .padding(.vertical, DS.spacingMD)
+        .padding(.vertical, DS.spacingSM)
     }
 
     // MARK: - Lane Tabs + Focus Lane Strip
 
     private var laneTabsSection: some View {
-        VStack(spacing: DS.spacingSM) {
+        VStack(spacing: DS.spacingMD) {
+            HStack {
+                Text("CHANNELS")
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(DS.neonTurquesa.opacity(0.6))
+                if let lane = engine.focusLane {
+                    Text("→")
+                        .font(DS.font(DS.fontCaption, weight: .bold))
+                        .foregroundColor(DS.textTertiary)
+                    Text("CONTROLLING: \(lane.name)")
+                        .font(DS.font(DS.fontCaption, weight: .bold))
+                        .foregroundColor(DS.accentColor(for: lane.accentColorName))
+                }
+                Spacer()
+            }
             laneTabRow
             if let lane = engine.focusLane {
                 FocusLaneStripView(lane: lane, engine: engine)
             }
         }
         .padding(.horizontal, DS.spacingXL)
-        .padding(.vertical, DS.spacingMD)
+        .padding(.vertical, DS.spacingSM)
     }
 
     private var laneTabRow: some View {
@@ -336,15 +378,15 @@ struct PerformanceMotherbaseView: View {
         HStack(spacing: 10) {
             ProgressView()
                 .scaleEffect(0.8)
-                .progressViewStyle(CircularProgressViewStyle(tint: .orange))
+                .progressViewStyle(CircularProgressViewStyle(tint: DS.neonAmbar))
             Text(bridgeStatusMessage)
                 .font(DS.font(DS.fontCaption, weight: .medium))
-                .foregroundColor(DS.warning.opacity(0.9))
+                .foregroundColor(DS.neonAmbar.opacity(0.9))
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, DS.spacingLG)
-        .background(Color.black.opacity(0.6))
-        .overlay(Rectangle().stroke(DS.warning.opacity(0.5), lineWidth: 1))
+        .background(DS.overlayReadout)
+        .overlay(Rectangle().stroke(DS.neonAmbar.opacity(0.5), lineWidth: 1))
     }
 
     private var bridgeStatusMessage: String {
@@ -369,7 +411,7 @@ struct PerformanceMotherbaseView: View {
 
             Text("CYCLES: \(engine.globalCycleCount)")
                 .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(DS.success.opacity(0.5))
+                .foregroundColor(DS.neonTurquesa.opacity(0.6))
             Text("STEP: \(engine.focusStepGrid.map { "\($0.currentStepIndex + 1)/\($0.chainLength)" } ?? "--")")
                 .font(DS.font(DS.fontCaption2))
                 .foregroundColor(DS.textTertiary)
@@ -390,23 +432,28 @@ private struct LaneTabView: View {
     @ObservedObject var lane: ResonatorLane
     @ObservedObject var engine: NeuralEngine
 
+    private var accent: Color { DS.accentColor(for: lane.accentColorName) }
+
     var body: some View {
         let isFocus = engine.focusLaneId == lane.id
         return Button(action: { engine.focusLaneId = lane.id }) {
             VStack(spacing: DS.spacingXS) {
                 HStack(spacing: 3) {
                     if isFocus {
-                        Text("DRIFT")
+                        Text("ACTIVE")
                             .font(DS.font(DS.fontCaption2, weight: .bold))
                             .foregroundColor(.black)
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
-                            .background(DS.success.opacity(0.5))
+                            .background(DS.neonTurquesa.opacity(DS.activeOpacity))
                             .cornerRadius(2)
                     }
-                    Text(String(lane.name.prefix(5)))
+                    Text(lane.name)
                         .font(DS.font(DS.fontCaption, weight: .bold))
-                        .foregroundColor(isFocus ? .black : DS.success.opacity(0.6))
+                        .foregroundColor(isFocus ? .black : (lane.isMuted ? DS.textTertiary : accent))
+                        .opacity(lane.isMuted && !isFocus ? 0.6 : 1)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                     Text("i\(lane.iterationCount)")
                         .font(DS.font(DS.fontCaption2, weight: .medium))
                         .foregroundColor(isFocus ? .black.opacity(0.6) : DS.textTertiary)
@@ -434,17 +481,26 @@ private struct LaneTabView: View {
             }
             .padding(.horizontal, DS.spacingMD)
             .padding(.vertical, DS.spacingSM)
-            .frame(minWidth: 60)
-            .background(isFocus ? DS.success : Color.gray.opacity(DS.inactiveOpacity))
+            .frame(minWidth: 72)
+            .background(
+                isFocus ? DS.neonTurquesa.opacity(DS.activeOpacity)
+                : (lane.isMuted ? DS.surfaceSubtle.opacity(0.7) : DS.surfaceSubtle)
+            )
             .cornerRadius(3)
             .overlay(
                 RoundedRectangle(cornerRadius: 3)
-                    .stroke(isFocus ? DS.success : DS.border, lineWidth: isFocus ? 2 : 1)
+                    .stroke(
+                        isFocus ? DS.neonTurquesa.opacity(0.8)
+                        : (lane.isSoloed ? DS.neonAmbar.opacity(0.6) : DS.border),
+                        lineWidth: isFocus ? 2 : 1
+                    )
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .animation(DS.stateTransition, value: isFocus)
+        .animation(DS.stateTransition, value: lane.isMuted)
+        .animation(DS.stateTransition, value: lane.isSoloed)
         .help(isFocus ? "Drift Pad drives this lane ([ ] to change)" : "Tap to focus — Drift Pad will drive this lane")
     }
 }
@@ -549,7 +605,7 @@ private struct FocusLaneStripView: View {
                 VStack(spacing: DS.spacingXS) {
                     Text("VOL").font(DS.font(DS.fontCaption2, weight: .bold)).foregroundColor(DS.textTertiary)
                     Slider(value: Binding(get: { lane.volume }, set: { lane.volume = $0 }), in: 0...1)
-                        .accentColor(DS.success).scrollableSlider(value: Binding(get: { lane.volume }, set: { lane.volume = $0 }), range: 0...1)
+                        .accentColor(DS.neonTurquesa).scrollableSlider(value: Binding(get: { lane.volume }, set: { lane.volume = $0 }), range: 0...1)
                         .frame(width: 60)
                         .onChange(of: lane.volume) { _, _ in DispatchQueue.main.async { engine.updateLaneMixerState() } }
                 }.help("Output level")
@@ -573,10 +629,16 @@ private struct FocusLaneStripView: View {
                     range: LRConstants.delayTimeRange, accentColor: DS.paramDelay.opacity(0.6), size: knobSize, helpText: "Delay time")
                 RetroKnob(label: "D.FBK", value: Binding(get: { lane.delayFeedback }, set: { lane.delayFeedback = $0 }),
                     range: LRConstants.delayFeedbackRange, accentColor: DS.paramDelay.opacity(0.6), size: knobSize, helpText: "Delay feedback")
-                RetroKnob(label: "ENT", value: Binding(get: { lane.entropyLevel }, set: { lane.entropyLevel = $0 }),
-                    range: LRConstants.entropyRange, accentColor: DS.info.opacity(0.7), size: knobSize, helpText: "Entropy")
-                RetroKnob(label: "GRAN", value: Binding(get: { lane.granularity }, set: { lane.granularity = $0 }),
-                    range: LRConstants.granularityRange, accentColor: DS.info.opacity(0.7), size: knobSize, helpText: "Granularity")
+                RetroKnob(label: "ENT", value: Binding(
+                    get: { lane.entropyLevel },
+                    set: { lane.entropyLevel = lane.isDrumLane ? min($0, LRConstants.drumLaneEntropyCap) : $0 }),
+                    range: lane.isDrumLane ? 0...LRConstants.drumLaneEntropyCap : LRConstants.entropyRange,
+                    accentColor: DS.info.opacity(0.7), size: knobSize, helpText: "Entropy")
+                RetroKnob(label: "GRAN", value: Binding(
+                    get: { lane.granularity },
+                    set: { lane.granularity = lane.isDrumLane ? min($0, LRConstants.drumLaneGranularityCap) : $0 }),
+                    range: lane.isDrumLane ? 0...LRConstants.drumLaneGranularityCap : LRConstants.granularityRange,
+                    accentColor: DS.info.opacity(0.7), size: knobSize, helpText: "Granularity")
                 Spacer()
             }
             HStack(spacing: DS.spacingMD) {
@@ -590,14 +652,14 @@ private struct FocusLaneStripView: View {
                 }
             }
             ScrollView(.horizontal, showsIndicators: false) {
-                LRSegmentPicker(items: ExcitationMode.allCases, selected: lane.excitationMode, color: DS.success,
+                LRSegmentPicker(items: ExcitationMode.allCases, selected: lane.excitationMode, color: DS.neonTurquesa,
                     labelForItem: { $0.rawValue }, onSelect: { mode in DispatchQueue.main.async { lane.excitationMode = mode } })
                     .help("Excitation source")
             }
         }
         .padding(DS.spacingMD)
-        .background(Color.white.opacity(0.02))
-        .overlay(RoundedRectangle(cornerRadius: DS.radiusMD).stroke(isEditing ? DS.warning.opacity(0.4) : DS.success.opacity(0.3), lineWidth: 1))
+        .background(DS.surfaceSubtle)
+        .overlay(RoundedRectangle(cornerRadius: DS.radiusMD).stroke(isEditing ? DS.neonAmbar.opacity(0.5) : DS.neonTurquesa.opacity(0.4), lineWidth: 1))
     }
 
     private func pLockBinding(
@@ -647,7 +709,7 @@ private struct StepGridSectionView: View {
     var body: some View {
         VStack(spacing: DS.spacingSM) {
             HStack {
-                LRSectionHeader(title: "STEP GRID · \(lane.name)", color: DS.success.opacity(0.5))
+                LRSectionHeader(title: "STEP GRID · \(lane.name)", color: DS.neonTurquesa.opacity(0.6))
                 chainLengthControl
                 Spacer()
                 stepAdvanceModePicker
@@ -690,7 +752,7 @@ private struct StepGridSectionView: View {
         VStack(spacing: DS.spacingXS) {
             Text("NO SEQUENCE PROGRAMMED")
                 .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(DS.warning.opacity(0.8))
+                .foregroundColor(DS.neonAmbar.opacity(0.85))
             Text(
                 "TAP a step to edit P-locks. SHIFT+TAP to multi-select for batch operations (trig, DrumVoice (Drum Lane only), clear). "
                 + "LONG-PRESS to capture live tweaks. RIGHT-CLICK for trig type. Press '.' to advance."
@@ -710,7 +772,7 @@ private struct StepGridSectionView: View {
                 .foregroundColor(DS.textTertiary)
             Text("\(lane.stepGrid.chainLength)")
                 .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(DS.success)
+                .foregroundColor(DS.neonTurquesa)
                 .frame(width: 18)
             Button(action: {
                 var grid = lane.stepGrid
@@ -721,7 +783,7 @@ private struct StepGridSectionView: View {
                     .font(DS.font(DS.fontCaption, weight: .bold))
                     .foregroundColor(DS.textSecondary)
                     .frame(width: 18, height: 18)
-                    .background(Color.gray.opacity(DS.inactiveOpacity))
+                    .background(DS.surfaceSubtle)
                     .cornerRadius(DS.radiusSM)
                     .contentShape(Rectangle())
             }
@@ -735,7 +797,7 @@ private struct StepGridSectionView: View {
                     .font(DS.font(DS.fontCaption, weight: .bold))
                     .foregroundColor(DS.textSecondary)
                     .frame(width: 18, height: 18)
-                    .background(Color.gray.opacity(DS.inactiveOpacity))
+                    .background(DS.surfaceSubtle)
                     .cornerRadius(DS.radiusSM)
                     .contentShape(Rectangle())
             }
@@ -746,10 +808,10 @@ private struct StepGridSectionView: View {
 
     private var stepAdvanceModePicker: some View {
         HStack(spacing: DS.spacingXS) {
-            LRSegmentPicker(
+                LRSegmentPicker(
                 items: StepGrid.StepAdvanceMode.allCases,
                 selected: lane.stepGrid.advanceMode,
-                color: DS.success,
+                color: DS.neonTurquesa,
                 labelForItem: { $0.rawValue.uppercased() },
                 onSelect: { mode in
                     var grid = lane.stepGrid
@@ -761,7 +823,7 @@ private struct StepGridSectionView: View {
             .help("How steps advance: MANUAL = tap to advance, TIME = BPM clock, ITERATION = every N inference cycles")
 
             if lane.stepGrid.advanceMode == .manual {
-                LRToggle(label: "TAP", isActive: true, activeColor: DS.warning, helpText: "Advance to the next step in the sequence (.)") {
+                LRToggle(label: "TAP", isActive: true, activeColor: DS.neonAmbar, helpText: "Advance to the next step in the sequence (.)") {
                     engine.advanceLaneManually(lane: lane)
                 }
             }
@@ -794,7 +856,7 @@ private struct StepGridSectionView: View {
             .buttonStyle(.plain)
             Text("\(lane.stepGrid.stepTimeBPM)")
                 .font(DS.font(DS.fontCaption, weight: .bold))
-                .foregroundColor(DS.success)
+                .foregroundColor(DS.neonTurquesa)
                 .frame(width: 36)
             Button(action: {
                 var grid = lane.stepGrid
@@ -859,12 +921,16 @@ private struct StepGridSectionView: View {
                     }
                 }
                 if step.hasLock {
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(DS.neonAmbar.opacity(0.9))
+                        .frame(width: 2, height: 8)
+                        .offset(x: 14, y: 12)
                     lockIndicatorDots(step: step)
                         .offset(x: 8, y: -12)
                 }
                 if !isActive {
                     RoundedRectangle(cornerRadius: DS.radiusSM)
-                        .fill(Color.black.opacity(0.5))
+                        .fill(DS.panelHollow.opacity(0.9))
                 }
             }
             .frame(width: LRConstants.performanceStepPadSize, height: LRConstants.performanceStepPadSize)
@@ -920,7 +986,7 @@ private struct StepGridSectionView: View {
                     if step.warmth != nil       { Circle().fill(DS.trigNote.opacity(0.6)).frame(width: 3, height: 3) }
                     if step.filterCutoff != nil  { Circle().fill(DS.trigLock).frame(width: 3, height: 3) }
                     if step.filterResonance != nil { Circle().fill(DS.trigLock.opacity(0.7)).frame(width: 3, height: 3) }
-                    if step.excitationMode != nil { Circle().fill(DS.success).frame(width: 3, height: 3) }
+                    if step.excitationMode != nil { Circle().fill(DS.neonTurquesa).frame(width: 3, height: 3) }
                     if step.delayMix != nil     { Circle().fill(DS.paramDelay).frame(width: 3, height: 3) }
                     if step.bitCrushDepth != nil { Circle().fill(DS.paramCrush.opacity(0.7)).frame(width: 3, height: 3) }
                 }
@@ -956,7 +1022,7 @@ private struct StepGridSectionView: View {
                             .multilineTextAlignment(.center)
                             .frame(minHeight: 18)
                             .padding(.horizontal, 6)
-                            .background(Color.gray.opacity(0.2))
+                            .background(DS.surfaceElevated)
                             .cornerRadius(DS.radiusSM)
                             .contentShape(Rectangle())
                     }
@@ -977,7 +1043,7 @@ private struct StepGridSectionView: View {
                                 .multilineTextAlignment(.center)
                                 .frame(minHeight: 18)
                                 .padding(.horizontal, 4)
-                                .background(Color.gray.opacity(0.2))
+                                .background(DS.surfaceElevated)
                                 .cornerRadius(DS.radiusSM)
                                 .contentShape(Rectangle())
                         }
@@ -989,7 +1055,7 @@ private struct StepGridSectionView: View {
                             .font(DS.font(DS.fontCaption2, weight: .bold))
                             .foregroundColor(DS.textTertiary)
                             .frame(width: 20, height: 18)
-                            .background(Color.gray.opacity(0.2))
+                            .background(DS.surfaceElevated)
                             .cornerRadius(DS.radiusSM)
                             .contentShape(Rectangle())
                     }
@@ -1101,7 +1167,7 @@ private struct StepGridSectionView: View {
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
                 .frame(minWidth: 38, minHeight: 20)
-                .background(isActive ? DS.warning : Color.gray.opacity(0.2))
+                .background(isActive ? DS.neonAmbar.opacity(DS.activeOpacity) : DS.surfaceElevated)
                 .cornerRadius(DS.radiusSM)
                 .contentShape(Rectangle())
         }
@@ -1116,7 +1182,7 @@ private struct StepGridSectionView: View {
                 .font(DS.font(DS.fontCaption2, weight: .bold))
                 .foregroundColor(isActive ? .black : DS.textTertiary)
                 .frame(width: 20, height: 18)
-                .background(isActive ? DS.textSecondary : Color.gray.opacity(0.2))
+                .background(isActive ? DS.textSecondary : DS.surfaceElevated)
                 .cornerRadius(DS.radiusSM)
                 .contentShape(Rectangle())
         }
