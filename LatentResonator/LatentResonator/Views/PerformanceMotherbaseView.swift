@@ -58,12 +58,7 @@ struct PerformanceMotherbaseView: View {
                 statusBar
             }
         }
-        .onChange(of: engine.focusLaneId) { oldId, newId in
-            // #region agent log
-            DebugLogger.log(location: "PerformanceMotherbaseView.swift:61", message: "Focus lane switched",
-                data: ["oldId": String(describing: oldId), "newId": String(describing: newId), "laneCount": engine.lanes.count],
-                hypothesisId: "H1")
-            // #endregion
+        .onChange(of: engine.focusLaneId) { _, _ in
             engine.selectedStepIndices = []
         }
         .onChange(of: engine.focusLane?.stepGrid.chainLength) { _, newLen in

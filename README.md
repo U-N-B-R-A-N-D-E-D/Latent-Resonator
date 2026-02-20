@@ -5,7 +5,7 @@
 [![Platform: macOS 14+](https://img.shields.io/badge/Platform-macOS%2014+-blue.svg)]()
 [![Swift 5](https://img.shields.io/badge/Swift-5-orange.svg)]()
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB.svg)]()
-[![v1.0.2](https://img.shields.io/badge/version-1.0.2-gray.svg)](CHANGELOG.md)
+[![v1.0.3](https://img.shields.io/badge/version-1.0.3-gray.svg)](CHANGELOG.md)
 
 **A Non-Linear Spectral Processor powered by recursive neural inference.**
 
@@ -21,7 +21,7 @@ Grounded in the avant-garde traditions of Musique Concrète (Schaeffer), Stochas
 |-------|---------|
 | [![Setup](docs/screenshots/setup.png)](docs/screenshots/setup.png) | [![Perform](docs/screenshots/perform.png)](docs/screenshots/perform.png) |
 
-*Setup: multi-lane configuration, Drift Field, channel mixer. Perform: Motherbase, step grid, P-locks, XY pad.*
+*Setup: multi-lane configuration, Drift Field, channel mixer. Perform: Motherbase, step grid, P-locks, XY pad, lane headers.*
 
 ---
 
@@ -137,7 +137,7 @@ S(i+1) = ACE( S(i) + N(μ,σ), P, γ )
 
 The project is designed to run on any Mac without machine-specific paths or secrets:
 
-- **Paths**: Model directory uses `~/Library/Application Support/LatentResonator/` by default; Settings lets you choose a custom path.
+- **Paths**: Model directory defaults to `~/Documents/LatentResonatorModels/`; recordings to `~/Documents/LatentResonator/`. Both configurable in Settings > Config.
 - **Bridge**: Binds to `127.0.0.1` only (local use). No authentication; do not expose to the network.
 - **Secrets**: No API keys or credentials in the repo. `.gitignore` excludes `.env`, `*.key`, `*.pem`.
 - **Python venv**: App creates `~/Library/Application Support/LatentResonator/venv-ace-bridge/` (user-writable; fixes "Failed to create venv" when app is in /Applications or read-only locations).
@@ -300,11 +300,12 @@ Scenes and the step grid are aligned with the whitepaper recursive formula (§3.
 
 ## Settings
 
-Use **Cmd + ,** or the app menu to open Settings. (A gear icon in the mode bar is planned.) Configure:
+Use **Cmd + ,** or the gear icon in the mode bar to open Settings. Configure:
 
 | Setting | Default | Description |
 |---|---|---|
-| **Model Path** | `~/Library/Application Support/LatentResonator/Models/` | Directory containing ACE-Step model weights. Use Browse to select a custom location. |
+| **ACE-Step Model Path** | `~/Documents/LatentResonatorModels/` | Directory containing ACE-Step model weights. Use Browse to select a custom location. |
+| **Recording Output Directory** | `~/Documents/LatentResonator/` | Where master WAV recordings are saved. Use Browse to select a custom location. |
 | **Bridge Port** | 8976 (read-only) | Local port for the Python bridge server |
 
 ### Model Path Discovery
@@ -312,10 +313,11 @@ Use **Cmd + ,** or the app menu to open Settings. (A gear icon in the mode bar i
 The app searches for model weights in this order:
 
 1. **Custom path** (if configured in Settings)
-2. **Application Support** (`~/Library/Application Support/LatentResonator/Models/`)
-3. **Project root** (`{projectRoot}/models/`) -- developer convenience
+2. **Documents** (`~/Documents/LatentResonatorModels/`) — default, user-visible
+3. **Application Support** (`~/Library/Application Support/LatentResonator/Models/`)
+4. **Project root** (`{projectRoot}/models/`) — developer convenience
 
-Place your downloaded ACE-Step weights in any of these locations. The app creates the Application Support directory automatically on first launch.
+Place your downloaded ACE-Step weights in any of these locations. The app creates the default directories automatically on first launch.
 
 ---
 
@@ -329,7 +331,7 @@ All major actions are reachable without a mouse. Also documented in Settings > S
 |---|---|
 | `Space` | Start / Stop engine |
 | `Escape` | Panic -- force stop all lanes |
-| `R` | Toggle master recording (saves to `~/Documents/LatentResonator/`) |
+| `R` | Toggle master recording (saves to configured directory; default `~/Documents/LatentResonator/`) |
 
 ### Navigation
 

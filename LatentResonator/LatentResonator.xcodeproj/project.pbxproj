@@ -38,7 +38,6 @@
 		089C166500000057 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000058 /* RootView.swift */; };
 		089C166500000059 /* ParameterRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000005A /* ParameterRouter.swift */; };
 		F1A2B3C400000061 /* LRComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C400000060 /* LRComponents.swift */; };
-		DB00000000000001 /* DebugLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB00000000000002 /* DebugLogger.swift */; };
 		089C166500000080 /* CircularAudioBufferTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000070 /* CircularAudioBufferTests.swift */; };
 		089C166500000081 /* ConstantsValidationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000071 /* ConstantsValidationTests.swift */; };
 		089C166500000082 /* ParameterRoutingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000072 /* ParameterRoutingTests.swift */; };
@@ -79,7 +78,6 @@
 		089C166500000058 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		089C16650000005A /* ParameterRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParameterRouter.swift; sourceTree = "<group>"; };
 		F1A2B3C400000060 /* LRComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LRComponents.swift; sourceTree = "<group>"; };
-		DB00000000000002 /* DebugLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogger.swift; sourceTree = "<group>"; };
 		089C166500000070 /* CircularAudioBufferTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CircularAudioBufferTests.swift; sourceTree = "<group>"; };
 		089C166500000071 /* ConstantsValidationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConstantsValidationTests.swift; sourceTree = "<group>"; };
 		089C166500000072 /* ParameterRoutingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParameterRoutingTests.swift; sourceTree = "<group>"; };
@@ -141,7 +139,6 @@
 				089C166500000043 /* WAVCodec.swift */,
 				089C166500000044 /* BridgeProcessManager.swift */,
 				089C166500000045 /* ResonatorLane.swift */,
-				DB00000000000002 /* DebugLogger.swift */,
 				089C166500000004 /* Views */,
 				089C166500000005 /* Metal */,
 				089C166500000006 /* Config */,
@@ -366,7 +363,6 @@
 				089C166500000057 /* RootView.swift in Sources */,
 				089C166500000059 /* ParameterRouter.swift in Sources */,
 				F1A2B3C400000061 /* LRComponents.swift in Sources */,
-				DB00000000000001 /* DebugLogger.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

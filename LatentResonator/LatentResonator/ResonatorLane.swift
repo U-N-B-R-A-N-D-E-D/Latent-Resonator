@@ -1292,13 +1292,6 @@ final class ResonatorLane: ObservableObject, Identifiable {
         let newCutoff = expLerp(20000.0, 2000.0, 200.0, t)
         var newEntropy = lerp3(0.0, 20.0, 50.0, t)
         var newGrain = lerp3(0.0, 15.0, 40.0, t)
-        // #region agent log
-        if newEntropy > 40 || newGrain > 35 {
-            DebugLogger.log(location: "ResonatorLane.swift:1295", message: "MacroTexture extreme values",
-                data: ["texture": t, "newEntropy": newEntropy, "newGrain": newGrain, "lane": name],
-                hypothesisId: "H2")
-        }
-        // #endregion
         if isDrumLane {
             newEntropy = min(newEntropy, LRConstants.drumLaneEntropyCap)
             newGrain = min(newGrain, LRConstants.drumLaneGranularityCap)
@@ -1322,13 +1315,6 @@ final class ResonatorLane: ObservableObject, Identifiable {
         let newStrength = lerp3(0.8, 0.5, 0.2, c)
         let newCfg = lerp3(5.0, 12.0, 18.0, c)
         let newMethod = c < 0.7 ? "ode" : "sde"
-        // #region agent log
-        if newCfg > 16 || newStrength < 0.3 {
-            DebugLogger.log(location: "ResonatorLane.swift:1318", message: "MacroChaos extreme values",
-                data: ["chaos": c, "newCfg": newCfg, "newStrength": newStrength, "lane": name],
-                hypothesisId: "H2")
-        }
-        // #endregion
         objectWillChange.send()
         inputStrength = newStrength
         guidanceScale = newCfg

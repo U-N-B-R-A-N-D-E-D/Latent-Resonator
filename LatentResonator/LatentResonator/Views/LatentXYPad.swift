@@ -145,19 +145,9 @@ struct LatentXYPad: View {
             }
         }
         .onChange(of: x) { _, newVal in
-            // #region agent log
-            DebugLogger.log(location: "LatentXYPad.swift:148", message: "x binding changed",
-                data: ["newVal": newVal, "isDragging": isDragging, "isReadOnly": isReadOnly],
-                hypothesisId: "H1")
-            // #endregion
             if isReadOnly { localX = newVal }
         }
         .onChange(of: y) { _, newVal in
-            // #region agent log
-            DebugLogger.log(location: "LatentXYPad.swift:156", message: "y binding changed",
-                data: ["newVal": newVal, "isDragging": isDragging, "isReadOnly": isReadOnly],
-                hypothesisId: "H1")
-            // #endregion
             if isReadOnly { localY = newVal }
         }
     }
@@ -177,11 +167,6 @@ struct LatentXYPad: View {
     }
 
     private func commitValues() {
-        // #region agent log
-        DebugLogger.log(location: "LatentXYPad.swift:169", message: "XY pad commit",
-            data: ["localX": localX, "localY": localY, "isDragging": isDragging],
-            hypothesisId: "H1")
-        // #endregion
         x = localX
         y = localY
         onCommit?()
