@@ -90,6 +90,10 @@ final class ResonatorLane: ObservableObject, Identifiable {
     @Published var name: String
     let accentColorName: String
 
+    /// True when this lane uses the Drum Lane preset. Enables parameter caps
+    /// (entropy, granularity) to preserve punch and avoid convergence to noise.
+    var isDrumLane: Bool { name == LanePreset.drumLane.name }
+
     // MARK: - Mixer State
 
     @Published var volume: Float = 1.0
@@ -423,6 +427,8 @@ final class ResonatorLane: ObservableObject, Identifiable {
         self.promptText = preset.prompt
         self.promptPhases = [preset.promptPhase1, preset.promptPhase2, preset.promptPhase3]
         self.excitationMode = preset.excitationMode
+        self.euclideanPulses = preset.euclideanPulses
+        self.euclideanSteps = preset.euclideanSteps
 
         // Effects chain from preset
         self.delayTime = preset.delayTime
@@ -842,6 +848,8 @@ final class ResonatorLane: ObservableObject, Identifiable {
         autoDecayEnabled = false
         promptText = preset.prompt
         excitationMode = preset.excitationMode
+        euclideanPulses = preset.euclideanPulses
+        euclideanSteps = preset.euclideanSteps
         delayTime = preset.delayTime
         delayFeedback = preset.delayFeedback
         delayMix = preset.delayMix
@@ -916,6 +924,10 @@ final class ResonatorLane: ObservableObject, Identifiable {
         }
         entropyLevel = s.entropyLevel
         granularity = s.granularity
+        if isDrumLane {
+            entropyLevel = min(entropyLevel, LRConstants.drumLaneEntropyCap)
+            granularity = min(granularity, LRConstants.drumLaneGranularityCap)
+        }
         delayTime = s.delayTime
         delayFeedback = s.delayFeedback
         delayMix = s.delayMix
@@ -1278,8 +1290,19 @@ final class ResonatorLane: ObservableObject, Identifiable {
         let t = texture
         // Pre-compute all derived values
         let newCutoff = expLerp(20000.0, 2000.0, 200.0, t)
-        let newEntropy = lerp3(0.0, 20.0, 50.0, t)
-        let newGrain = lerp3(0.0, 15.0, 40.0, t)
+        var newEntropy = lerp3(0.0, 20.0, 50.0, t)
+        var newGrain = lerp3(0.0, 15.0, 40.0, t)
+        // #region agent log
+        if newEntropy > 40 || newGrain > 35 {
+            DebugLogger.log(location: "ResonatorLane.swift:1295", message: "MacroTexture extreme values",
+                data: ["texture": t, "newEntropy": newEntropy, "newGrain": newGrain, "lane": name],
+                hypothesisId: "H2")
+        }
+        // #endregion
+        if isDrumLane {
+            newEntropy = min(newEntropy, LRConstants.drumLaneEntropyCap)
+            newGrain = min(newGrain, LRConstants.drumLaneGranularityCap)
+        }
         let newCrush = lerp3(16.0, 10.0, 6.0, t)
         let newSat: SaturationMode = t < 0.33 ? .clean : (t < 0.66 ? .tube : .transistor)
         // Single notification + batch assignment
@@ -1299,6 +1322,13 @@ final class ResonatorLane: ObservableObject, Identifiable {
         let newStrength = lerp3(0.8, 0.5, 0.2, c)
         let newCfg = lerp3(5.0, 12.0, 18.0, c)
         let newMethod = c < 0.7 ? "ode" : "sde"
+        // #region agent log
+        if newCfg > 16 || newStrength < 0.3 {
+            DebugLogger.log(location: "ResonatorLane.swift:1318", message: "MacroChaos extreme values",
+                data: ["chaos": c, "newCfg": newCfg, "newStrength": newStrength, "lane": name],
+                hypothesisId: "H2")
+        }
+        // #endregion
         objectWillChange.send()
         inputStrength = newStrength
         guidanceScale = newCfg

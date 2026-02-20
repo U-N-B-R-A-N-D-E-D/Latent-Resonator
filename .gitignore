@@ -99,3 +99,4 @@ package.json
 
 # Distribution artifacts
 dist/
+*.zip

@@ -3,8 +3,7 @@ import SwiftUI
 // MARK: - Latent Resonator View (Multi-Lane Mixer)
 //
 // Main interface for the Latent Resonator instrument.
-// Aesthetic: 60s electronic laboratory -- oscilloscopes,
-// precision dials, monospaced type, CRT phosphor green.
+// JP-future mecha module aesthetic: titanium surfaces, neon accents.
 //
 // Layout (mixer-style):
 //   +--------------------------------------------------+
@@ -34,7 +33,12 @@ struct LatentResonatorView: View {
 
     var body: some View {
         ZStack {
-            DS.surfacePrimary.ignoresSafeArea()
+            LinearGradient(
+                colors: [DS.titanioTop, DS.titanioBottom],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
 
             VStack(spacing: 0) {
                 headerBar
@@ -49,8 +53,8 @@ struct LatentResonatorView: View {
                         lanesMixerSection
                     }
                 }
+                .frame(maxHeight: .infinity)
 
-                Spacer(minLength: DS.spacingSM)
                 triggerButton
                 statusBar
             }
@@ -80,8 +84,8 @@ struct LatentResonatorView: View {
                             .fill(engine.isMasterRecording ? DS.danger : DS.textDisabled)
                             .frame(width: DS.dotMD, height: DS.dotMD)
                             .shadow(
-                                color: engine.isMasterRecording ? DS.danger.opacity(0.8) : .clear,
-                                radius: 3
+                                color: engine.isMasterRecording ? DS.danger.opacity(0.6) : .clear,
+                                radius: 2
                             )
                         Text("REC")
                             .font(DS.font(DS.fontCaption2, weight: .bold))
@@ -89,7 +93,7 @@ struct LatentResonatorView: View {
                     }
                     .padding(.horizontal, DS.togglePaddingH)
                     .padding(.vertical, DS.togglePaddingV)
-                    .background(engine.isMasterRecording ? DS.danger.opacity(0.1) : Color.clear)
+                    .background(engine.isMasterRecording ? DS.danger.opacity(0.15) : DS.surfaceSubtle)
                     .overlay(
                         RoundedRectangle(cornerRadius: DS.radiusSM)
                             .stroke(
@@ -104,7 +108,7 @@ struct LatentResonatorView: View {
 
                 Text("\(engine.lanes.count) LANE\(engine.lanes.count == 1 ? "" : "S")")
                     .font(DS.font(DS.fontCaption, weight: .bold))
-                    .foregroundColor(DS.info.opacity(0.4))
+                    .foregroundColor(DS.neonTurquesa.opacity(0.5))
 
                 Text(engine.isProcessing ? "ACTIVE" : "STANDBY")
                     .font(DS.font(DS.fontCaption, weight: .bold))
@@ -114,8 +118,8 @@ struct LatentResonatorView: View {
                     .fill(engine.isProcessing ? DS.danger : DS.textDisabled)
                     .frame(width: DS.dotLG, height: DS.dotLG)
                     .shadow(
-                        color: engine.isProcessing ? DS.danger.opacity(0.8) : .clear,
-                        radius: 4
+                        color: engine.isProcessing ? DS.danger.opacity(0.6) : .clear,
+                        radius: 2
                     )
                     .animation(DS.stateTransition, value: engine.isProcessing)
             }
@@ -152,7 +156,7 @@ struct LatentResonatorView: View {
         }
         .padding(.horizontal, DS.spacingXL)
         .padding(.vertical, DS.spacingMD)
-        .background(Color.white.opacity(0.015))
+        .background(DS.surfaceSubtle)
     }
 
     private var processExtras: [(String, Color)] {
@@ -171,13 +175,13 @@ struct LatentResonatorView: View {
         var extras: [(String, Color)] = []
         if engine.aceBridge.remoteModelType != "none" &&
            engine.aceBridge.remoteModelType != "unknown" {
-            extras.append((engine.aceBridge.remoteModelType.uppercased(), DS.success.opacity(0.5)))
+            extras.append((engine.aceBridge.remoteModelType.uppercased(), DS.neonTurquesa.opacity(0.6)))
         }
         if engine.aceBridge.status == .connected || engine.aceBridge.status == .modelLoaded {
             if engine.aceBridge.lastLatencyMs > 0 {
-                extras.append((String(format: "%.0fms", engine.aceBridge.lastLatencyMs), DS.success.opacity(0.5)))
+                extras.append((String(format: "%.0fms", engine.aceBridge.lastLatencyMs), DS.neonTurquesa.opacity(0.6)))
             }
-            extras.append((engine.aceBridge.remoteDevice.uppercased(), DS.info.opacity(0.4)))
+            extras.append((engine.aceBridge.remoteDevice.uppercased(), DS.neonTurquesa.opacity(0.5)))
         }
         return extras
     }
@@ -185,11 +189,11 @@ struct LatentResonatorView: View {
     private var processStatusColor: Color {
         switch engine.bridgeProcess.state {
         case .idle:       return DS.textDisabled
-        case .settingUp:  return DS.warning.opacity(0.7)
-        case .installing: return DS.warning.opacity(0.8)
-        case .launching:  return DS.warning.opacity(0.7)
-        case .running:    return DS.success.opacity(0.7)
-        case .stopping:   return DS.warning.opacity(0.5)
+        case .settingUp:  return DS.neonAmbar.opacity(0.8)
+        case .installing: return DS.neonAmbar.opacity(0.9)
+        case .launching:  return DS.neonAmbar.opacity(0.8)
+        case .running:    return DS.neonTurquesa.opacity(0.8)
+        case .stopping:   return DS.neonAmbar.opacity(0.6)
         case .error:      return DS.danger.opacity(0.7)
         }
     }
@@ -197,9 +201,9 @@ struct LatentResonatorView: View {
     private var bridgeStatusColor: Color {
         switch engine.aceBridge.status {
         case .disconnected: return DS.textDisabled
-        case .connecting:   return DS.warning.opacity(0.7)
-        case .connected:    return DS.success.opacity(0.6)
-        case .modelLoaded:  return DS.success
+        case .connecting:   return DS.neonAmbar.opacity(0.8)
+        case .connected:    return DS.neonTurquesa.opacity(0.7)
+        case .modelLoaded:  return DS.neonTurquesa
         case .error:        return DS.danger.opacity(0.7)
         }
     }
@@ -210,12 +214,12 @@ struct LatentResonatorView: View {
         VStack(spacing: DS.spacingSM) {
             LRSectionHeader(
                 title: "DRIFT FIELD",
-                color: DS.success.opacity(0.5),
+                color: DS.neonTurquesa.opacity(0.65),
                 trailing: "X: TEXTURE // Y: CHAOS",
-                trailingColor: DS.success.opacity(0.3)
+                trailingColor: DS.neonTurquesa.opacity(0.45)
             )
             .padding(.horizontal, DS.spacingXL)
-            .padding(.top, DS.spacingMD)
+            .padding(.top, DS.spacingSM)
 
             if let lane = engine.focusLane {
                 LatentXYPad(
@@ -245,7 +249,7 @@ struct LatentResonatorView: View {
                     }
                 )
                 .padding(.horizontal, DS.spacingXL)
-                .padding(.bottom, DS.spacingMD)
+                .padding(.bottom, DS.spacingSM)
                 .help("Drift field -- drag to control Texture (X) and Chaos (Y) macros for the focus lane")
             }
         }
@@ -282,7 +286,7 @@ struct LatentResonatorView: View {
                 .padding(.horizontal, DS.spacingXL)
             }
         }
-        .padding(.vertical, DS.spacingMD)
+        .padding(.vertical, DS.spacingSM)
     }
 
     // MARK: - Add Lane Button
@@ -291,7 +295,7 @@ struct LatentResonatorView: View {
         VStack(spacing: DS.spacingMD) {
             Text("ADD LANE")
                 .font(DS.font(DS.fontCaption, weight: .bold))
-                .foregroundColor(DS.success.opacity(0.5))
+                .foregroundColor(DS.neonTurquesa.opacity(0.65))
 
             VStack(spacing: DS.spacingSM) {
                 ForEach(LanePreset.allPresets) { preset in
@@ -315,7 +319,7 @@ struct LatentResonatorView: View {
         }
         .padding(DS.spacingMD)
         .frame(width: LRConstants.laneStripWidth)
-        .background(Color.white.opacity(0.01))
+        .background(DS.surfaceSubtle)
         .overlay(
             RoundedRectangle(cornerRadius: DS.radiusMD)
                 .stroke(style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
@@ -374,15 +378,15 @@ struct LatentResonatorView: View {
         HStack(spacing: 10) {
             ProgressView()
                 .scaleEffect(0.8)
-                .progressViewStyle(CircularProgressViewStyle(tint: .orange))
+                .progressViewStyle(CircularProgressViewStyle(tint: DS.neonAmbar))
             Text(bridgeStatusMessage)
                 .font(DS.font(DS.fontTitle, weight: .medium))
-                .foregroundColor(DS.warning.opacity(0.9))
+                .foregroundColor(DS.neonAmbar.opacity(0.9))
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, DS.spacingLG)
-        .background(Color.black.opacity(0.6))
-        .overlay(Rectangle().stroke(DS.warning.opacity(0.5), lineWidth: 1))
+        .background(DS.overlayReadout)
+        .overlay(Rectangle().stroke(DS.neonAmbar.opacity(0.5), lineWidth: 1))
     }
 
     private var bridgeStatusMessage: String {
@@ -412,14 +416,14 @@ struct LatentResonatorView: View {
                 .font(DS.font(DS.fontCaption2, weight: .bold))
                 .foregroundColor(
                     totalCycles > 0
-                        ? DS.success.opacity(0.5)
+                        ? DS.neonTurquesa.opacity(0.6)
                         : DS.textDisabled
                 )
 
             if engine.aceBridge.remoteInferenceCount > 0 {
                 Text("// BRIDGE: \(engine.aceBridge.remoteInferenceCount)")
                     .font(DS.font(DS.fontCaption2, weight: .bold))
-                    .foregroundColor(DS.info.opacity(0.4))
+                    .foregroundColor(DS.neonTurquesa.opacity(0.5))
             }
 
             Spacer()

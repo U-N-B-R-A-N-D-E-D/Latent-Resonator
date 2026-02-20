@@ -1,9 +1,8 @@
 import SwiftUI
 
-// MARK: - Retro Knob
-// Precision dial with 60s lab aesthetic.
-// 270-degree sweep with tick marks, indicator line, and monospaced readout.
-// Supports drag (vertical) and scroll wheel / trackpad for precise control.
+// MARK: - Retro Knob (Dial Futura)
+// Flat precision dial. 270° sweep, arc indicator, monospaced readout.
+// Supports drag and scroll wheel. JP-future module aesthetic.
 
 private typealias DS = LRConstants.DS
 
@@ -40,7 +39,7 @@ struct RetroKnob: View {
         VStack(spacing: DS.spacingMD) {
             ZStack {
                 Circle()
-                    .stroke(DS.border, lineWidth: 3)
+                    .stroke(DS.panelHollow, lineWidth: 2)
                     .frame(width: size, height: size)
 
                 if let modRange = modulationRange {
@@ -50,8 +49,8 @@ struct RetroKnob: View {
                     Circle()
                         .trim(from: modLow * 0.75, to: modHigh * 0.75)
                         .stroke(
-                            DS.info.opacity(0.25),
-                            style: StrokeStyle(lineWidth: 5, lineCap: .round)
+                            DS.neonTurquesa.opacity(0.25),
+                            style: StrokeStyle(lineWidth: 4, lineCap: .round)
                         )
                         .frame(width: size, height: size)
                         .rotationEffect(.degrees(-225))
@@ -66,14 +65,6 @@ struct RetroKnob: View {
                     .frame(width: size, height: size)
                     .rotationEffect(.degrees(-225))
 
-                ForEach(0..<11, id: \.self) { i in
-                    Rectangle()
-                        .fill(i % 5 == 0 ? DS.borderActive : DS.textDisabled)
-                        .frame(width: 1, height: i % 5 == 0 ? 8 : 4)
-                        .offset(y: -(size / 2 + 6))
-                        .rotationEffect(.degrees(-135.0 + Double(i) * 27.0))
-                }
-
                 Rectangle()
                     .fill(accentColor)
                     .frame(width: 2, height: size / 2 - 8)
@@ -81,7 +72,7 @@ struct RetroKnob: View {
                     .rotationEffect(.degrees(rotationAngle))
 
                 Circle()
-                    .fill(Color(white: 0.12))
+                    .fill(DS.knobCapFill)
                     .frame(width: size * 0.5, height: size * 0.5)
                     .overlay(
                         Circle()
@@ -119,7 +110,7 @@ struct RetroKnob: View {
             Text(label.uppercased())
                 .font(DS.font(DS.fontCaption, weight: .bold))
                 .foregroundColor(DS.textSecondary)
-                .tracking(1)
+                .tracking(DS.trackingLab)
         }
         .ifLet(helpText) { view, text in view.help(text) }
         .accessibilityElement(children: .ignore)
