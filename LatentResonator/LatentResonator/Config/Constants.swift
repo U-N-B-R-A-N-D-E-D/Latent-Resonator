@@ -47,8 +47,14 @@ enum LRConstants {
     /// noise is clearly audible. Was 25 (inaudible in real-time DSP path).
     static let entropyDefault: Float = 35.0
 
+    /// Drum Lane: cap entropy to preserve punch. Higher values smear transients.
+    static let drumLaneEntropyCap: Float = 28.0
+
     static let granularityRange: ClosedRange<Float> = 0.0...100.0
     static let granularityDefault: Float = 45.0
+
+    /// Drum Lane: cap granularity to preserve punch. Higher values smear transients.
+    static let drumLaneGranularityCap: Float = 28.0
 
     /// Input Strength: controls the blend of fresh vs. recursive signal.
     /// White paper §4.2.1: 0.60 initial, §4.2.2: 0.45 for recursive drift.
@@ -332,32 +338,34 @@ enum LRConstants {
 
     // MARK: - UI Layout
 
-    static let windowWidth: CGFloat = 960
-    static let windowHeight: CGFloat = 1240
+    /// Window size: fits 1366×768 and 1440×900 laptops. Trigger button stays visible.
+    static let windowWidth: CGFloat = 920
+    static let windowHeight: CGFloat = 820
     static let knobSize: CGFloat = 74
-    static let xyPadHeight: CGFloat = 300
+    /// XY pad height; reduced for laptop viewports (was 300).
+    static let xyPadHeight: CGFloat = 240
     static let laneStripWidth: CGFloat = 210
 
     // MARK: - Design System (DS)
     //
     // Centralized design tokens for typography, color, spacing, and radii.
+    // Aesthetic: JP-future mecha module — brushed titanium, neon accents, flat panels.
     // All view files reference these instead of hardcoded values.
-    // Zero wiring change -- purely visual consistency.
+    // Zero wiring change — purely visual consistency.
 
     enum DS {
 
         // -- Typography Scale (Fira Code) --
-        // 5 levels using Fira Code for a legible, retro-terminal aesthetic.
-        // Fira Code is bundled in Fonts/ and registered via ATSApplicationFontsPath.
+        // 5 levels using Fira Code for legible mono. JP-future module style.
         static let fontCaption2: CGFloat = 9    // metadata, status dots, tiny readouts
         static let fontCaption:  CGFloat = 10   // section headers, labels, bridge status
         static let fontBody:     CGFloat = 12   // primary text, lane names, buttons
         static let fontTitle:    CGFloat = 14   // view titles, popover headers
         static let fontHeadline: CGFloat = 16   // trigger button, app title
+        /// Tracking for headers (lab signage style).
+        static let trackingLab: CGFloat = 0.5
 
         // -- Fira Code Font Helpers --
-        // Central factory methods so views never hardcode font names.
-        // Falls back to system monospaced if Fira Code is unavailable.
         private static let firaCodeName = "Fira Code"
 
         static func font(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
@@ -372,25 +380,44 @@ enum LRConstants {
             return Font.custom(name, size: size)
         }
 
-        // -- Semantic Colors (CRT Phosphor Tint) --
-        // Text hierarchy -- subtle green tint evokes cathode-ray phosphor.
-        // Colored lane accents (red, blue, purple, etc.) still pop against
-        // the tinted chrome; only the ambient UI carries the CRT feel.
-        static let textPrimary   = Color.white.opacity(0.9)
-        static let textSecondary = Color(red: 0.45, green: 0.55, blue: 0.45).opacity(0.7)
-        static let textTertiary  = Color(red: 0.35, green: 0.45, blue: 0.35).opacity(0.5)
-        static let textDisabled  = Color(red: 0.25, green: 0.35, blue: 0.25).opacity(0.3)
+        // -- Titanium Surface Palette (JP-future mecha) --
+        static let titanioTop    = Color(red: 0.17, green: 0.18, blue: 0.19)
+        static let titanioBottom = Color(red: 0.10, green: 0.11, blue: 0.12)
+        static let titanioBase   = Color(red: 0.12, green: 0.13, blue: 0.14)
 
-        // Surfaces
-        static let surfacePrimary  = Color(red: 0.03, green: 0.03, blue: 0.03)
-        static let surfaceElevated = Color(white: 0.06)
-        static let surfaceOverlay  = Color(white: 0.08)
+        // Panel hollow (sunken channels, dividers)
+        static let panelHollow = Color(red: 0.05, green: 0.05, blue: 0.06)
+        static let panelBevel  = Color.white.opacity(0.04)
 
-        // Borders (phosphor-tinted)
-        static let border       = Color(red: 0.2, green: 0.3, blue: 0.2).opacity(0.3)
-        static let borderActive = Color(red: 0.35, green: 0.5, blue: 0.35).opacity(0.5)
+        // Neon accents (glow indicators, active states)
+        static let neonTurquesa = Color(red: 0.0, green: 0.80, blue: 1.0)
+        static let neonAmbar    = Color(red: 1.0, green: 0.70, blue: 0.0)
 
-        // Functional
+        // Legacy surfaces (aliases for backward compat; views migrate to titanio*)
+        static let surfacePrimary   = titanioBottom
+        static let surfaceElevated  = Color(white: 0.08)
+        static let surfaceOverlay   = Color(white: 0.10)
+        static let surfaceSubtle   = Color.white.opacity(0.02)
+        static let surfacePopover   = Color(red: 0.06, green: 0.06, blue: 0.07)
+        static let overlayReadout   = Color.black.opacity(0.7)
+        static let knobCapFill      = Color(white: 0.14)
+
+        // Opacity tokens (extracted from hardcoded values)
+        static let scanlineOpacity: Double = 0.10
+        static let vignetteOpacity: Double = 0.35
+        static let gridLineOpacity: Double = 0.15
+
+        // Text hierarchy (titanio-compatible)
+        static let textPrimary   = Color.white.opacity(0.92)
+        static let textSecondary = Color(red: 0.55, green: 0.62, blue: 0.65).opacity(0.85)
+        static let textTertiary  = Color(red: 0.45, green: 0.52, blue: 0.55).opacity(0.6)
+        static let textDisabled  = Color(red: 0.35, green: 0.40, blue: 0.42).opacity(0.4)
+
+        // Borders (titanio-compatible)
+        static let border       = Color(red: 0.15, green: 0.18, blue: 0.20).opacity(0.5)
+        static let borderActive  = neonTurquesa.opacity(0.6)
+
+        // Functional (semantic — alerts, status)
         static let danger  = Color.red
         static let warning = Color.orange
         static let success = Color.green
@@ -402,16 +429,22 @@ enum LRConstants {
         static let trigOneShot = Color.green
         static let trigSkip    = Color.gray
 
-        // CRT phosphor (XY Pad aesthetic)
-        static let phosphor = Color.green
+        // XY Pad / Drift Grid (neon replaces phosphor)
+        static let phosphor = neonTurquesa
 
-        // Parameter category accents (lock indicator dots, knob accents)
+        // Parameter category accents
         static let paramPhase     = Color.purple
         static let paramDenoise   = Color.yellow
         static let paramDelay     = Color.blue
         static let paramCrush     = Color.purple
 
-        // -- Spacing Scale (roomier for legibility) --
+        // -- Divider (panel line)
+        static let dividerColor = panelHollow
+        static let dividerHeight: CGFloat = 1
+        /// Panel divider: 2px (hollow + bevel) for sunken channel look.
+        static let panelDividerHeight: CGFloat = 2
+
+        // -- Spacing Scale --
         static let spacingXS:  CGFloat = 3
         static let spacingSM:  CGFloat = 6
         static let spacingMD:  CGFloat = 10
@@ -422,10 +455,6 @@ enum LRConstants {
         static let radiusSM: CGFloat = 3
         static let radiusMD: CGFloat = 5
         static let radiusLG: CGFloat = 8
-
-        // -- Divider (phosphor-tinted) --
-        static let dividerColor = Color(red: 0.2, green: 0.3, blue: 0.2).opacity(0.3)
-        static let dividerHeight: CGFloat = 1
 
         // -- Status Dot Sizes --
         static let dotSM: CGFloat = 6
@@ -453,6 +482,7 @@ enum LRConstants {
             case "orange": return .orange
             case "cyan":   return .cyan
             case "green":  return .green
+            case "yellow": return .yellow
             default:       return .green
             }
         }
@@ -460,10 +490,28 @@ enum LRConstants {
 
     // MARK: - Audio Recording (Whitepaper §5 -- Emergent Phenomena Analysis)
 
-    /// Subdirectory name within ~/Documents/ for recordings.
+    /// Subdirectory name within ~/Documents/ for recordings (when using default).
     static let recordingDirectoryName: String = "LatentResonator"
     /// File name prefix for all recordings.
     static let recordingFilePrefix: String = "LatentResonator_"
+
+    // MARK: - Recording Output (User-Configurable)
+    //
+    // User-configurable recording directory. Default: ~/Documents/LatentResonator.
+    // Set via Settings > Config. Empty = use default.
+
+    enum RecordingConfig {
+        /// UserDefaults key for custom recording output directory.
+        static let userDefaultsKey = "customRecordingDirectory"
+
+        /// Default directory: ~/Documents/LatentResonator.
+        static var defaultDirectory: URL {
+            if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                return docs.appendingPathComponent(recordingDirectoryName, isDirectory: true)
+            }
+            return URL(fileURLWithPath: "/tmp/LatentResonator/Recordings", isDirectory: true)
+        }
+    }
 
     // MARK: - Inference Circuit Breaker
 
@@ -519,14 +567,38 @@ enum LRConstants {
         static let inferTimeout: TimeInterval = 300.0
     }
 
+    // MARK: - Bridge Venv (Application Support)
+    //
+    // Venv must live in a user-writable location. Using projectRoot fails when
+    // the app is in /Applications or a read-only DMG. Application Support works
+    // for both dev and distributed builds.
+    static let appSupportVenvDir: URL = {
+        if let base = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first {
+            return base.appendingPathComponent("LatentResonator/venv-ace-bridge")
+        }
+        return URL(fileURLWithPath: "/tmp/LatentResonator/venv-ace-bridge", isDirectory: true)
+    }()
+
     // MARK: - Model Configuration
     //
-    // User-configurable model path with a 3-location fallback chain:
+    // User-configurable model path with a 4-location fallback chain:
     //   1. UserDefaults override (set via Settings view)
-    //   2. ~/Library/Application Support/LatentResonator/Models/ (standard macOS location)
-    //   3. {projectRoot}/models/ (developer convenience)
+    //   2. ~/Documents/LatentResonatorModels/ (default, user-visible)
+    //   3. ~/Library/Application Support/LatentResonator/Models/ (standard macOS location)
+    //   4. {projectRoot}/models/ (developer convenience)
 
     enum ModelConfig {
+        /// Default model directory: ~/Documents/LatentResonatorModels (user-visible, like recordings).
+        static var defaultDirectory: URL {
+            if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                return docs.appendingPathComponent("LatentResonatorModels", isDirectory: true)
+            }
+            return URL(fileURLWithPath: "/tmp/LatentResonator/Models", isDirectory: true)
+        }
+
         /// Standard macOS Application Support location for model weights.
         /// Falls back to /tmp/LatentResonator/Models if Application Support is unavailable.
         static let appSupportModelsDir: URL = {
@@ -554,14 +626,13 @@ enum LRConstants {
             return p.hasPrefix(home) || p.hasPrefix("/tmp") || p.hasPrefix(proj)
         }
 
-        /// Ensures the default Application Support models directory exists on disk.
+        /// Ensures default model directories exist (Documents first, then Application Support).
         static func ensureDefaultDirectoryExists() {
             let fm = FileManager.default
-            if !fm.fileExists(atPath: appSupportModelsDir.path) {
-                try? fm.createDirectory(
-                    at: appSupportModelsDir,
-                    withIntermediateDirectories: true
-                )
+            for dir in [defaultDirectory, appSupportModelsDir] {
+                if !fm.fileExists(atPath: dir.path) {
+                    try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+                }
             }
         }
     }
@@ -663,19 +734,19 @@ enum DrumVoice: String, CaseIterable, Codable, Identifiable {
     var id: String { rawValue }
 
     /// Semantic prompt steering ACE-Step toward this drum type.
-    /// Iconic references (808, TR-909) help models trained on electronic music.
+    /// 808-centric, punch-first: short decay, NO reverb to avoid pad-like tails.
     var prompt: String {
         switch self {
         case .kick:
-            return "TR-808 kick drum, sub bass, low thump, punchy transient, bass drum"
+            return "808 kick drum, sine pitch drop, sub bass punch, short decay, NO reverb"
         case .snare:
-            return "TR-909 snare, snare crack, mid punch, rimshot, clap, body"
+            return "808 snare, crack, body, short decay, NO reverb tail"
         case .hiHat:
-            return "hi-hat sizzle, closed hat, bright metallic, short decay, cymbal"
+            return "808 closed hi-hat, metallic tick, short decay, NO reverb"
         case .cymbal:
-            return "cymbal crash, shimmer, metallic decay, open cymbal"
+            return "808 ride cymbal, metallic decay, short, NO long tail"
         case .mixed:
-            return "drum kit, percussion, kick snare hats layered, groove, full kit"
+            return "808 drum machine, kick snare hats, punchy, short decay"
         }
     }
 
@@ -717,6 +788,10 @@ struct LanePreset: Identifiable {
 
     // Excitation source
     let excitationMode: ExcitationMode
+
+    // Koenig Seed Euclidean rhythm (E(k,n)). Per-preset for groove tuning.
+    let euclideanPulses: Int
+    let euclideanSteps: Int
 
     // Effects chain presets
     let delayTime: Float
@@ -787,6 +862,8 @@ extension LanePreset {
         granularity: 8.0,
         feedbackAmount: 0.50,
         excitationMode: .sawOsc,
+        euclideanPulses: LRConstants.euclideanPulses,
+        euclideanSteps: LRConstants.euclideanSteps,
         delayTime: 0.5,
         delayFeedback: 0.4,
         delayMix: 0.15,
@@ -824,6 +901,8 @@ extension LanePreset {
         granularity: 18.0,
         feedbackAmount: 0.42,
         excitationMode: .squareOsc,
+        euclideanPulses: LRConstants.euclideanPulses,
+        euclideanSteps: LRConstants.euclideanSteps,
         delayTime: 0.15,
         delayFeedback: 0.5,
         delayMix: 0.30,
@@ -861,6 +940,8 @@ extension LanePreset {
         granularity: 32.0,
         feedbackAmount: 0.38,
         excitationMode: .koenigSeed,
+        euclideanPulses: LRConstants.euclideanPulses,
+        euclideanSteps: LRConstants.euclideanSteps,
         delayTime: 0.125,
         delayFeedback: 0.42,
         delayMix: 0.28,
@@ -898,6 +979,8 @@ extension LanePreset {
         granularity: 14.0,
         feedbackAmount: 0.58,
         excitationMode: .triangleOsc,
+        euclideanPulses: LRConstants.euclideanPulses,
+        euclideanSteps: LRConstants.euclideanSteps,
         delayTime: 0.7,
         delayFeedback: 0.62,
         delayMix: 0.42,
@@ -935,6 +1018,8 @@ extension LanePreset {
         granularity: 22.0,
         feedbackAmount: 0.48,
         excitationMode: .sawOsc,
+        euclideanPulses: LRConstants.euclideanPulses,
+        euclideanSteps: LRConstants.euclideanSteps,
         delayTime: 0.166,
         delayFeedback: 0.52,
         delayMix: 0.28,
@@ -972,6 +1057,8 @@ extension LanePreset {
         granularity: 68.0,
         feedbackAmount: 0.72,
         excitationMode: .silence,
+        euclideanPulses: LRConstants.euclideanPulses,
+        euclideanSteps: LRConstants.euclideanSteps,
         delayTime: 1.0,
         delayFeedback: 0.68,
         delayMix: 0.48,
@@ -994,28 +1081,30 @@ extension LanePreset {
         promptPhase3: "white noise saturation, total spectral mass, heat death"
     )
 
-    /// DRUM LANE — Slot: perc body 350–500Hz. Polarized: transient, NO long reverb (§0).
+    /// DRUM LANE — Slot: perc body 280Hz. Human-centric, 808-aligned: punch, short decay (§0).
     static let drumLane = LanePreset(
         id: "drum_lane",
         name: "DRUM LANE",
         prompt: "percussion transient, punch, 808, NO long reverb tail, NO pad",
         accentColor: "yellow",
-        guidanceScale: 12.0,
+        guidanceScale: 13.0,
         shift: 4.0,
         inferMethod: "ode",
         inferenceSteps: 8,
-        inputStrength: 0.54,
-        entropyLevel: 22.0,
-        granularity: 28.0,
-        feedbackAmount: 0.38,
+        inputStrength: 0.65,
+        entropyLevel: 10.0,
+        granularity: 10.0,
+        feedbackAmount: 0.22,
         excitationMode: .koenigSeed,
-        delayTime: 0.12,
+        euclideanPulses: 4,
+        euclideanSteps: 8,
+        delayTime: 0.08,
         delayFeedback: 0.38,
-        delayMix: 0.22,
+        delayMix: 0.10,
         bitCrushDepth: 12.0,
         resonatorNote: 36.0,
         resonatorDecay: 0.48,
-        filterCutoff: 500.0,
+        filterCutoff: 280.0,
         filterResonance: 0.38,
         filterMode: .lowpass,
         saturationMode: .transistor,
@@ -1026,9 +1115,9 @@ extension LanePreset {
         fftSize: 512,
         autoDecayTarget: 0.38,
         autoDecayIterations: 11.0,
-        promptPhase1: "kick drum, punch, transient, NO long reverb",
-        promptPhase2: "snare crack, percussion groove, NO pad smear",
-        promptPhase3: "drum kit layered, metallic decay, tight transients"
+        promptPhase1: "808 kick, punch, short decay, NO reverb tail, NO pad",
+        promptPhase2: "808 snare crack, tight transient, NO smear",
+        promptPhase3: "808 drum machine, punchy, metallic decay, NO long tail"
     )
 
     /// All factory presets in display order.

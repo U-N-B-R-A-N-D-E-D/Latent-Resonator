@@ -213,8 +213,10 @@ final class NeuralEngine: ObservableObject {
             case .bitCrushDepth:       lane.bitCrushDepth = value
             case .resonatorNote:       lane.resonatorNote = value
             case .resonatorDecay:      lane.resonatorDecay = value
-            case .entropy:             lane.entropyLevel = value
-            case .granularity:         lane.granularity = value
+            case .entropy:
+                lane.entropyLevel = lane.isDrumLane ? min(value, LRConstants.drumLaneEntropyCap) : value
+            case .granularity:
+                lane.granularity = lane.isDrumLane ? min(value, LRConstants.drumLaneGranularityCap) : value
             case .shift:               lane.shift = value
             case .inputStrength:       lane.inputStrength = value
             case .inferenceSteps:      lane.inferenceSteps = Int(value.rounded())
@@ -573,6 +575,7 @@ final class NeuralEngine: ObservableObject {
 
         print(">> Neural Engine: Added lane '\(slot.name)' (total: \(lanes.count))")
         sequencerEngine.subscribeLaneIterations()
+        sequencerEngine.syncStepTimer()
 
         return slot
     }
@@ -599,6 +602,7 @@ final class NeuralEngine: ObservableObject {
 
         print(">> Neural Engine: Removed lane '\(lane.name)' (total: \(lanes.count))")
         sequencerEngine.subscribeLaneIterations()
+        sequencerEngine.syncStepTimer()
         updateLaneMixerState()
     }
 

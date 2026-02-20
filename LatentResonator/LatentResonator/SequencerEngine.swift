@@ -62,12 +62,13 @@ final class SequencerEngine {
         }
     }
 
-    /// Start or stop the step timer based on the focus lane's advance mode.
+    /// Start or stop the step timer. Uses the first lane with advanceMode=.time.
+    /// Lane switching no longer affects the timer — each lane's config is respected.
     func syncStepTimer() {
         stepTimer?.cancel()
         stepTimer = nil
 
-        guard let grid = focusStepGridGetter(), grid.advanceMode == .time else { return }
+        guard let grid = lanesGetter().first(where: { $0.stepGrid.advanceMode == .time })?.stepGrid else { return }
 
         let bpm = Double(grid.stepTimeBPM)
         let intervalNs = UInt64((60.0 / bpm) * 1_000_000_000)
@@ -156,7 +157,7 @@ final class SequencerEngine {
 
     private func advanceAllLanesSteps() {
         let lanes = lanesGetter()
-        let focusGrid = focusStepGridGetter()
+        let timeGrid = lanes.first(where: { $0.stepGrid.advanceMode == .time })?.stepGrid
 
         for lane in lanes {
             let grid = lane.stepGrid
@@ -165,8 +166,8 @@ final class SequencerEngine {
             let next = (grid.currentStepIndex + 1) % chain
 
             if let step = grid.step(at: next), abs(step.microtiming) > 0.001,
-               let fg = focusGrid, fg.advanceMode == .time {
-                let bpm = Double(fg.stepTimeBPM)
+               let tg = timeGrid {
+                let bpm = Double(tg.stepTimeBPM)
                 let stepInterval = 60.0 / bpm
                 let offsetSeconds = step.microtiming * stepInterval
                 let delayNs = max(0, Int(offsetSeconds * 1_000_000_000))
