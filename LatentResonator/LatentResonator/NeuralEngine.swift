@@ -31,7 +31,7 @@ import Accelerate
 //   |           MasterOutputNode -> mainMixerNode              |
 //   +------------------│---------------------------------------+
 //                      │
-//            AudioGraphMapper (v2.0 graph → AVAudioEngine)
+//            GraphAudioEngine (v2.0 pull-render single-source-node)
 //
 // White paper reference:
 //   §3.3 -- Recursive formula per macro
@@ -216,10 +216,14 @@ final class NeuralEngine: ObservableObject {
         return fmt
     }
 
-    // MARK: - v2.0 Audio Graph Mapper
+    // MARK: - v2.0 Graph Audio Engine
+    //
+    // Pull-render graph engine: a single AVAudioSourceNode walks the
+    // NodeGraph in topological order each render block. Topology changes
+    // are atomic plan swaps — no AVAudioEngine restart, no clicks.
 
-    /// Translates NodeGraph topology to AVAudioEngine audio routing.
-    private var audioGraphMapper: AudioGraphMapper?
+    /// Owns the root AVAudioSourceNode and renders the entire graph.
+    private var graphAudioEngine: GraphAudioEngine?
 
     // MARK: - v2.0 Sequencer Engine
 
@@ -381,23 +385,29 @@ final class NeuralEngine: ObservableObject {
         setupProcessingFormat()
         setupMasterMixer()
 
-        // v2.0: Initialize AudioGraphMapper for graph-native audio routing
-        audioGraphMapper = AudioGraphMapper(
-            avEngine: audioEngine,
-            masterVolumeNode: masterMixerNode
+        // v2.0: Initialize the pull-render graph audio engine. Its root
+        // AVAudioSourceNode is attached and wired into the master mixer
+        // chain here; afterwards we never touch AVAudioEngine connect/detach
+        // for graph-internal nodes — topology changes are plan swaps.
+        let engine = GraphAudioEngine(
+            format: effectiveFormat,
+            frameCapacity: LRConstants.bufferSize
         )
+        audioEngine.attach(engine.rootSourceNode)
+        audioEngine.connect(engine.rootSourceNode, to: masterMixerNode, format: effectiveFormat)
+        graphAudioEngine = engine
 
         // v2.0: Load saved graph or bootstrap with kickstart template
         NSLog("[LR-FATAL] About to call loadGraphOrBootstrap")
         loadGraphOrBootstrap()
         NSLog("[LR-FATAL] NeuralEngine init COMPLETE - nodes: %d", nodeGraph.nodes.count)
 
-        // CRITICAL FIX: Rebuild audio graph immediately after loading graph
-        // The topologyDidChange subscription is set up AFTER this point, so we must
-        // manually trigger the initial audio graph rebuild
+        // Build the initial ExecutionPlan from the loaded graph and adopt it.
+        // The topologyDidChange subscription is configured below, so this
+        // first build needs to happen explicitly.
         NSLog("[LR-FATAL] Rebuilding audio graph after bootstrap...")
         rebuildAudioGraphIfNeeded()
-        NSLog("[LR-FATAL] Audio graph rebuilt. Nodes attached: %d", audioGraphMapper?.attachedNodeCount ?? 0)
+        NSLog("[LR-FATAL] Audio graph rebuilt. Plan steps: %d", graphAudioEngine?.currentPlanStepCount ?? 0)
 
         // Also update lanes array immediately so UI has data
         updateLanesArray()
@@ -482,15 +492,10 @@ final class NeuralEngine: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // v2.0: Subscribe to parameter changes for real-time audio updates
-        nodeGraph.parameterDidChange
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] (nodeId, paramId, value) in
-                guard let self = self, let mapper = self.audioGraphMapper else { return }
-                // Fast-path parameter update without rebuild
-                mapper.updateParameter(nodeId: nodeId, paramId: paramId, value: value, in: self.nodeGraph)
-            }
-            .store(in: &cancellables)
+        // v2.0: Parameter changes propagate automatically — DSP nodes read
+        // their parameters from the @Published store on the audio thread, so
+        // a setParam(...) on the main thread becomes audible at the very
+        // next render block. No mapper round-trip needed.
 
         // Initial lanes array sync
         updateLanesArray()
@@ -520,20 +525,26 @@ final class NeuralEngine: ObservableObject {
 
     // MARK: - Audio Graph Rebuild
 
-    /// v2.0: Rebuilds AVAudioEngine from NodeGraph when topology changes.
+    /// v2.0: Build a new ExecutionPlan from the NodeGraph and atomically
+    /// hand it to the running GraphAudioEngine. No AVAudioEngine restart —
+    /// the audio thread picks up the new plan at its next render block.
     private func rebuildAudioGraphIfNeeded() {
-        guard let mapper = audioGraphMapper else {
-            // A.5: early returns must leave a trail. If we hit this path the whole
-            // graph rebuild pathway is skipped — likely symptom: no audio at all.
-            print(">> Neural Engine: rebuildAudioGraphIfNeeded skipped — audioGraphMapper is nil (init order bug?)")
+        guard let engine = graphAudioEngine else {
+            print(">> Neural Engine: rebuildAudioGraphIfNeeded skipped — graphAudioEngine is nil (init order bug?)")
             return
         }
 
-        do {
-            try mapper.rebuild(from: nodeGraph)
-            print(">> Neural Engine: Audio graph rebuilt with \(nodeGraph.nodes.count) nodes")
-        } catch {
-            print(">> Neural Engine: Audio graph rebuild failed -- \(error.localizedDescription)")
+        let plan = ExecutionPlan.build(
+            from: nodeGraph,
+            frameCapacity: LRConstants.bufferSize
+        )
+
+        engine.adopt(plan)
+
+        if let plan = plan {
+            print(">> Neural Engine: Audio plan adopted: \(plan.steps.count) steps from \(nodeGraph.nodes.count) graph nodes")
+        } else {
+            print(">> Neural Engine: Audio plan empty — no DSP-participating nodes (graph will render silence)")
         }
     }
 
@@ -706,18 +717,22 @@ final class NeuralEngine: ObservableObject {
         status.engineRunning = audioEngine.isRunning
         print("[Pipeline] Engine running: \(status.engineRunning)")
 
-        // 2. Graph composition
-        let audioNodes = nodeGraph.nodes.values.filter { $0.audioUnit() != nil }
-        let sources = audioNodes.filter { node in
+        // 2. Graph composition — count DSP-participating nodes (anything
+        //    that publishes a non-nil dspNode()).
+        let dspParticipating = nodeGraph.nodes.values.compactMap { node -> (any GraphNode)? in
+            guard let provider = node as? GraphNodeDSPProvider, provider.dspNode() != nil else { return nil }
+            return node
+        }
+        let sources = dspParticipating.filter { node in
             !nodeGraph.edges.values.contains { $0.targetNodeId == node.id && $0.signalType == .audio }
         }
         let masterOutputs = nodeGraph.nodes.values.compactMap { $0 as? MasterOutputNode }
 
-        status.audioNodeCount = audioNodes.count
+        status.audioNodeCount = dspParticipating.count
         status.sourceNodeCount = sources.count
         status.masterOutputCount = masterOutputs.count
 
-        print("[Pipeline] Audio nodes: \(audioNodes.count)")
+        print("[Pipeline] DSP-participating nodes: \(dspParticipating.count)")
         print("[Pipeline] Source nodes: \(sources.count)")
         print("[Pipeline] Master outputs: \(masterOutputs.count)")
 
@@ -735,10 +750,10 @@ final class NeuralEngine: ObservableObject {
             status.masterVolume = master.volume
         }
 
-        // 5. Mapper status
-        if let mapper = audioGraphMapper {
-            status.attachedNodeCount = mapper.attachedNodeCount
-            print("[Pipeline] Attached AVAudioNodes: \(mapper.attachedNodeCount)")
+        // 5. Engine status
+        if let engine = graphAudioEngine {
+            status.attachedNodeCount = engine.currentPlanStepCount
+            print("[Pipeline] Plan steps active: \(engine.currentPlanStepCount)")
         }
 
         // 6. System volume check (informational)
@@ -795,13 +810,9 @@ final class NeuralEngine: ObservableObject {
         // Sync scene bank: new macro gets its own fresh snapshot
         sceneManager.captureScene(at: macroNodes.count - 1, from: nodeGraph)
 
-        // If engine is already running and we have the audio graph mapper, rebuild
-        if isProcessing, let mapper = audioGraphMapper {
-            do {
-                try mapper.rebuild(from: nodeGraph)
-            } catch {
-                print(">> Neural Engine: Audio graph rebuild failed on addMacro: \(error)")
-            }
+        // Topology change after the engine is running — atomic plan swap.
+        if isProcessing {
+            rebuildAudioGraphIfNeeded()
         }
 
         print(">> Neural Engine: Added macro '\(macro.name)' (total: \(macroNodes.count))")
@@ -1205,22 +1216,18 @@ final class NeuralEngine: ObservableObject {
                 updateAudioInputTap()
             }
 
-            // Build audio graph from node graph
-            if let mapper = audioGraphMapper {
-                // #region agent log - H7 Rebuilding
-                debugLogSync("NeuralEngine:startProcessing", "Rebuilding audio graph", ["nodes": String(nodeGraph.nodes.count)])
-                // #endregion
-                print(">> Neural Engine: [SOUND DEBUG] Rebuilding audio graph with \(nodeGraph.nodes.count) nodes")
-                try mapper.rebuild(from: nodeGraph)
-                // #region agent log - H7 Rebuild complete
-                debugLogSync("NeuralEngine:startProcessing", "Audio graph rebuilt")
-                // #endregion
-                print(">> Neural Engine: [SOUND DEBUG] Audio graph rebuild complete")
+            // Refresh the ExecutionPlan from the current NodeGraph state
+            // before starting the audio engine, so the very first render
+            // block already has a valid plan adopted.
+            if graphAudioEngine != nil {
+                debugLogSync("NeuralEngine:startProcessing", "Rebuilding execution plan", ["nodes": String(nodeGraph.nodes.count)])
+                print(">> Neural Engine: [SOUND DEBUG] Rebuilding execution plan with \(nodeGraph.nodes.count) graph nodes")
+                rebuildAudioGraphIfNeeded()
+                debugLogSync("NeuralEngine:startProcessing", "Execution plan adopted")
+                print(">> Neural Engine: [SOUND DEBUG] Execution plan adopted")
             } else {
-                // #region agent log - H7 Mapper nil
-                debugLogSync("NeuralEngine:startProcessing", "WARNING: audioGraphMapper is nil")
-                // #endregion
-                print(">> Neural Engine: [SOUND DEBUG] WARNING: audioGraphMapper is nil!")
+                debugLogSync("NeuralEngine:startProcessing", "WARNING: graphAudioEngine is nil")
+                print(">> Neural Engine: [SOUND DEBUG] WARNING: graphAudioEngine is nil!")
             }
 
             audioEngine.prepare()

@@ -4,90 +4,138 @@ import Combine
 
 // MARK: - Mixer Node
 
-/// Multi-input mixer with dynamic input count.
-/// Wraps AVAudioMixerNode.
+/// Multi-input mixer with per-input gain and a master output gain.
+/// Sums up to `MixerNode.maxInputs` stereo inputs into one stereo output.
 final class MixerNode: BaseGraphNode {
-    
+
+    /// Hard upper bound on simultaneous audio inputs. Matches the four
+    /// per-input gain knobs (`gain1`…`gain4`) exposed in the PatchEditor
+    /// and the saved-patch wire format.
+    static let maxInputs: Int = 4
+
     // MARK: - Parameters
-    
-    var outputGain: Float {
-        get { getParam("outputGain", default: 1.0) }
-        set { setParam("outputGain", value: newValue) }
+
+    /// Master output gain — applied after summing inputs.
+    /// PatchEditor uses `masterGain`; we accept the legacy `outputGain` key
+    /// as a fallback so older patches keep working.
+    var masterGain: Float {
+        get {
+            if let v = parameters["masterGain"] as? Float { return v }
+            if let v = parameters["outputGain"] as? Float { return v }
+            return 1.0
+        }
+        set { setParam("masterGain", value: newValue) }
     }
-    
+
+    /// Per-input gains, indexed 1..maxInputs. Stored as `gain1`…`gain4`.
+    func inputGain(_ index1Based: Int) -> Float {
+        return getParam("gain\(index1Based)", default: 1.0)
+    }
+
     // MARK: - Internal State
-    
-    private let mixerUnit: AVAudioMixerNode
+
     private var inputCount: Int = 0
-    
+
     // MARK: - Init
-    
+
     init(id: UUID = UUID(), params: [String: Any] = [:]) {
-        self.mixerUnit = AVAudioMixerNode()
-        
         super.init(
             id: id,
             nodeType: "mixer",
             category: .routing,
             displayName: "MIXER"
         )
-        
+
         for (key, value) in params {
             parameters[key] = value
         }
-        
-        mixerUnit.outputVolume = outputGain
     }
-    
+
     required init(from decoder: Decoder) throws {
-        self.mixerUnit = AVAudioMixerNode()
         try super.init(from: decoder)
-        mixerUnit.outputVolume = outputGain
     }
-    
+
     // MARK: - Ports
-    
+
     override var ports: [NodePort] {
         var p: [NodePort] = []
-        
-        // Dynamic input ports based on connections
-        for i in 0..<max(inputCount, 4) {
+
+        // Stable input port ids (`in1`…`in4`) match the saved-patch
+        // `targetPortId` strings used by the PatchEditor.
+        for i in 1...MixerNode.maxInputs {
             p.append(NodePort(
                 id: "in\(i)",
-                label: "IN \(i+1)",
+                label: "IN \(i)",
                 signalType: .audio,
                 direction: .input
             ))
         }
-        
+
         p.append(NodePort(id: "out", label: "OUT", signalType: .audio, direction: .output))
         p.append(NodePort(id: "gain_cv", label: "GAIN CV", signalType: .control, direction: .input))
-        
+
         return p
     }
-    
-    // MARK: - Audio Unit
-    
-    override func audioUnit() -> AVAudioNode? {
-        return mixerUnit
-    }
-    
+
     // MARK: - Topology
-    
+
     func onTopologyChanged(inputs: [String: GraphEdge], outputs: [String: [GraphEdge]]) {
-        // Count audio inputs (excluding gain_cv)
         let audioInputs = inputs.values.filter { $0.signalType == .audio }
         inputCount = audioInputs.count
-        
-        // Update mixer gain if changed
-        mixerUnit.outputVolume = outputGain
+    }
+}
+
+// MARK: - MixerNode + DSPNode
+
+extension MixerNode: GraphNodeDSPProvider, DSPNode {
+
+    var nodeId: UUID { id }
+
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double,
+        controls: [String: Float]
+    ) {
+        // Zero the output before accumulating
+        let bytes = frameCount * MemoryLayout<Float>.stride
+        memset(output.left, 0, bytes)
+        memset(output.right, 0, bytes)
+
+        let count = min(inputs.count, MixerNode.maxInputs)
+        for k in 0..<count {
+            // Plan builder sorts inputs by target port id ("in1" < "in2" < …),
+            // so input index k maps to gain index k+1 (gain1, gain2, …).
+            let g = inputGain(k + 1)
+            let inBuf = inputs[k]
+            for i in 0..<frameCount {
+                output.left[i]  += inBuf.left[i]  * g
+                output.right[i] += inBuf.right[i] * g
+            }
+        }
+
+        let m = masterGain
+        if m != 1.0 {
+            for i in 0..<frameCount {
+                output.left[i] *= m
+                output.right[i] *= m
+            }
+        }
     }
 }
 
 // MARK: - Master Output Node
 
-/// Final output node routing to the system audio device.
-/// Owns its own mixer node for proper audio unit lifecycle management.
+/// Terminal node of the audio graph. Receives one stereo input, applies a
+/// master volume, and writes the result into the engine's ABL.
+///
+/// In the new pull-render `GraphAudioEngine`, MasterOutput is special: the
+/// `ExecutionPlan` builder marks it as the terminal step so its `render`
+/// output goes directly to the AVAudioSourceNode buffer — never through
+/// the `BufferPool`.
 final class MasterOutputNode: BaseGraphNode {
 
     // MARK: - Parameters
@@ -97,15 +145,13 @@ final class MasterOutputNode: BaseGraphNode {
         set { setParam("volume", value: newValue) }
     }
 
+    /// Soft-clip threshold. Currently informational — applied as a hard
+    /// safety ceiling in `render(...)` so a runaway feedback loop can
+    /// never blow past `volume` × `limiterThreshold` linear.
     var limiterThreshold: Float {
         get { getParam("limiterThreshold", default: -0.1) }
         set { setParam("limiterThreshold", value: newValue) }
     }
-
-    // MARK: - Internal State
-
-    /// Owned mixer node - strong reference ensures audio unit lifecycle
-    private let mixer = AVAudioMixerNode()
 
     // MARK: - Init
 
@@ -119,16 +165,12 @@ final class MasterOutputNode: BaseGraphNode {
             y: y
         )
 
-        // Set default parameter values
         setParam("volume", value: Float(1.0))
         setParam("limiterThreshold", value: Float(-0.1))
-
-        mixer.outputVolume = volume
     }
 
     required init(from decoder: Decoder) throws {
         try super.init(from: decoder)
-        mixer.outputVolume = volume
     }
 
     // MARK: - Ports
@@ -138,17 +180,46 @@ final class MasterOutputNode: BaseGraphNode {
             NodePort(id: "in", label: "IN", signalType: .audio, direction: .input)
         ]
     }
+}
 
-    // MARK: - Audio Unit
+// MARK: - MasterOutputNode + DSPNode
 
-    override func audioUnit() -> AVAudioNode? {
-        return mixer
-    }
+extension MasterOutputNode: GraphNodeDSPProvider, DSPNode {
 
-    // MARK: - Topology
+    var nodeId: UUID { id }
 
-    func onTopologyChanged(inputs: [String: GraphEdge], outputs: [String: [GraphEdge]]) {
-        mixer.outputVolume = volume
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double,
+        controls: [String: Float]
+    ) {
+        let v = volume
+
+        guard let inBuf = inputs.first else {
+            // No input wired into master — emit silence rather than leak
+            // whatever was previously in the ABL.
+            let bytes = frameCount * MemoryLayout<Float>.stride
+            memset(output.left, 0, bytes)
+            memset(output.right, 0, bytes)
+            return
+        }
+
+        // Hard safety ceiling derived from `limiterThreshold` (stored in dB).
+        // `limiterThreshold = -0.1 dB` → linear ceiling ≈ 0.988.
+        let ceiling = powf(10.0, limiterThreshold / 20.0)
+
+        for i in 0..<frameCount {
+            var l = inBuf.left[i] * v
+            var r = inBuf.right[i] * v
+            if l > ceiling { l = ceiling } else if l < -ceiling { l = -ceiling }
+            if r > ceiling { r = ceiling } else if r < -ceiling { r = -ceiling }
+            output.left[i] = l
+            output.right[i] = r
+        }
     }
 }
 

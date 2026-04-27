@@ -46,100 +46,86 @@ final class OscillatorNode: BaseGraphNode {
     }
     
     // MARK: - Internal State
-    
+
     private var generator = SignalGenerator()
-    private var sourceNode: AVAudioSourceNode?
-    private let format: AVAudioFormat
-    
+
     // MARK: - Init
-    
+
     init(id: UUID = UUID(), params: [String: Any] = [:]) {
-        let fmt = AVAudioFormat(
-            standardFormatWithSampleRate: LRConstants.sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
-        self.format = fmt
-        
         super.init(
             id: id,
             nodeType: "oscillator",
             category: .source,
             displayName: "OSCILLATOR"
         )
-        
-        // Apply initial parameters
+
         for (key, value) in params {
             parameters[key] = value
         }
-        
-        createSourceNode()
     }
-    
+
     required init(from decoder: Decoder) throws {
-        self.format = AVAudioFormat(
-            standardFormatWithSampleRate: LRConstants.sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
         try super.init(from: decoder)
-        createSourceNode()
     }
-    
+
     // MARK: - Ports
-    
+
     override var ports: [NodePort] {
         [
             NodePort(id: "freq_cv", label: "FREQ CV", signalType: .control, direction: .input),
             NodePort(id: "out", label: "OUT", signalType: .audio, direction: .output)
         ]
     }
-    
-    // MARK: - Audio Unit
-    
-    override func audioUnit() -> AVAudioNode? {
-        return sourceNode
-    }
-    
-    private func createSourceNode() {
-        sourceNode = AVAudioSourceNode(format: format) { [weak self] _, timestamp, frameCount, audioBufferList in
-            guard let self = self else { return OSStatus(kAudio_ParamError) }
 
-            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            guard ablPointer.count >= 2 else { return OSStatus(kAudio_ParamError) }
-
-            let leftPtr = ablPointer[0].mData!.assumingMemoryBound(to: Float.self)
-            let rightPtr = ablPointer[1].mData!.assumingMemoryBound(to: Float.self)
-
-            // Update generator parameters from node parameters
-            self.generator.sineFrequency = self.frequency
-            self.generator.pulseWidth = self.pulseWidth
-            self.generator.euclideanPulses = self.euclideanPulses
-            self.generator.euclideanSteps = self.euclideanSteps
-            self.generator.pulseDensity = self.pulseDensity
-
-            // Render audio
-            self.generator.renderInto(
-                left: leftPtr,
-                right: rightPtr,
-                frameCount: Int(frameCount),
-                mode: self.waveform,
-                sampleRate: self.format.sampleRate
-            )
-
-            // Apply amplitude scaling
-            let amp = self.amplitude
-            for i in 0..<Int(frameCount) {
-                leftPtr[i] *= amp
-                rightPtr[i] *= amp
-            }
-
-            return noErr
-        }
-    }
-    
     // MARK: - Topology
-    
+
     func onTopologyChanged(inputs: [String: GraphEdge], outputs: [String: [GraphEdge]]) {
-        // If freq_cv is connected, CV modulation will be applied by ModulationGraphEvaluator
+        // CV modulation (if freq_cv is connected) is applied by the
+        // ControlGraphEvaluator and surfaces in `controls["freq_cv"]`
+        // inside `render(...)`.
+    }
+}
+
+// MARK: - OscillatorNode + DSPNode (GraphAudioEngine integration)
+
+extension OscillatorNode: GraphNodeDSPProvider, DSPNode {
+
+    var nodeId: UUID { id }
+
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double,
+        controls: [String: Float]
+    ) {
+        // Snapshot mutable parameters once. Read from the @Published store
+        // is not strictly RT-safe but matches the rest of the codebase's
+        // current contract; a parameter-snapshot pattern is queued for a
+        // follow-up pass.
+        generator.sineFrequency = frequency
+        generator.pulseWidth = pulseWidth
+        generator.euclideanPulses = euclideanPulses
+        generator.euclideanSteps = euclideanSteps
+        generator.pulseDensity = pulseDensity
+
+        generator.renderInto(
+            left: output.left,
+            right: output.right,
+            frameCount: frameCount,
+            mode: waveform,
+            sampleRate: sampleRate
+        )
+
+        let amp = amplitude
+        if amp != 1.0 {
+            for i in 0..<frameCount {
+                output.left[i] *= amp
+                output.right[i] *= amp
+            }
+        }
     }
 }
 
@@ -159,85 +145,65 @@ final class NoiseNode: BaseGraphNode {
     // MARK: - Internal State
     
     private var generator = SignalGenerator()
-    private var sourceNode: AVAudioSourceNode?
-    private let format: AVAudioFormat
-    
+
     // MARK: - Init
-    
+
     init(id: UUID = UUID(), params: [String: Any] = [:]) {
-        let fmt = AVAudioFormat(
-            standardFormatWithSampleRate: LRConstants.sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
-        self.format = fmt
-        
         super.init(
             id: id,
             nodeType: "noise",
             category: .source,
             displayName: "NOISE"
         )
-        
+
         for (key, value) in params {
             parameters[key] = value
         }
-        
-        createSourceNode()
     }
-    
+
     required init(from decoder: Decoder) throws {
-        self.format = AVAudioFormat(
-            standardFormatWithSampleRate: LRConstants.sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
         try super.init(from: decoder)
-        createSourceNode()
     }
-    
+
     // MARK: - Ports
-    
+
     override var ports: [NodePort] {
         [
             NodePort(id: "amp_cv", label: "AMP CV", signalType: .control, direction: .input),
             NodePort(id: "out", label: "OUT", signalType: .audio, direction: .output)
         ]
     }
-    
-    // MARK: - Audio Unit
-    
-    override func audioUnit() -> AVAudioNode? {
-        return sourceNode
-    }
-    
-    private func createSourceNode() {
-        sourceNode = AVAudioSourceNode(format: format) { [weak self] _, timestamp, frameCount, audioBufferList in
-            guard let self = self else { return OSStatus(kAudio_ParamError) }
-            
-            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            guard ablPointer.count >= 2 else { return OSStatus(kAudio_ParamError) }
-            
-            let leftPtr = ablPointer[0].mData!.assumingMemoryBound(to: Float.self)
-            let rightPtr = ablPointer[1].mData!.assumingMemoryBound(to: Float.self)
-            
-            // Render white noise
-            self.generator.renderInto(
-                left: leftPtr,
-                right: rightPtr,
-                frameCount: Int(frameCount),
-                mode: .whiteNoise,
-                sampleRate: self.format.sampleRate
-            )
-            
-            // Apply amplitude scaling
-            let amp = self.amplitude
-            if amp != 1.0 {
-                for i in 0..<Int(frameCount) {
-                    leftPtr[i] *= amp
-                    rightPtr[i] *= amp
-                }
+}
+
+// MARK: - NoiseNode + DSPNode
+
+extension NoiseNode: GraphNodeDSPProvider, DSPNode {
+
+    var nodeId: UUID { id }
+
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double,
+        controls: [String: Float]
+    ) {
+        generator.renderInto(
+            left: output.left,
+            right: output.right,
+            frameCount: frameCount,
+            mode: .whiteNoise,
+            sampleRate: sampleRate
+        )
+
+        let amp = amplitude
+        if amp != 1.0 {
+            for i in 0..<frameCount {
+                output.left[i] *= amp
+                output.right[i] *= amp
             }
-            
-            return noErr
         }
     }
 }
