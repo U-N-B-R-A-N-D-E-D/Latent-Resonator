@@ -19,6 +19,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ace_bridge_server import encode_wav_bytes, decode_wav_bytes
 
+__all__ = ["TestWAVCodecRoundTrip"]
+
 
 class TestWAVCodecRoundTrip:
     """WAV encode → decode round-trip integrity."""

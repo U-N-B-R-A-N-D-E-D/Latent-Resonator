@@ -45,16 +45,87 @@ struct LaneSnapshot: Codable, Equatable {
     var saturationMorph: Float?
 }
 
+// MARK: - Graph Snapshot (v2.0 Node-Graph Scene Persistence)
+
+/// Snapshot of a node's parameters at a point in time.
+/// Used by PerformanceScene for recall and crossfading via NodeGraph.
+struct GraphSnapshot: Codable, Equatable {
+    let nodeId: UUID
+    var parameters: [String: Float]
+    
+    init(nodeId: UUID, parameters: [String: Float]) {
+        self.nodeId = nodeId
+        self.parameters = parameters
+    }
+    
+    /// Create from any GraphNode by extracting Float parameters.
+    init(from node: any GraphNode) {
+        self.nodeId = node.id
+        self.parameters = node.parameters.compactMapValues { $0 as? Float }
+    }
+}
+
 // MARK: - Performance Scene (snapshot; name avoids shadowing SwiftUI.Scene)
 
 /// Full snapshot of all lanes' performable parameters. One scene = one recallable state.
+///
+/// v2.0: Uses graphSnapshots (node parameters from NodeGraph) as primary persistence.
+/// v1.x: Used laneSnapshots (direct lane properties).
+/// Migration: Decoding tries graphSnapshots first, falls back to laneSnapshots.
 struct PerformanceScene: Codable, Equatable {
+    let id: UUID
     var name: String
+    
+    /// v2.0: NodeGraph parameter snapshots. Primary persistence format.
+    /// Each entry maps a node ID (typically a lane's MacroNode) to its parameters.
+    var graphSnapshots: [UUID: GraphSnapshot]
+    
+    /// DEPRECATED: v1.x backward compatibility. Maintained for migration only.
+    /// Use graphSnapshots for new code.
     var laneSnapshots: [LaneSnapshot]
-
-    init(name: String = "Scene", laneSnapshots: [LaneSnapshot] = []) {
+    
+    init(id: UUID = UUID(), name: String = "Scene", graphSnapshots: [UUID: GraphSnapshot] = [:]) {
+        self.id = id
         self.name = name
+        self.graphSnapshots = graphSnapshots
+        self.laneSnapshots = []
+    }
+    
+    /// v1.x compatibility init (deprecated, for migration use only).
+    init(name: String = "Scene", laneSnapshots: [LaneSnapshot] = []) {
+        self.id = UUID()
+        self.name = name
+        self.graphSnapshots = [:]
         self.laneSnapshots = laneSnapshots
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case id, name, graphSnapshots, laneSnapshots
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.name = try container.decode(String.self, forKey: .name)
+        
+        // v2.0: Try graphSnapshots first (new format)
+        if let gs = try? container.decode([UUID: GraphSnapshot].self, forKey: .graphSnapshots) {
+            self.graphSnapshots = gs
+            self.laneSnapshots = []
+        } else {
+            // v1.x fallback: legacy laneSnapshots
+            self.laneSnapshots = try container.decode([LaneSnapshot].self, forKey: .laneSnapshots)
+            self.graphSnapshots = [:]
+        }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(graphSnapshots, forKey: .graphSnapshots)
+        // laneSnapshots not encoded -- migration to graphSnapshots is complete
     }
 }
 
@@ -76,7 +147,7 @@ struct SceneBank: Codable {
 
     mutating func ensureCapacity() {
         while scenes.count < Self.maxScenes {
-            scenes.append(PerformanceScene(name: "Scene \(scenes.count + 1)", laneSnapshots: []))
+            scenes.append(PerformanceScene(name: "Scene \(scenes.count + 1)"))
         }
     }
 }

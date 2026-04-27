@@ -100,3 +100,14 @@ package.json
 # Distribution artifacts
 dist/
 *.zip
+
+# Claude Code worktrees / agent metadata
+.claude/
+
+# Node tooling for the PatchEditor sub-project
+node_modules/
+
+# Editor / hand-rolled file backups
+*.backup_*
+*.backup
+

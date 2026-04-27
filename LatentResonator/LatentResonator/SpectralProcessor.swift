@@ -49,6 +49,10 @@ final class SpectralProcessor {
     private var combWritePos: Int = 0
     private let combDelayLength: Int
 
+    /// Per-instance base delay for the comb filter. Different values per lane
+    /// give each lane a distinct metallic character (short = bright ring, long = dark).
+    private var combBaseDelay: Int
+
     // MARK: - Tunable Resonator State (§5.4 Metallic Sheen as Instrument)
 
     /// Separate comb delay line for the tunable pitched resonator.
@@ -120,7 +124,7 @@ final class SpectralProcessor {
     // State variables for the 4 cascaded 1-pole sections:
     private var ladderStage: (Float, Float, Float, Float) = (0, 0, 0, 0)
 
-    // MARK: - Parameter Smoothing (Max/MSP slide~ equivalent)
+    // MARK: - Parameter Smoothing (dataflow system slide~ equivalent)
     //
     // 1-pole lowpass on DSP parameters prevents clicks/zips when knobs
     // change abruptly. Coefficient 0.15 ~= 50ms ramp at 512-sample buffers.
@@ -145,8 +149,9 @@ final class SpectralProcessor {
     /// Sample rate used for delay-length calculations.
     private let sampleRate: Double
 
-    init(sampleRate: Double = LRConstants.sampleRate) {
+    init(sampleRate: Double = LRConstants.sampleRate, combBaseDelay: Int = LRConstants.combBaseDelay) {
         self.sampleRate = sampleRate
+        self.combBaseDelay = combBaseDelay
         fftSize = LRConstants.fftSize
         halfN = fftSize / 2
         fftLog2n = vDSP_Length(LRConstants.fftLog2n)
@@ -163,7 +168,7 @@ final class SpectralProcessor {
         spectralMemory = [Float](repeating: 0, count: halfN)
 
         // Comb filter delay: enough room for all staggered taps
-        combDelayLength = LRConstants.combBaseDelay * LRConstants.combFilterTaps * 2
+        combDelayLength = combBaseDelay * LRConstants.combFilterTaps * 2
         combDelayLine = [Float](repeating: 0, count: combDelayLength)
 
         // Tunable resonator: max delay = sampleRate / minFreq
@@ -220,6 +225,16 @@ final class SpectralProcessor {
         chunkBuffer = [Float](repeating: 0, count: fftSize)
     }
 
+    /// Update the comb filter base delay. Call this when the lane's combBaseDelay parameter changes.
+    /// Must be called from the main thread (NOT during audio processing).
+    func setCombBaseDelay(_ delay: Int) {
+        combBaseDelay = delay
+        // Note: This doesn't resize the delay line buffer at runtime.
+        // The buffer was sized at init() to accommodate max delay length.
+        // If you need dynamic resizing, it must be done on the main thread
+        // with audio processing temporarily stopped.
+    }
+
     // MARK: - Prompt -> Spectral Profile
 
     /// Parse a semantic prompt and derive the 4-band spectral profile.
@@ -228,7 +243,7 @@ final class SpectralProcessor {
     /// Example: "metallic decay, ferrofluid texture"
     ///   -> matches: metallic, decay, ferrofluid, texture
     ///   -> averaged gains across 4 bands
-    func updateProfile(from prompt: String) {
+    func updateProfile(from prompt: String, fallback: [Float]? = nil) {
         var accum: [Float] = [0, 0, 0, 0]
         var matches = 0
 
@@ -242,7 +257,7 @@ final class SpectralProcessor {
             for i in 0..<4 { accum[i] /= Float(matches) }
             spectralProfile = accum
         } else {
-            spectralProfile = [1.0, 1.0, 1.0, 1.0]
+            spectralProfile = fallback ?? [1.0, 1.0, 1.0, 1.0]
         }
     }
 
@@ -620,12 +635,14 @@ final class SpectralProcessor {
         let feedback = LRConstants.combFeedback * min(guidanceScale / 20.0, 1.0)
         guard feedback > 0.001 else { return }
 
+        let baseDelay = combBaseDelay
+
         for i in 0..<count {
             var combSum: Float = 0
 
             // Sum from multiple delay taps (prime spacing for inharmonicity)
             for tap in 0..<LRConstants.combFilterTaps {
-                let delay = LRConstants.combBaseDelay * (tap + 1)
+                let delay = baseDelay * (tap + 1)
                 if delay < combDelayLength {
                     let readPos = (combWritePos - delay + combDelayLength) % combDelayLength
                     combSum += combDelayLine[readPos]
@@ -878,7 +895,7 @@ final class SpectralProcessor {
     //
     // - CLEAN:      current tanh with unity gain. Transparent.
     // - TUBE:       asymmetric soft clip: x/(1+|x|) + even harmonics.
-    //               Warm, musical. 1950s-60s character (Buchla, early Moog).
+    //               Warm, musical. 1950s-60s character (west-coast synthesis, early Moog).
     // - TRANSISTOR: harder clip with odd harmonics: tanh(x*2.5)*0.8.
     //               More aggressive, gritty. 1970s-80s (TB-303, SH-101).
     // - DIODE:      hard asymmetric clip: positive clipped, negative passed.
@@ -940,5 +957,18 @@ final class SpectralProcessor {
         ladderStage = (0, 0, 0, 0)
         for i in 0..<overlapAddBuffer.count { overlapAddBuffer[i] = 0 }
     }
+}
 
+// MARK: - Spectral Feature Snapshot
+
+/// Snapshot of spectral analysis features at a given iteration.
+/// Used for telemetry export alongside audio recordings (§5.1-5.4).
+struct SpectralFeatureSnapshot {
+    let iteration: Int
+    let centroid: Float
+    let flatness: Float
+    let flux: Float
+    let promptPhase: Float
+    let inputStrength: Float
+    let timestamp: String
 }

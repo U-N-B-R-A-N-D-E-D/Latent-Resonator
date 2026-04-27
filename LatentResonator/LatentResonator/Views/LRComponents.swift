@@ -3,8 +3,7 @@ import AppKit
 
 // MARK: - LR Design System Components
 //
-// Reusable UI primitives. Aesthetic: JP-future mecha module.
-// Titanium surfaces, neon accents, flat panels. No state, no wiring changes.
+// Reusable UI primitives. No state, no wiring changes.
 
 private typealias DS = LRConstants.DS
 
@@ -408,5 +407,405 @@ extension View {
         } else {
             self
         }
+    }
+}
+
+// MARK: - Modulation Strip View
+//
+// Compact modulator rack below the channel mixer. Shows all active
+// modulators (Agitation, Control, Peak) with add/remove and connection
+// management. Follows the GRM Atelier layout: modulators as bottom-row strips.
+
+private typealias MDS = LRConstants.DS
+
+struct ModulationStripView: View {
+    @ObservedObject var graph: ModulationGraph
+    /// v2.0: Available target nodes for modulation (replaces laneCount)
+    let targetNodes: [any GraphNode]
+
+    @State private var showConnectionSheet = false
+    @State private var connectingSource: (any ModulationSource)?
+
+    var body: some View {
+        VStack(spacing: MDS.spacingMD) {
+            LRSectionHeader(
+                title: "MODULATION",
+                trailing: "\(totalConnections) conn | \(graph.cachedOffsets.count) active | #\(graph.evaluationCount)"
+            )
+            .padding(.horizontal, MDS.spacingXL)
+
+            if graph.agitations.isEmpty && graph.controls.isEmpty && graph.peaks.isEmpty {
+                emptyState
+            } else {
+                modulatorList
+            }
+
+            addModulatorButtons
+        }
+    }
+
+    private var totalConnections: Int {
+        graph.agitations.reduce(0) { $0 + $1.connections.count }
+        + graph.controls.reduce(0) { $0 + $1.connections.count }
+        + graph.peaks.reduce(0) { $0 + $1.connections.count }
+    }
+
+    private var emptyState: some View {
+        Text("No modulators. Add one to create evolving parameter movement.")
+            .font(MDS.font(MDS.fontCaption))
+            .foregroundColor(MDS.textTertiary)
+            .padding(.horizontal, MDS.spacingXL)
+    }
+
+    private var modulatorList: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: MDS.spacingMD) {
+                ForEach(graph.agitations) { mod in
+                    agitationCard(mod)
+                }
+                ForEach(graph.controls) { mod in
+                    controlCard(mod)
+                }
+                ForEach(graph.peaks) { mod in
+                    peakCard(mod)
+                }
+            }
+            .padding(.horizontal, MDS.spacingXL)
+        }
+    }
+
+    private var addModulatorButtons: some View {
+        HStack(spacing: MDS.spacingSM) {
+            addButton("+ AGITATION") { graph.addAgitation() }
+            addButton("+ CONTROL") { graph.addControl() }
+            addButton("+ PEAK") { graph.addPeak() }
+        }
+        .padding(.horizontal, MDS.spacingXL)
+    }
+
+    private func addButton(_ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(MDS.font(MDS.fontCaption2, weight: .bold))
+                .foregroundColor(MDS.neonTurquesa.opacity(0.6))
+                .padding(.horizontal, MDS.togglePaddingH)
+                .padding(.vertical, MDS.togglePaddingV)
+                .overlay(
+                    RoundedRectangle(cornerRadius: MDS.radiusSM)
+                        .stroke(MDS.neonTurquesa.opacity(0.2), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Agitation Card
+
+    private func agitationCard(_ mod: AgitationModulator) -> some View {
+        VStack(spacing: MDS.spacingSM) {
+            cardHeader(title: mod.name, color: .cyan, sourceId: mod.sourceId)
+
+            HStack(spacing: MDS.spacingSM) {
+                paramKnobMini(label: "RATE", value: Binding(
+                    get: { mod.rate },
+                    set: { mod.rate = $0 }
+                ), range: 0.01...50.0)
+
+                paramKnobMini(label: "DEPTH", value: Binding(
+                    get: { mod.depth },
+                    set: { mod.depth = $0 }
+                ), range: 0...1)
+            }
+
+            effectiveParamRow(
+                items: [("eR", mod.effectiveRate), ("eD", mod.effectiveDepth)]
+            )
+
+            waveformPicker(mod)
+            connectionList(for: mod)
+            connectButton(source: mod)
+        }
+        .padding(MDS.spacingSM)
+        .frame(width: 160)
+        .background(MDS.surfaceElevated)
+        .cornerRadius(MDS.radiusMD)
+        .overlay(
+            RoundedRectangle(cornerRadius: MDS.radiusMD)
+                .stroke(Color.cyan.opacity(0.2), lineWidth: 1)
+        )
+    }
+
+    private func waveformPicker(_ mod: AgitationModulator) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+                ForEach(AgitationWaveform.allCases, id: \.rawValue) { wf in
+                    Button(action: { mod.waveform = wf }) {
+                        Text(wfLabel(wf))
+                            .font(MDS.font(MDS.fontCaption2, weight: .bold))
+                            .foregroundColor(mod.waveform == wf ? .cyan : MDS.textTertiary)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(mod.waveform == wf ? Color.cyan.opacity(0.15) : .clear)
+                            .cornerRadius(2)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func wfLabel(_ wf: AgitationWaveform) -> String {
+        switch wf {
+        case .sine: return "SIN"
+        case .triangle: return "TRI"
+        case .saw: return "SAW"
+        case .square: return "SQR"
+        case .sampleAndHold: return "S&H"
+        case .randomWalk: return "RND"
+        }
+    }
+
+    // MARK: - Control Card
+
+    private func controlCard(_ mod: ControlModulator) -> some View {
+        VStack(spacing: MDS.spacingSM) {
+            cardHeader(title: mod.name, color: .yellow, sourceId: mod.sourceId)
+
+            HStack(spacing: MDS.spacingSM) {
+                paramKnobMini(label: "VALUE", value: Binding(
+                    get: { mod.value },
+                    set: { mod.value = $0 }
+                ), range: 0...1)
+
+                paramKnobMini(label: "SLEW", value: Binding(
+                    get: { mod.slewRate },
+                    set: { mod.slewRate = $0 }
+                ), range: 0.001...1)
+            }
+
+            effectiveParamRow(
+                items: [("eV", mod.effectiveValue), ("eS", mod.effectiveSlew)]
+            )
+
+            connectionList(for: mod)
+            connectButton(source: mod)
+        }
+        .padding(MDS.spacingSM)
+        .frame(width: 160)
+        .background(MDS.surfaceElevated)
+        .cornerRadius(MDS.radiusMD)
+        .overlay(
+            RoundedRectangle(cornerRadius: MDS.radiusMD)
+                .stroke(Color.yellow.opacity(0.2), lineWidth: 1)
+        )
+    }
+
+    // MARK: - Peak Card
+
+    private func peakCard(_ mod: PeakModulator) -> some View {
+        VStack(spacing: MDS.spacingSM) {
+            cardHeader(title: mod.name, color: .red, sourceId: mod.sourceId)
+
+            HStack(spacing: MDS.spacingSM) {
+                paramKnobMini(label: "ATK", value: Binding(
+                    get: { mod.attack },
+                    set: { mod.attack = $0 }
+                ), range: 0.001...2)
+
+                paramKnobMini(label: "DEC", value: Binding(
+                    get: { mod.decay },
+                    set: { mod.decay = $0 }
+                ), range: 0.001...5)
+            }
+
+            HStack(spacing: MDS.spacingSM) {
+                paramKnobMini(label: "HOLD", value: Binding(
+                    get: { mod.hold },
+                    set: { mod.hold = $0 }
+                ), range: 0...2)
+
+                paramKnobMini(label: "PROB", value: Binding(
+                    get: { mod.triggerProbability },
+                    set: { mod.triggerProbability = $0 }
+                ), range: 0...1)
+            }
+
+            effectiveParamRow(
+                items: [("eA", mod.effectiveAttack), ("eD", mod.effectiveDecay)]
+            )
+
+            Button(action: { mod.trigger() }) {
+                Text("TRIG")
+                    .font(MDS.font(MDS.fontCaption2, weight: .bold))
+                    .foregroundColor(.red)
+                    .padding(.horizontal, MDS.togglePaddingH)
+                    .padding(.vertical, 2)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: MDS.radiusSM)
+                            .stroke(Color.red.opacity(0.4), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+
+            connectionList(for: mod)
+            connectButton(source: mod)
+        }
+        .padding(MDS.spacingSM)
+        .frame(width: 160)
+        .background(MDS.surfaceElevated)
+        .cornerRadius(MDS.radiusMD)
+        .overlay(
+            RoundedRectangle(cornerRadius: MDS.radiusMD)
+                .stroke(Color.red.opacity(0.2), lineWidth: 1)
+        )
+    }
+
+    // MARK: - Shared Card Components
+
+    private func effectiveParamRow(items: [(String, Float)]) -> some View {
+        HStack(spacing: 4) {
+            ForEach(items, id: \.0) { label, val in
+                HStack(spacing: 1) {
+                    Text(label)
+                        .font(.system(size: 7, weight: .medium, design: .monospaced))
+                        .foregroundColor(MDS.textTertiary)
+                    Text(String(format: "%.2f", val))
+                        .font(.system(size: 7, weight: .bold, design: .monospaced))
+                        .foregroundColor(MDS.neonTurquesa.opacity(0.5))
+                }
+            }
+        }
+    }
+
+    private func cardHeader(title: String, color: Color, sourceId: UUID) -> some View {
+        HStack {
+            Circle()
+                .fill(color.opacity(0.6))
+                .frame(width: MDS.dotSM, height: MDS.dotSM)
+            Text(title)
+                .font(MDS.font(MDS.fontCaption, weight: .bold))
+                .foregroundColor(MDS.textPrimary)
+            Spacer()
+            Button(action: { graph.removeSource(id: sourceId) }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundColor(MDS.textTertiary)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func paramKnobMini(label: String, value: Binding<Float>, range: ClosedRange<Float>) -> some View {
+        VStack(spacing: 2) {
+            Text(label)
+                .font(MDS.font(MDS.fontCaption2))
+                .foregroundColor(MDS.textTertiary)
+            Text(String(format: "%.2f", value.wrappedValue))
+                .font(MDS.font(MDS.fontCaption2, weight: .medium))
+                .foregroundColor(MDS.textSecondary)
+                .frame(width: 50)
+
+            Slider(value: value, in: range)
+                .controlSize(.mini)
+                .frame(width: 60)
+        }
+    }
+
+    private func connectionList(for source: any ModulationSource) -> some View {
+        VStack(spacing: 2) {
+            ForEach(source.connections) { conn in
+                VStack(spacing: 0) {
+                    HStack(spacing: 2) {
+                        Text(connectionLabel(conn))
+                            .font(MDS.font(MDS.fontCaption2))
+                            .foregroundColor(MDS.textSecondary)
+                            .lineLimit(1)
+                        Spacer()
+                        Text(String(format: "s:%.1f", conn.scale))
+                            .font(MDS.font(MDS.fontCaption2))
+                            .foregroundColor(MDS.textTertiary)
+                        Button(action: { graph.disconnect(connectionId: conn.id) }) {
+                            Image(systemName: "minus.circle.fill")
+                                .font(.system(size: 8))
+                                .foregroundColor(MDS.danger.opacity(0.5))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    HStack(spacing: 4) {
+                        modulationMeter(value: conn.lastRawValue, label: "RAW")
+                        modulationMeter(value: conn.lastScaledValue, label: "OUT")
+                    }
+                    .frame(height: 10)
+                }
+            }
+        }
+    }
+
+    private func modulationMeter(value: Float, label: String) -> some View {
+        let clamped = max(-1, min(1, value))
+        let normalized = (clamped + 1) / 2.0
+        return HStack(spacing: 1) {
+            Text(label)
+                .font(.system(size: 6, weight: .medium, design: .monospaced))
+                .foregroundColor(MDS.textTertiary)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.white.opacity(0.05))
+                    Rectangle()
+                        .fill(meterColor(value))
+                        .frame(width: geo.size.width * CGFloat(normalized))
+                }
+                .cornerRadius(1)
+            }
+            Text(String(format: "%+.2f", value))
+                .font(.system(size: 6, weight: .medium, design: .monospaced))
+                .foregroundColor(MDS.textTertiary)
+                .frame(width: 28, alignment: .trailing)
+        }
+    }
+
+    private func meterColor(_ value: Float) -> Color {
+        if abs(value) < 0.01 { return Color.gray.opacity(0.3) }
+        return value > 0 ? MDS.neonTurquesa.opacity(0.6) : Color.orange.opacity(0.6)
+    }
+
+    private func connectionLabel(_ conn: ModulationConnection) -> String {
+        let dest = conn.destinationAddress
+        let paramName = dest.parameter.rawValue
+        // v2.0: Show node ID prefix for node-based addressing
+        let nodePrefix = String(dest.nodeId.uuidString.prefix(4))
+        return "\(nodePrefix).\(paramName)"
+    }
+
+    private func connectButton(source: any ModulationSource) -> some View {
+        Menu {
+            ForEach(targetNodes, id: \.id) { node in
+                Menu("Node \(String(node.id.uuidString.prefix(8)))") {
+                    ForEach(laneParameters, id: \.rawValue) { param in
+                        Button(param.rawValue) {
+                            let addr = ModulationAddress(nodeId: node.id, parameter: param)
+                            graph.connect(source: source, to: addr, scale: 1.0)
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text("+ CONNECT")
+                .font(MDS.font(MDS.fontCaption2, weight: .bold))
+                .foregroundColor(MDS.neonTurquesa.opacity(0.6))
+                .padding(.horizontal, MDS.togglePaddingH)
+                .padding(.vertical, 2)
+                .overlay(
+                    RoundedRectangle(cornerRadius: MDS.radiusSM)
+                        .stroke(MDS.neonTurquesa.opacity(0.2), lineWidth: 1)
+                )
+        }
+        .menuStyle(.borderlessButton)
+    }
+
+    private var laneParameters: [ModulationParameter] {
+        [.filterCutoff, .feedback, .entropy, .granularity, .guidanceScale,
+         .delayMix, .saturationMorph, .resonatorNote, .bitCrushDepth,
+         .inputStrength, .volume, .filterResonance, .resonatorDecay]
     }
 }

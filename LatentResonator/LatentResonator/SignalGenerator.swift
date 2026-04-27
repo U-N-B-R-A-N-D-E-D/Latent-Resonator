@@ -4,7 +4,7 @@ import AVFoundation
 // MARK: - Signal Generator
 // Multiple excitation sources for the Neural Feedback Loop.
 //
-// Max/MSP teaches us that sonic diversity begins at the source.
+// dataflow system teaches us that sonic diversity begins at the source.
 // The original Koenig Seed (§4.1) is ONE valid excitation -- but
 // the whitepaper's latent space is a resonant chamber (§1.2) that
 // responds differently to different inputs. Each mode "pings" the
@@ -65,12 +65,15 @@ enum SaturationMode: String, CaseIterable, Identifiable {
 /// Implements the stochastic parameter evolution concept (§5.2)
 /// where timbral entropy increases over time without human input.
 enum LFOTarget: String, CaseIterable, Identifiable {
-    case none        = "OFF"
-    case entropy     = "ENTROPY"
-    case granularity = "GRAIN"
-    case guidance    = "CFG"
-    case feedback    = "FEEDBACK"
-    case resonator   = "RESON"
+    case none            = "OFF"
+    case entropy         = "ENTROPY"
+    case granularity     = "GRAIN"
+    case guidance        = "CFG"
+    case feedback        = "FEEDBACK"
+    case resonator       = "RESON"
+    case filterCutoff    = "FILTER"
+    case delayMix        = "DELAY"
+    case saturationMorph = "SAT"
 
     var id: String { rawValue }
 }
@@ -447,9 +450,9 @@ final class SignalGenerator {
         oscPhase = phase
     }
 
-    // MARK: - Triangle (Buchla Character)
+    // MARK: - Triangle (west-coast synthesis Character)
 
-    /// Soft, flute-like triangle wave -- the Buchla sound. Fewer
+    /// Soft, flute-like triangle wave -- the west-coast synthesis sound. Fewer
     /// harmonics than saw/square, pure and warm. Derived by
     /// integrating the square wave (leaky integrator for stability).
     private func fillTriangle(

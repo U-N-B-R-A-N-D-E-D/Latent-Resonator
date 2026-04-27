@@ -1,0 +1,193 @@
+{
+  "version": "2.0.0",
+  "metadata": {
+    "name": "Spectra → Resonator → Echo",
+    "description": "Spectral processing topology with feedback and delay. Sculpts timbre before temporal diffusion.",
+    "author": "Latent Resonator Factory",
+    "stageTopology": ["seed", "spectra", "resonator", "echo", "flat"]
+  },
+  "nodes": [
+    {
+      "id": "SEED-0000-0000-0000-000000000001",
+      "nodeType": "oscillator",
+      "displayName": "Source",
+      "parameters": {
+        "frequency": 110.0,
+        "amplitude": 0.7,
+        "waveform": "square",
+        "pitchDrift": 0.02,
+        "driftRate": 0.1
+      },
+      "position": { "x": 100.0, "y": 200.0 },
+      "stageKind": "seed"
+    },
+    {
+      "id": "SPEC-0000-0000-0000-000000000002",
+      "nodeType": "spectral_chain",
+      "displayName": "Spectra",
+      "parameters": {
+        "morph": 0.5,
+        "blur": 0.3,
+        "shift": 0.0
+      },
+      "position": { "x": 350.0, "y": 200.0 },
+      "stageKind": "spectra"
+    },
+    {
+      "id": "REZN-0000-0000-0000-000000000003",
+      "nodeType": "feedback_loop",
+      "displayName": "Resonator",
+      "parameters": {
+        "feedbackAmount": 0.65,
+        "damping": 0.25,
+        "latencyCompensation": 512
+      },
+      "position": { "x": 600.0, "y": 200.0 },
+      "stageKind": "resonator"
+    },
+    {
+      "id": "ECHO-0000-0000-0000-000000000004",
+      "nodeType": "delay",
+      "displayName": "Echo",
+      "parameters": {
+        "delayTime": 0.375,
+        "feedback": 0.4,
+        "wetDryMix": 0.35
+      },
+      "position": { "x": 850.0, "y": 200.0 },
+      "stageKind": "echo"
+    },
+    {
+      "id": "MIXR-0000-0000-0000-000000000005",
+      "nodeType": "mixer",
+      "displayName": "Mix",
+      "parameters": {
+        "gain1": 0.7,
+        "gain2": 0.3,
+        "gain3": 0.0,
+        "gain4": 0.0,
+        "masterGain": 0.75
+      },
+      "position": { "x": 1100.0, "y": 250.0 }
+    },
+    {
+      "id": "MSTR-0000-0000-0000-000000000006",
+      "nodeType": "master_output",
+      "displayName": "Master",
+      "parameters": {
+        "volume": 0.9,
+        "limiterThreshold": -0.1
+      },
+      "position": { "x": 1350.0, "y": 250.0 },
+      "stageKind": "flat"
+    }
+  ],
+  "edges": [
+    {
+      "id": "EDG1-0000-0000-0000-000000000001",
+      "sourceNodeId": "SEED-0000-0000-0000-000000000001",
+      "sourcePortId": "out",
+      "targetNodeId": "SPEC-0000-0000-0000-000000000002",
+      "targetPortId": "in",
+      "signalType": "audio"
+    },
+    {
+      "id": "EDG2-0000-0000-0000-000000000002",
+      "sourceNodeId": "SPEC-0000-0000-0000-000000000002",
+      "sourcePortId": "out",
+      "targetNodeId": "REZN-0000-0000-0000-000000000003",
+      "targetPortId": "in",
+      "signalType": "audio"
+    },
+    {
+      "id": "EDG3-0000-0000-0000-000000000003",
+      "sourceNodeId": "REZN-0000-0000-0000-000000000003",
+      "sourcePortId": "out",
+      "targetNodeId": "ECHO-0000-0000-0000-000000000004",
+      "targetPortId": "in",
+      "signalType": "audio"
+    },
+    {
+      "id": "EDG4-0000-0000-0000-000000000004",
+      "sourceNodeId": "REZN-0000-0000-0000-000000000003",
+      "sourcePortId": "out",
+      "targetNodeId": "MIXR-0000-0000-0000-000000000005",
+      "targetPortId": "in1",
+      "signalType": "audio"
+    },
+    {
+      "id": "EDG5-0000-0000-0000-000000000005",
+      "sourceNodeId": "ECHO-0000-0000-0000-000000000004",
+      "sourcePortId": "out",
+      "targetNodeId": "MIXR-0000-0000-0000-000000000005",
+      "targetPortId": "in2",
+      "signalType": "audio"
+    },
+    {
+      "id": "EDG6-0000-0000-0000-000000000006",
+      "sourceNodeId": "MIXR-0000-0000-0000-000000000005",
+      "sourcePortId": "out",
+      "targetNodeId": "MSTR-0000-0000-0000-000000000006",
+      "targetPortId": "in",
+      "signalType": "audio"
+    }
+  ],
+  "exposedControls": [
+    {
+      "id": "CTL1-0000-0000-0000-000000000001",
+      "nodeId": "SEED-0000-0000-0000-000000000001",
+      "paramId": "frequency",
+      "label": "Source Pitch",
+      "controlType": "knob",
+      "range": { "lower": 55, "upper": 440 },
+      "defaultValue": 110,
+      "position": 0
+    },
+    {
+      "id": "CTL2-0000-0000-0000-000000000002",
+      "nodeId": "SPEC-0000-0000-0000-000000000002",
+      "paramId": "morph",
+      "label": "Spectral Morph",
+      "controlType": "knob",
+      "range": { "lower": 0, "upper": 1 },
+      "defaultValue": 0.5,
+      "position": 1
+    },
+    {
+      "id": "CTL3-0000-0000-0000-000000000003",
+      "nodeId": "REZN-0000-0000-0000-000000000003",
+      "paramId": "feedbackAmount",
+      "label": "Resonance",
+      "controlType": "knob",
+      "range": { "lower": 0, "upper": 1 },
+      "defaultValue": 0.65,
+      "position": 2
+    },
+    {
+      "id": "CTL4-0000-0000-0000-000000000004",
+      "nodeId": "ECHO-0000-0000-0000-000000000004",
+      "paramId": "wetDryMix",
+      "label": "Echo Mix",
+      "controlType": "knob",
+      "range": { "lower": 0, "upper": 1 },
+      "defaultValue": 0.35,
+      "position": 3
+    },
+    {
+      "id": "CTL5-0000-0000-0000-000000000005",
+      "nodeId": "MIXR-0000-0000-0000-000000000005",
+      "paramId": "masterGain",
+      "label": "Master",
+      "controlType": "knob",
+      "range": { "lower": 0, "upper": 1 },
+      "defaultValue": 0.75,
+      "position": 4
+    }
+  ],
+  "macroBindings": [],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 0.8
+  }
+}
