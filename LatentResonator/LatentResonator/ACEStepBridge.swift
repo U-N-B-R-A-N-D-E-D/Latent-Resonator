@@ -20,6 +20,7 @@ enum ACEBridgeStatus: String {
     case connected    = "CONNECTED"
     case modelLoaded  = "MODEL LOADED"
     case error        = "ERROR"
+    case recovering   = "RECOVERING"  // Auto-reconnection in progress
 }
 
 /// Response from the /health endpoint.
@@ -124,6 +125,23 @@ final class ACEStepBridge: ObservableObject {
     private var healthTimer: Timer?
     private let healthInterval: TimeInterval = 10.0
 
+    // MARK: - Reconnection State
+
+    /// Consecutive health check failures
+    @Published var consecutiveFailures: Int = 0
+    /// Maximum failures before triggering circuit breaker
+    private let maxConsecutiveFailures = LRConstants.maxConsecutiveFailures
+    /// Whether auto-reconnection is enabled
+    private var autoReconnectEnabled = true
+    /// Current reconnection attempt (for exponential backoff)
+    private var reconnectAttempt = 0
+    /// Maximum reconnection attempts before giving up
+    private let maxReconnectAttempts = 10
+    /// Reconnection timer (separate from health timer)
+    private var reconnectTimer: Timer?
+    /// Timestamp of last successful health check
+    private var lastSuccessfulHealthCheck: Date?
+
     // MARK: - Init
 
     init(
@@ -147,6 +165,7 @@ final class ACEStepBridge: ObservableObject {
 
     deinit {
         stopHealthPolling()
+        reconnectTimer?.invalidate()
     }
 
     // MARK: - Health Polling
@@ -173,14 +192,17 @@ final class ACEStepBridge: ObservableObject {
     func stopHealthPolling() {
         healthTimer?.invalidate()
         healthTimer = nil
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
     }
 
     /// Check the server's /health endpoint.
+    /// Implements exponential backoff and circuit breaker pattern for resilience.
     func checkHealth() async {
         let url = baseURL.appendingPathComponent(LRConstants.ACEBridge.healthEndpoint)
 
         await MainActor.run {
-            if status == .disconnected {
+            if status == .disconnected || status == .error {
                 status = .connecting
             }
         }
@@ -188,15 +210,24 @@ final class ACEStepBridge: ObservableObject {
         do {
             let (data, response) = try await healthSession.data(from: url)
 
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else {
-                await updateStatus(.error, error: "Server returned non-200")
+            guard let httpResponse = response as? HTTPURLResponse else {
+                await handleHealthCheckFailure(error: "Invalid response type from server")
+                return
+            }
+
+            guard httpResponse.statusCode == 200 else {
+                let errorMsg = "Server returned HTTP \(httpResponse.statusCode)"
+                await handleHealthCheckFailure(error: errorMsg)
                 return
             }
 
             let health = try JSONDecoder().decode(ACEHealthResponse.self, from: data)
 
             await MainActor.run {
+                // Success - reset failure counters
+                self.consecutiveFailures = 0
+                self.reconnectAttempt = 0
+                self.lastSuccessfulHealthCheck = Date()
                 self.isModelLoaded = health.model_loaded
                 self.remoteDevice = health.device ?? "none"
                 self.remoteModelType = health.model_type ?? "unknown"
@@ -210,8 +241,82 @@ final class ACEStepBridge: ObservableObject {
                 }
             }
         } catch {
-            await updateStatus(.disconnected, error: error.localizedDescription)
+            await handleHealthCheckFailure(error: error.localizedDescription)
         }
+    }
+
+    /// Handle health check failure with circuit breaker logic.
+    private func handleHealthCheckFailure(error: String) async {
+        await MainActor.run {
+            consecutiveFailures += 1
+            lastError = error
+
+            // Circuit breaker: too many failures
+            if consecutiveFailures >= maxConsecutiveFailures {
+                if autoReconnectEnabled && reconnectAttempt < maxReconnectAttempts {
+                    status = .recovering
+                    scheduleReconnection()
+                } else {
+                    status = .error
+                    if reconnectAttempt >= maxReconnectAttempts {
+                        lastError = "Max reconnection attempts reached. Bridge unavailable."
+                    }
+                }
+            } else {
+                status = .disconnected
+            }
+        }
+    }
+
+    /// Schedule automatic reconnection with exponential backoff.
+    private func scheduleReconnection() {
+        reconnectAttempt += 1
+
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s... up to 60s max
+        let backoffSeconds = min(pow(2.0, Double(reconnectAttempt - 1)), 60.0)
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            self.reconnectTimer?.invalidate()
+            self.reconnectTimer = Timer.scheduledTimer(
+                withTimeInterval: backoffSeconds,
+                repeats: false
+            ) { [weak self] _ in
+                Task { [weak self] in
+                    await self?.attemptReconnection()
+                }
+            }
+        }
+    }
+
+    /// Attempt to reconnect to the bridge server.
+    private func attemptReconnection() async {
+        await MainActor.run {
+            status = .recovering
+        }
+
+        // Try health check again
+        await checkHealth()
+    }
+
+    /// Force immediate reconnection attempt (e.g., after manual restart).
+    func forceReconnect() {
+        reconnectAttempt = 0
+        consecutiveFailures = 0
+        autoReconnectEnabled = true
+
+        Task {
+            await checkHealth()
+            startHealthPolling()
+        }
+    }
+
+    /// Disable auto-reconnection (e.g., when user manually stops).
+    func disableAutoReconnect() {
+        autoReconnectEnabled = false
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
     }
 
     // MARK: - Inference

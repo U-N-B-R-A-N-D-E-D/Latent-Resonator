@@ -7,37 +7,23 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		FC00000011 /* FiraCode-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000001 /* FiraCode-Regular.ttf */; };
-		FC00000012 /* FiraCode-Medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000002 /* FiraCode-Medium.ttf */; };
-		FC00000013 /* FiraCode-SemiBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000003 /* FiraCode-SemiBold.ttf */; };
-		FC00000014 /* FiraCode-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000004 /* FiraCode-Bold.ttf */; };
-		FC00000031 /* Scripts in Resources */ = {isa = PBXBuildFile; fileRef = FC00000030 /* Scripts */; };
 		089C166500000030 /* LatentResonatorApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000020 /* LatentResonatorApp.swift */; };
-		089C16650000008A /* AudioRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000008B /* AudioRecorder.swift */; };
-		089C16650000009A /* SceneManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000009B /* SceneManager.swift */; };
-		089C16650000009D /* SequencerEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000009C /* SequencerEngine.swift */; };
 		089C166500000031 /* NeuralEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000021 /* NeuralEngine.swift */; };
 		089C166500000032 /* KoenigSeedGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000022 /* KoenigSeedGenerator.swift */; };
 		089C166500000033 /* CircularAudioBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000023 /* CircularAudioBuffer.swift */; };
 		089C166500000034 /* CoreMLInference.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000024 /* CoreMLInference.swift */; };
-		089C166500000035 /* LatentResonatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000025 /* LatentResonatorView.swift */; };
 		089C166500000036 /* RetroKnob.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000026 /* RetroKnob.swift */; };
 		089C166500000037 /* LatentXYPad.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000027 /* LatentXYPad.swift */; };
-
 		089C16650000003B /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000002B /* Constants.swift */; };
 		089C16650000003C /* SpectralProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000040 /* SpectralProcessor.swift */; };
 		089C16650000003D /* SignalGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000041 /* SignalGenerator.swift */; };
 		089C16650000003E /* ACEStepBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000042 /* ACEStepBridge.swift */; };
 		089C16650000003F /* WAVCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000043 /* WAVCodec.swift */; };
 		089C166500000050 /* BridgeProcessManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000044 /* BridgeProcessManager.swift */; };
-		089C166500000051 /* ResonatorLane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000045 /* ResonatorLane.swift */; };
-		089C166500000052 /* LaneStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000046 /* LaneStripView.swift */; };
 		089C166500000053 /* PerformanceState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000054 /* PerformanceState.swift */; };
 		089C166500000055 /* PerformanceMotherbaseView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000056 /* PerformanceMotherbaseView.swift */; };
-		089C16650000009F /* SceneCrossfaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000009E /* SceneCrossfaderView.swift */; };
 		089C166500000057 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000058 /* RootView.swift */; };
 		089C166500000059 /* ParameterRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000005A /* ParameterRouter.swift */; };
-		F1A2B3C400000061 /* LRComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C400000060 /* LRComponents.swift */; };
 		089C166500000080 /* CircularAudioBufferTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000070 /* CircularAudioBufferTests.swift */; };
 		089C166500000081 /* ConstantsValidationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000071 /* ConstantsValidationTests.swift */; };
 		089C166500000082 /* ParameterRoutingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000072 /* ParameterRoutingTests.swift */; };
@@ -46,21 +32,71 @@
 		089C166500000085 /* SpectralProcessorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000075 /* SpectralProcessorTests.swift */; };
 		089C166500000086 /* WAVCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000076 /* WAVCodecTests.swift */; };
 		089C166500000087 /* NeuralEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000077 /* NeuralEngineTests.swift */; };
+		089C16650000008A /* AudioRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000008B /* AudioRecorder.swift */; };
+		089C16650000009A /* SceneManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000009B /* SceneManager.swift */; };
+		089C16650000009D /* SequencerEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000009C /* SequencerEngine.swift */; };
+		089C16650000009F /* SceneCrossfaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000009E /* SceneCrossfaderView.swift */; };
+		15F59879CE091D6E00000000 /* GraphNode.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDEF985ABBA14A9300000000 /* GraphNode.swift */; };
+		2366EECFBC8CE98200000000 /* SourceNodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB26B91A501C471D00000000 /* SourceNodes.swift */; };
+		37900CCD912F02B800000000 /* MacroNode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33D2274DBD4F662100000000 /* MacroNode.swift */; };
+		3B28E17FA57CD00700000000 /* FilterEffectNodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FE279D584A128A700000000 /* FilterEffectNodes.swift */; };
+		3E1A833AD0D6FF2500000000 /* AudioVisualizerHTML.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB818EDED28AC77800000000 /* AudioVisualizerHTML.swift */; };
+		43F78D806DF4060400000000 /* AudioGraphMapper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 731C703F8BCE053F00000000 /* AudioGraphMapper.swift */; };
+		44F2E2B09B8DA22F00000000 /* ControlGraphEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBD97F4B3287F68500000000 /* ControlGraphEvaluator.swift */; };
+		539312BCDB97FE8500000000 /* NodeGraphStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5066EC9413728E1100000000 /* NodeGraphStore.swift */; };
+		56FDD26957C4509400000000 /* SpectralNodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F33425EA0EC25B200000000 /* SpectralNodes.swift */; };
+		59CB7971FE1DE02B00000000 /* NeuralNodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D60426F359C48EA00000000 /* NeuralNodes.swift */; };
+		77A35F6CA75C1F1D00000000 /* ModulationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4CC27A82789998600000000 /* ModulationEngine.swift */; };
+		80F68DA8FA86F5B600000000 /* TerminalConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A99B4CB73935D3E600000000 /* TerminalConsoleView.swift */; };
+		9DB1E0E565BECC0700000000 /* AnalysisNodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD8B4D65087E005900000000 /* AnalysisNodes.swift */; };
+		A1A21B6C3435A87700000000 /* PerformLayoutEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8605F272C3BAE3500000000 /* PerformLayoutEngine.swift */; };
+		AEE2A0FDA39F0AB400000000 /* SpectralPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 594AB5AB0E88E4F400000000 /* SpectralPipeline.swift */; };
+		B0595342FE403DD100000000 /* GraphEdge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39F4813CF9A45A1A00000000 /* GraphEdge.swift */; };
+		EXT0000020 /* CGPoint+Codable.swift in Sources */ = {isa = PBXBuildFile; fileRef = EXT0000002 /* CGPoint+Codable.swift */; };
+		B0683505752A889100000000 /* RoutingNodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8D0DC21B6EC033F00000000 /* RoutingNodes.swift */; };
+		B2C34D7E1234A56700000000 /* MacroBindingsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1B45C8F2345B67800000000 /* MacroBindingsPanel.swift */; };
+		B5D4E8A10000F001 /* PatchEditor in Resources */ = {isa = PBXBuildFile; fileRef = B5D4E8A00000F000 /* PatchEditor */; };
+		C32CE509F2C27E5200000000 /* ControlNodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D03300FD72A9CEC00000000 /* ControlNodes.swift */; };
+		C4181653397E850000000000 /* GraphHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 129F7F547BE6EDEF00000000 /* GraphHistory.swift */; };
+		C858C0EC25B15F8900000000 /* WebViewBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D15F99D987F573B00000000 /* WebViewBridge.swift */; };
+		DAE73F65B4C9C0F200000000 /* PatchViewCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85F6431619E7EB1500000000 /* PatchViewCoordinator.swift */; };
+		DBC439E68D62F3D500000000 /* NodeGraph.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB865DDAAA266E6D00000000 /* NodeGraph.swift */; };
+		F1A2B3C400000061 /* LRComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C400000060 /* LRComponents.swift */; };
+		F93C2DD34E9B0B0C00000000 /* AudioVisualizerXYPad.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6FDA813FA0B225500000000 /* AudioVisualizerXYPad.swift */; };
+		FC00000011 /* FiraCode-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000001 /* FiraCode-Regular.ttf */; };
+		FC00000012 /* FiraCode-Medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000002 /* FiraCode-Medium.ttf */; };
+		FC00000013 /* FiraCode-SemiBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000003 /* FiraCode-SemiBold.ttf */; };
+		FC00000014 /* FiraCode-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FC00000004 /* FiraCode-Bold.ttf */; };
+		FC00000031 /* Scripts in Resources */ = {isa = PBXBuildFile; fileRef = FC00000030 /* Scripts */; };
+		98B898FD671D4FE6A4976C6E /* KickstartTemplate.json in Resources */ = {isa = PBXBuildFile; fileRef = 98B898FD671D4FE6A4976C6F /* KickstartTemplate.json */; };
+		A12345678901234567890123 /* ImplicitGraphBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F393EFCCBF84376AB4E8486 /* ImplicitGraphBuilder.swift */; };
+		C12345678901234567890123 /* SequencerNodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B12345678901234567890123 /* SequencerNodes.swift */; };
+		E12345678901234567890123 /* ReverbNode.swift in Sources */ = {isa = PBXBuildFile; fileRef = D12345678901234567890123 /* ReverbNode.swift */; };
+		ADCB8E327311C4F6AB92235D /* RecipeBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB627CA29BF1349AD84512E4 /* RecipeBanner.swift */; };
+		AF43B2C6A44914F9DB214932 /* LaneRole.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB7FA51361EFB4908B378FFF /* LaneRole.swift */; };
+		ACB1FEC8ED7DB4B1E86987BB /* PatternChain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A25E2541D797C4F4789EBDEA /* PatternChain.swift */; };
+		AF8E7453558044283BEF73AA /* MultiLaneTemplate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2402AC46DA2415C87AFEDD /* MultiLaneTemplate.swift */; };
+		ADA5A609312AC4D7981F5223 /* TemplateBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADD4C71833C3F453F8D83329 /* TemplateBrowserView.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		089C166500000067 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 089C166500000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 089C166500000009;
+			remoteInfo = LatentResonator;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		089C166500000020 /* LatentResonatorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatentResonatorApp.swift; sourceTree = "<group>"; };
-		089C16650000008B /* AudioRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRecorder.swift; sourceTree = "<group>"; };
-		089C16650000009B /* SceneManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneManager.swift; sourceTree = "<group>"; };
-		089C16650000009C /* SequencerEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SequencerEngine.swift; sourceTree = "<group>"; };
 		089C166500000021 /* NeuralEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeuralEngine.swift; sourceTree = "<group>"; };
 		089C166500000022 /* KoenigSeedGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KoenigSeedGenerator.swift; sourceTree = "<group>"; };
 		089C166500000023 /* CircularAudioBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CircularAudioBuffer.swift; sourceTree = "<group>"; };
 		089C166500000024 /* CoreMLInference.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreMLInference.swift; sourceTree = "<group>"; };
-		089C166500000025 /* LatentResonatorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatentResonatorView.swift; sourceTree = "<group>"; };
 		089C166500000026 /* RetroKnob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RetroKnob.swift; sourceTree = "<group>"; };
 		089C166500000027 /* LatentXYPad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatentXYPad.swift; sourceTree = "<group>"; };
-
 		089C16650000002B /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
 		089C16650000002C /* LatentResonator.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LatentResonator.entitlements; sourceTree = "<group>"; };
 		089C16650000002D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -70,14 +106,11 @@
 		089C166500000042 /* ACEStepBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ACEStepBridge.swift; sourceTree = "<group>"; };
 		089C166500000043 /* WAVCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WAVCodec.swift; sourceTree = "<group>"; };
 		089C166500000044 /* BridgeProcessManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeProcessManager.swift; sourceTree = "<group>"; };
-		089C166500000045 /* ResonatorLane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResonatorLane.swift; sourceTree = "<group>"; };
-		089C166500000046 /* LaneStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaneStripView.swift; sourceTree = "<group>"; };
 		089C166500000054 /* PerformanceState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceState.swift; sourceTree = "<group>"; };
 		089C166500000056 /* PerformanceMotherbaseView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceMotherbaseView.swift; sourceTree = "<group>"; };
-		089C16650000009E /* SceneCrossfaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneCrossfaderView.swift; sourceTree = "<group>"; };
 		089C166500000058 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		089C16650000005A /* ParameterRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParameterRouter.swift; sourceTree = "<group>"; };
-		F1A2B3C400000060 /* LRComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LRComponents.swift; sourceTree = "<group>"; };
+		089C166500000066 /* LatentResonatorTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LatentResonatorTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		089C166500000070 /* CircularAudioBufferTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CircularAudioBufferTests.swift; sourceTree = "<group>"; };
 		089C166500000071 /* ConstantsValidationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConstantsValidationTests.swift; sourceTree = "<group>"; };
 		089C166500000072 /* ParameterRoutingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParameterRoutingTests.swift; sourceTree = "<group>"; };
@@ -86,12 +119,54 @@
 		089C166500000075 /* SpectralProcessorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpectralProcessorTests.swift; sourceTree = "<group>"; };
 		089C166500000076 /* WAVCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WAVCodecTests.swift; sourceTree = "<group>"; };
 		089C166500000077 /* NeuralEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeuralEngineTests.swift; sourceTree = "<group>"; };
-		089C166500000066 /* LatentResonatorTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LatentResonatorTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		089C16650000008B /* AudioRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRecorder.swift; sourceTree = "<group>"; };
+		089C16650000009B /* SceneManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneManager.swift; sourceTree = "<group>"; };
+		089C16650000009C /* SequencerEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SequencerEngine.swift; sourceTree = "<group>"; };
+		089C16650000009E /* SceneCrossfaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneCrossfaderView.swift; sourceTree = "<group>"; };
+		129F7F547BE6EDEF00000000 /* GraphHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GraphHistory.swift; sourceTree = "<group>"; };
+		1D15F99D987F573B00000000 /* WebViewBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewBridge.swift; sourceTree = "<group>"; };
+		1EFEC9530BD75AEA00000000 /* SpectralChainTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpectralChainTests.swift; sourceTree = "<group>"; };
+		33D2274DBD4F662100000000 /* MacroNode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacroNode.swift; sourceTree = "<group>"; };
+		39F4813CF9A45A1A00000000 /* GraphEdge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GraphEdge.swift; sourceTree = "<group>"; };
+		5066EC9413728E1100000000 /* NodeGraphStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeGraphStore.swift; sourceTree = "<group>"; };
+		594AB5AB0E88E4F400000000 /* SpectralPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpectralPipeline.swift; sourceTree = "<group>"; };
+		5F33425EA0EC25B200000000 /* SpectralNodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpectralNodes.swift; sourceTree = "<group>"; };
+		731C703F8BCE053F00000000 /* AudioGraphMapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioGraphMapper.swift; sourceTree = "<group>"; };
+		85F6431619E7EB1500000000 /* PatchViewCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PatchViewCoordinator.swift; sourceTree = "<group>"; };
+		8681BEB746A0586800000000 /* AudioQualityABTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioQualityABTests.swift; sourceTree = "<group>"; };
+		9D03300FD72A9CEC00000000 /* ControlNodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlNodes.swift; sourceTree = "<group>"; };
+		9D60426F359C48EA00000000 /* NeuralNodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeuralNodes.swift; sourceTree = "<group>"; };
+		9FE279D584A128A700000000 /* FilterEffectNodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilterEffectNodes.swift; sourceTree = "<group>"; };
+		A8D0DC21B6EC033F00000000 /* RoutingNodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoutingNodes.swift; sourceTree = "<group>"; };
+		A99B4CB73935D3E600000000 /* TerminalConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalConsoleView.swift; sourceTree = "<group>"; };
+		AB818EDED28AC77800000000 /* AudioVisualizerHTML.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioVisualizerHTML.swift; sourceTree = "<group>"; };
+		B5D4E8A00000F000 /* PatchEditor */ = {isa = PBXFileReference; lastKnownFileType = folder; path = PatchEditor; sourceTree = "<group>"; };
+		CD8B4D65087E005900000000 /* AnalysisNodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisNodes.swift; sourceTree = "<group>"; };
+		D4CC27A82789998600000000 /* ModulationEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModulationEngine.swift; sourceTree = "<group>"; };
+		D8605F272C3BAE3500000000 /* PerformLayoutEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformLayoutEngine.swift; sourceTree = "<group>"; };
+		D86EAA87202C86F500000000 /* ModulationEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModulationEngineTests.swift; sourceTree = "<group>"; };
+		DBD97F4B3287F68500000000 /* ControlGraphEvaluator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlGraphEvaluator.swift; sourceTree = "<group>"; };
+		E1B45C8F2345B67800000000 /* MacroBindingsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacroBindingsPanel.swift; sourceTree = "<group>"; };
+		E6FDA813FA0B225500000000 /* AudioVisualizerXYPad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioVisualizerXYPad.swift; sourceTree = "<group>"; };
+		EB26B91A501C471D00000000 /* SourceNodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceNodes.swift; sourceTree = "<group>"; };
+		EB865DDAAA266E6D00000000 /* NodeGraph.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeGraph.swift; sourceTree = "<group>"; };
+		F1A2B3C400000060 /* LRComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LRComponents.swift; sourceTree = "<group>"; };
 		FC00000001 /* FiraCode-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "FiraCode-Regular.ttf"; sourceTree = "<group>"; };
 		FC00000002 /* FiraCode-Medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "FiraCode-Medium.ttf"; sourceTree = "<group>"; };
 		FC00000003 /* FiraCode-SemiBold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "FiraCode-SemiBold.ttf"; sourceTree = "<group>"; };
 		FC00000004 /* FiraCode-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "FiraCode-Bold.ttf"; sourceTree = "<group>"; };
 		FC00000030 /* Scripts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Scripts; sourceTree = "<group>"; };
+		FDEF985ABBA14A9300000000 /* GraphNode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GraphNode.swift; sourceTree = "<group>"; };
+		B12345678901234567890123 /* SequencerNodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SequencerNodes.swift"; sourceTree = "<group>"; };
+		EXT0000002 /* CGPoint+Codable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CGPoint+Codable.swift"; sourceTree = "<group>"; };
+		D12345678901234567890123 /* ReverbNode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ReverbNode.swift"; sourceTree = "<group>"; };
+		4F393EFCCBF84376AB4E8486 /* ImplicitGraphBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ImplicitGraphBuilder.swift"; sourceTree = "<group>"; };
+		AB627CA29BF1349AD84512E4 /* RecipeBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = RecipeBanner.swift; path = LatentResonator/Views/RecipeBanner.swift; sourceTree = "<group>"; };
+		AB7FA51361EFB4908B378FFF /* LaneRole.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = LaneRole.swift; path = LatentResonator/Config/LaneRole.swift; sourceTree = "<group>"; };
+		A25E2541D797C4F4789EBDEA /* PatternChain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PatternChain.swift; path = LatentResonator/Config/PatternChain.swift; sourceTree = "<group>"; };
+		AA2402AC46DA2415C87AFEDD /* MultiLaneTemplate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MultiLaneTemplate.swift; path = LatentResonator/Config/MultiLaneTemplate.swift; sourceTree = "<group>"; };
+		ADD4C71833C3F453F8D83329 /* TemplateBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TemplateBrowserView.swift; path = LatentResonator/Views/TemplateBrowserView.swift; sourceTree = "<group>"; };		98B898FD671D4FE6A4976C6F /* KickstartTemplate.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "KickstartTemplate.json"; sourceTree = "<group>"; };
+
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -118,6 +193,7 @@
 				089C166500000003 /* LatentResonator */,
 				089C166500000069 /* LatentResonatorTests */,
 				089C166500000008 /* Products */,
+				B5D4E8A00000F000 /* PatchEditor */,
 			);
 			sourceTree = "<group>";
 		};
@@ -138,7 +214,10 @@
 				089C166500000042 /* ACEStepBridge.swift */,
 				089C166500000043 /* WAVCodec.swift */,
 				089C166500000044 /* BridgeProcessManager.swift */,
-				089C166500000045 /* ResonatorLane.swift */,
+				D4CC27A82789998600000000 /* ModulationEngine.swift */,
+				7A88060EFF42396800000000 /* DSP */,
+				2ED17487D260FF5000000000 /* Graph */,
+				5245E51EFACF465C00000000 /* WebView */,
 				089C166500000004 /* Views */,
 				089C166500000005 /* Metal */,
 				089C166500000006 /* Config */,
@@ -154,14 +233,18 @@
 		089C166500000004 /* Views */ = {
 			isa = PBXGroup;
 			children = (
-				089C166500000025 /* LatentResonatorView.swift */,
 				089C166500000056 /* PerformanceMotherbaseView.swift */,
 				089C16650000009E /* SceneCrossfaderView.swift */,
 				089C166500000026 /* RetroKnob.swift */,
 				089C166500000027 /* LatentXYPad.swift */,
-				089C166500000046 /* LaneStripView.swift */,
 				F1A2B3C400000060 /* LRComponents.swift */,
-			);
+				D8605F272C3BAE3500000000 /* PerformLayoutEngine.swift */,
+				E1B45C8F2345B67800000000 /* MacroBindingsPanel.swift */,
+				E6FDA813FA0B225500000000 /* AudioVisualizerXYPad.swift */,
+				A99B4CB73935D3E600000000 /* TerminalConsoleView.swift */,
+						ADD4C71833C3F453F8D83329 /* TemplateBrowserView.swift */,
+			AC1B6725F9E4B4C25A1884F7 /* RecipeBanner.swift */,
+);
 			path = Views;
 			sourceTree = "<group>";
 		};
@@ -178,26 +261,19 @@
 				089C16650000002B /* Constants.swift */,
 				089C166500000054 /* PerformanceState.swift */,
 				089C16650000005A /* ParameterRouter.swift */,
-			);
+						A80405E13EEBD4FFEBB91675 /* LaneRole.swift */,
+			A25E2541D797C4F4789EBDEA /* PatternChain.swift */,
+			AA2402AC46DA2415C87AFEDD /* MultiLaneTemplate.swift */,
+);
 			path = Config;
 			sourceTree = "<group>";
 		};
 		089C166500000007 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				98B898FD671D4FE6A4976C6F /* KickstartTemplate.json */,
 			);
 			path = Resources;
-			sourceTree = "<group>";
-		};
-		FC00000020 /* Fonts */ = {
-			isa = PBXGroup;
-			children = (
-				FC00000001 /* FiraCode-Regular.ttf */,
-				FC00000002 /* FiraCode-Medium.ttf */,
-				FC00000003 /* FiraCode-SemiBold.ttf */,
-				FC00000004 /* FiraCode-Bold.ttf */,
-			);
-			path = Fonts;
 			sourceTree = "<group>";
 		};
 		089C166500000008 /* Products */ = {
@@ -220,29 +296,77 @@
 				089C166500000075 /* SpectralProcessorTests.swift */,
 				089C166500000076 /* WAVCodecTests.swift */,
 				089C166500000077 /* NeuralEngineTests.swift */,
+				8681BEB746A0586800000000 /* AudioQualityABTests.swift */,
+				1EFEC9530BD75AEA00000000 /* SpectralChainTests.swift */,
+				D86EAA87202C86F500000000 /* ModulationEngineTests.swift */,
 			);
 			path = LatentResonatorTests;
 			sourceTree = "<group>";
 		};
+		2ED17487D260FF5000000000 /* Graph */ = {
+			isa = PBXGroup;
+			children = (
+				EB865DDAAA266E6D00000000 /* NodeGraph.swift */,
+				FDEF985ABBA14A9300000000 /* GraphNode.swift */,
+				39F4813CF9A45A1A00000000 /* GraphEdge.swift */,
+				731C703F8BCE053F00000000 /* AudioGraphMapper.swift */,
+				33D2274DBD4F662100000000 /* MacroNode.swift */,
+				5066EC9413728E1100000000 /* NodeGraphStore.swift */,
+				DBD97F4B3287F68500000000 /* ControlGraphEvaluator.swift */,
+				129F7F547BE6EDEF00000000 /* GraphHistory.swift */,
+				4F393EFCCBF84376AB4E8486 /* ImplicitGraphBuilder.swift */,
+				EXT0000002 /* CGPoint+Codable.swift */,
+				799A66350529985900000000 /* Nodes */,
+			);
+			path = Graph;
+			sourceTree = "<group>";
+		};
+		5245E51EFACF465C00000000 /* WebView */ = {
+			isa = PBXGroup;
+			children = (
+				1D15F99D987F573B00000000 /* WebViewBridge.swift */,
+				AB818EDED28AC77800000000 /* AudioVisualizerHTML.swift */,
+				85F6431619E7EB1500000000 /* PatchViewCoordinator.swift */,
+			);
+			path = WebView;
+			sourceTree = "<group>";
+		};
+		799A66350529985900000000 /* Nodes */ = {
+			isa = PBXGroup;
+			children = (
+				EB26B91A501C471D00000000 /* SourceNodes.swift */,
+				5F33425EA0EC25B200000000 /* SpectralNodes.swift */,
+				9FE279D584A128A700000000 /* FilterEffectNodes.swift */,
+				9D60426F359C48EA00000000 /* NeuralNodes.swift */,
+				9D03300FD72A9CEC00000000 /* ControlNodes.swift */,
+				A8D0DC21B6EC033F00000000 /* RoutingNodes.swift */,
+				CD8B4D65087E005900000000 /* AnalysisNodes.swift */,
+				B12345678901234567890123 /* SequencerNodes.swift */,
+				D12345678901234567890123 /* ReverbNode.swift */,
+			);
+			path = Nodes;
+			sourceTree = "<group>";
+		};
+		7A88060EFF42396800000000 /* DSP */ = {
+			isa = PBXGroup;
+			children = (
+				594AB5AB0E88E4F400000000 /* SpectralPipeline.swift */,
+			);
+			path = DSP;
+			sourceTree = "<group>";
+		};
+		FC00000020 /* Fonts */ = {
+			isa = PBXGroup;
+			children = (
+				FC00000001 /* FiraCode-Regular.ttf */,
+				FC00000002 /* FiraCode-Medium.ttf */,
+				FC00000003 /* FiraCode-SemiBold.ttf */,
+				FC00000004 /* FiraCode-Bold.ttf */,
+			);
+			path = Fonts;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
-
-/* Begin PBXContainerItemProxy section */
-		089C166500000067 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 089C166500000001 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 089C166500000009;
-			remoteInfo = LatentResonator;
-		};
-/* End PBXContainerItemProxy section */
-
-/* Begin PBXTargetDependency section */
-		089C166500000068 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 089C166500000009 /* LatentResonator */;
-			targetProxy = 089C166500000067 /* PBXContainerItemProxy */;
-		};
-/* End PBXTargetDependency section */
 
 /* Begin PBXNativeTarget section */
 		089C166500000009 /* LatentResonator */ = {
@@ -327,6 +451,8 @@
 				FC00000013 /* FiraCode-SemiBold.ttf in Resources */,
 				FC00000014 /* FiraCode-Bold.ttf in Resources */,
 				FC00000031 /* Scripts in Resources */,
+				B5D4E8A10000F001 /* PatchEditor in Resources */,
+				98B898FD671D4FE6A4976C6E /* KickstartTemplate.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -337,6 +463,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A12345678901234567890123 /* ImplicitGraphBuilder.swift in Sources */,
+				C12345678901234567890123 /* SequencerNodes.swift in Sources */,
+				E12345678901234567890123 /* ReverbNode.swift in Sources */,
 				089C166500000030 /* LatentResonatorApp.swift in Sources */,
 				089C16650000008A /* AudioRecorder.swift in Sources */,
 				089C16650000009A /* SceneManager.swift in Sources */,
@@ -345,24 +474,45 @@
 				089C166500000032 /* KoenigSeedGenerator.swift in Sources */,
 				089C166500000033 /* CircularAudioBuffer.swift in Sources */,
 				089C166500000034 /* CoreMLInference.swift in Sources */,
-				089C166500000035 /* LatentResonatorView.swift in Sources */,
 				089C166500000036 /* RetroKnob.swift in Sources */,
 				089C166500000037 /* LatentXYPad.swift in Sources */,
-
 				089C16650000003B /* Constants.swift in Sources */,
 				089C16650000003C /* SpectralProcessor.swift in Sources */,
 				089C16650000003D /* SignalGenerator.swift in Sources */,
 				089C16650000003E /* ACEStepBridge.swift in Sources */,
 				089C16650000003F /* WAVCodec.swift in Sources */,
 				089C166500000050 /* BridgeProcessManager.swift in Sources */,
-				089C166500000051 /* ResonatorLane.swift in Sources */,
-				089C166500000052 /* LaneStripView.swift in Sources */,
 				089C166500000053 /* PerformanceState.swift in Sources */,
 				089C166500000055 /* PerformanceMotherbaseView.swift in Sources */,
 				089C16650000009F /* SceneCrossfaderView.swift in Sources */,
 				089C166500000057 /* RootView.swift in Sources */,
 				089C166500000059 /* ParameterRouter.swift in Sources */,
 				F1A2B3C400000061 /* LRComponents.swift in Sources */,
+				77A35F6CA75C1F1D00000000 /* ModulationEngine.swift in Sources */,
+				AEE2A0FDA39F0AB400000000 /* SpectralPipeline.swift in Sources */,
+				DBC439E68D62F3D500000000 /* NodeGraph.swift in Sources */,
+				15F59879CE091D6E00000000 /* GraphNode.swift in Sources */,
+				B0595342FE403DD100000000 /* GraphEdge.swift in Sources */,
+				43F78D806DF4060400000000 /* AudioGraphMapper.swift in Sources */,
+				37900CCD912F02B800000000 /* MacroNode.swift in Sources */,
+				539312BCDB97FE8500000000 /* NodeGraphStore.swift in Sources */,
+				EXT0000020 /* CGPoint+Codable.swift in Sources */,
+				44F2E2B09B8DA22F00000000 /* ControlGraphEvaluator.swift in Sources */,
+				C4181653397E850000000000 /* GraphHistory.swift in Sources */,
+				2366EECFBC8CE98200000000 /* SourceNodes.swift in Sources */,
+				56FDD26957C4509400000000 /* SpectralNodes.swift in Sources */,
+				3B28E17FA57CD00700000000 /* FilterEffectNodes.swift in Sources */,
+				59CB7971FE1DE02B00000000 /* NeuralNodes.swift in Sources */,
+				C32CE509F2C27E5200000000 /* ControlNodes.swift in Sources */,
+				B0683505752A889100000000 /* RoutingNodes.swift in Sources */,
+				9DB1E0E565BECC0700000000 /* AnalysisNodes.swift in Sources */,
+				C858C0EC25B15F8900000000 /* WebViewBridge.swift in Sources */,
+				F93C2DD34E9B0B0C00000000 /* AudioVisualizerXYPad.swift in Sources */,
+				3E1A833AD0D6FF2500000000 /* AudioVisualizerHTML.swift in Sources */,
+				80F68DA8FA86F5B600000000 /* TerminalConsoleView.swift in Sources */,
+				DAE73F65B4C9C0F200000000 /* PatchViewCoordinator.swift in Sources */,
+				A1A21B6C3435A87700000000 /* PerformLayoutEngine.swift in Sources */,
+				B2C34D7E1234A56700000000 /* MacroBindingsPanel.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -382,6 +532,14 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		089C166500000068 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 089C166500000009 /* LatentResonator */;
+			targetProxy = 089C166500000067 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		089C16650000000C /* Debug */ = {
@@ -620,3 +778,10 @@
 	};
 	rootObject = 089C166500000001 /* Project object */;
 }
+
+
+
+
+
+
+

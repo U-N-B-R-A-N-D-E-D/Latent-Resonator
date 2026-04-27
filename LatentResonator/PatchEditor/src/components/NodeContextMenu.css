@@ -1,0 +1,511 @@
+/* Node Context Menu - Visual, discoverable, human-centric */
+
+.node-context-menu {
+  position: fixed;
+  min-width: 260px;
+  max-width: 320px;
+  background: linear-gradient(180deg, #1a1a1f 0%, #141416 100%);
+  border: 1px solid #2a2a30;
+  border-radius: 10px;
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(255, 255, 255, 0.03);
+  z-index: 1000;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', sans-serif;
+  animation: menuAppear 0.15s ease-out;
+}
+
+@keyframes menuAppear {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* Header */
+.context-menu-header {
+  padding: 14px 16px;
+  background: linear-gradient(180deg, #222228 0%, #1a1a1f 100%);
+  border-bottom: 1px solid #2a2a30;
+  position: relative;
+}
+
+.context-menu-header.warning {
+  background: linear-gradient(180deg, #3d2418 0%, #2a1a12 100%);
+  border-bottom-color: #5c3522;
+}
+
+.context-menu-node-type {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  color: #10b981;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.context-menu-node-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #f0f0f5;
+}
+
+.context-menu-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f0f0f5;
+}
+
+.back-btn {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  color: #888;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: all 0.15s;
+}
+
+.back-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.context-menu-header:has(.back-btn) .context-menu-title {
+  margin-left: 28px;
+}
+
+/* Close button */
+.context-menu-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 24px;
+  height: 24px;
+  background: rgba(255, 255, 255, 0.05);
+  border: none;
+  border-radius: 6px;
+  color: #888;
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+
+.context-menu-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+/* Sections */
+.context-menu-section {
+  padding: 12px;
+  border-bottom: 1px solid #222228;
+}
+
+.context-menu-section:last-child {
+  border-bottom: none;
+}
+
+.context-menu-section-title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  color: #666;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+  padding-left: 4px;
+}
+
+.context-menu-empty {
+  font-size: 12px;
+  color: #555;
+  font-style: italic;
+  padding: 8px;
+  text-align: center;
+}
+
+/* Parameter List (in main menu) */
+.context-menu-params {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.context-menu-param {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  font-size: 12px;
+  border: 1px solid transparent;
+  transition: all 0.15s;
+}
+
+.context-menu-param:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.context-menu-param.exposed {
+  background: rgba(16, 185, 129, 0.08);
+  border-color: rgba(16, 185, 129, 0.2);
+}
+
+.param-name {
+  color: #aaa;
+  font-family: 'SF Mono', monospace;
+}
+
+.param-value {
+  color: #ddd;
+  font-family: 'SF Mono', monospace;
+  font-size: 11px;
+}
+
+.param-badge {
+  color: #10b981;
+  font-size: 10px;
+  margin-left: 4px;
+}
+
+/* Action Buttons */
+.context-menu-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.context-menu-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  color: #ccc;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: left;
+}
+
+.context-menu-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  transform: translateX(2px);
+}
+
+.context-menu-btn.primary {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.15) 0%, rgba(16, 185, 129, 0.05) 100%);
+  border-color: rgba(16, 185, 129, 0.3);
+  color: #10b981;
+}
+
+.context-menu-btn.primary:hover {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.25) 0%, rgba(16, 185, 129, 0.1) 100%);
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+.context-menu-btn.danger {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+
+.context-menu-btn.danger:hover {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.btn-icon {
+  font-size: 14px;
+  width: 18px;
+  text-align: center;
+}
+
+.btn-hint {
+  margin-left: auto;
+  font-size: 10px;
+  color: #666;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.context-menu-divider {
+  height: 1px;
+  background: #2a2a30;
+  margin: 4px 0;
+}
+
+/* Parameter Selection (for expose/macro) */
+.context-menu-param-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.param-select-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  color: #ccc;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: left;
+  width: 100%;
+}
+
+.param-select-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.param-select-btn.selected {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.2) 0%, rgba(16, 185, 129, 0.08) 100%);
+  border-color: #10b981;
+  color: #fff;
+}
+
+.param-select-name {
+  font-family: 'SF Mono', monospace;
+}
+
+.param-select-value {
+  font-family: 'SF Mono', monospace;
+  color: #888;
+  font-size: 11px;
+}
+
+.param-select-btn.selected .param-select-value {
+  color: #10b981;
+}
+
+/* Control Type Grid */
+.control-type-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+
+.control-type-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  color: #999;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.control-type-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #ddd;
+}
+
+.control-type-btn.selected {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.2) 0%, rgba(16, 185, 129, 0.08) 100%);
+  border-color: #10b981;
+  color: #10b981;
+}
+
+.control-type-icon {
+  font-size: 18px;
+}
+
+.control-type-label {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* Curve Selection */
+.curve-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.curve-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: left;
+  width: 100%;
+}
+
+.curve-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.curve-btn.selected {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.2) 0%, rgba(16, 185, 129, 0.08) 100%);
+  border-color: #10b981;
+}
+
+.curve-name {
+  font-size: 12px;
+  color: #ccc;
+  font-weight: 500;
+}
+
+.curve-btn.selected .curve-name {
+  color: #10b981;
+}
+
+.curve-desc {
+  font-size: 10px;
+  color: #666;
+}
+
+/* Inputs */
+.context-menu-input {
+  width: 100%;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid #2a2a35;
+  border-radius: 6px;
+  color: #eee;
+  font-size: 13px;
+  font-family: 'SF Mono', monospace;
+  outline: none;
+  transition: all 0.15s;
+}
+
+.context-menu-input:focus {
+  border-color: #10b981;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.1);
+}
+
+.context-menu-input::placeholder {
+  color: #555;
+}
+
+/* Footer Actions */
+.context-menu-footer-actions {
+  display: flex;
+  gap: 8px;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.2);
+  border-top: 1px solid #2a2a30;
+}
+
+.btn-secondary,
+.btn-primary,
+.btn-danger {
+  flex: 1;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  border: none;
+}
+
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.06);
+  color: #aaa;
+}
+
+.btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-danger {
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  color: #fff;
+}
+
+.btn-danger:hover {
+  background: linear-gradient(135deg, #f87171 0%, #ef4444 100%);
+}
+
+/* Confirmation Text */
+.confirm-text {
+  font-size: 13px;
+  color: #aaa;
+  line-height: 1.5;
+  padding: 4px;
+}
+
+.confirm-text strong {
+  color: #f0f0f5;
+}
+
+/* Scrollbar for parameter lists */
+.context-menu-param-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.context-menu-param-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.context-menu-param-list::-webkit-scrollbar-thumb {
+  background: #3a3a40;
+  border-radius: 3px;
+}
+
+.context-menu-param-list::-webkit-scrollbar-thumb:hover {
+  background: #4a4a50;
+}
+
+/* View-specific sizing */
+.expose-view,
+.macro-view,
+.rename-view,
+.confirm-view {
+  min-width: 280px;
+}

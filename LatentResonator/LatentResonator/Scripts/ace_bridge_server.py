@@ -83,6 +83,17 @@ except ImportError:
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+__all__ = [
+    "ACEStepWrapper",
+    "encode_wav_bytes",
+    "decode_wav_bytes",
+    "main",
+]
+
+# ---------------------------------------------------------------------------
 # ACE-Step Model Wrapper
 # ---------------------------------------------------------------------------
 
@@ -171,7 +182,7 @@ class ACEStepWrapper:
                 from acestep.pipeline_ace_step import ACEStepPipeline
 
                 logging.info(f"Loading ACE-Step model from: {model_path}")
-
+                
                 # ACEStepPipeline auto-detects MPS / CUDA / CPU in __init__.
                 # We override the device AFTER loading to ensure CPU safety.
                 self.model = ACEStepPipeline(checkpoint_dir=model_path)
@@ -208,6 +219,24 @@ class ACEStepWrapper:
                     f"ACE-Step model loaded successfully on {self.device} "
                     f"(type: {self.model_type})"
                 )
+                
+            except ImportError as import_err:
+                # Detailed import error logging for debugging
+                logging.error(f"[IMPORT ERROR] Failed to import acestep.pipeline_ace_step: {import_err}")
+                logging.error(f"[IMPORT ERROR] Python path: {sys.path}")
+                try:
+                    import acestep
+                    logging.info(f"[IMPORT DEBUG] acestep package found at: {acestep.__file__}")
+                    logging.info(f"[IMPORT DEBUG] acestep contents: {dir(acestep)}")
+                except ImportError as acestep_err:
+                    logging.error(f"[IMPORT ERROR] Cannot import acestep at all: {acestep_err}")
+                # Try alternative import paths
+                try:
+                    import ace_step
+                    logging.info(f"[IMPORT DEBUG] ace_step (with underscore) found at: {ace_step.__file__}")
+                except ImportError:
+                    logging.error("[IMPORT ERROR] ace_step (with underscore) not found")
+                # Fall through to alternative loader below
 
             except ImportError:
                 # Try alternative import paths
@@ -513,6 +542,8 @@ MAX_WAV_BYTES = 2_000_000
 
 app = Flask(__name__)
 ACE_WRAPPER: ACEStepWrapper = None  # Initialized in main()
+LOW_LATENCY_MODE: bool = False  # Set in main() from --low-latency or --performance-mode flag
+PERF_CONFIG: dict = {}  # Performance config: max_steps, quantization
 
 
 @app.route("/health", methods=["GET"])
@@ -674,6 +705,11 @@ def infer():
         seed = safe_int(data.get("seed"), -1)
         input_strength = safe_float(data.get("input_strength"), 0.6)
         audio_duration = safe_float(data.get("audio_duration"), 10.0)
+        
+        # Low-latency mode: cap inference steps for real-time performance
+        if LOW_LATENCY_MODE:
+            num_steps = min(num_steps, 6)
+            logging.info(f"Low-latency mode: capped steps to {num_steps}")
 
         shift_raw = safe_float(data.get("shift"), 5.0)
         guidance_interval = max(0.1, min(0.9, 0.1 + (shift_raw - 1.0) / 9.0 * 0.8))
@@ -778,6 +814,29 @@ def main():
             "ACE-Step v0.1.0+ supports Apple Silicon (MPS) properly."
         ),
     )
+    parser.add_argument(
+        "--low-latency",
+        action="store_true",
+        help="Performance mode: reduce inference steps to 4-6 for live performance (legacy)"
+    )
+    parser.add_argument(
+        "--performance-mode",
+        action="store_true",
+        help="Enable performance mode (reduced steps, quantization) for live performance"
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Maximum inference steps (performance mode: 4-8, studio: 20)"
+    )
+    parser.add_argument(
+        "--quantization",
+        type=str,
+        default=None,
+        choices=["q8", "fp16", "fp32"],
+        help="Quantization mode: q8 (fast), fp16 (balanced), fp32 (quality)"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -788,7 +847,31 @@ def main():
     logging.info("=" * 60)
     logging.info("  Latent Resonator — ACE-Step Bridge Server v0.2.0")
     logging.info(f"  Device: {args.device}")
+    
+    # Performance mode: legacy --low-latency or new --performance-mode
+    is_performance_mode = args.low_latency or args.performance_mode
+    
+    if is_performance_mode:
+        perf_info = []
+        if args.max_steps:
+            perf_info.append(f"{args.max_steps} steps")
+        if args.quantization:
+            perf_info.append(f"quant={args.quantization}")
+        if not perf_info:
+            perf_info.append("4-6 steps")
+        logging.info(f"  Mode: PERFORMANCE ({', '.join(perf_info)})")
     logging.info("=" * 60)
+    
+    # Store performance mode flag in global
+    global LOW_LATENCY_MODE
+    LOW_LATENCY_MODE = is_performance_mode
+    
+    # Store performance configuration
+    global PERF_CONFIG
+    PERF_CONFIG = {
+        "max_steps": args.max_steps,
+        "quantization": args.quantization
+    }
 
     # Initialize model wrapper with explicit device
     ACE_WRAPPER = ACEStepWrapper(model_path=args.model_path, device=args.device)

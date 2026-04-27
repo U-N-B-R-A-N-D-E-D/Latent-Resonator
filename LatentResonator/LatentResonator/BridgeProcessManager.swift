@@ -20,6 +20,47 @@ import Foundation
 //   Python-hosted ACE-Step 1.5 inference. Automation ensures
 //   the user focuses on the instrument, not the infrastructure.
 
+/// Performance profile for the ACE-Step bridge server.
+/// Hardware-style toggles for trading quality vs. latency.
+/// DECISION D6: Profile switching disabled during playback.
+enum PerformanceProfile: String, CaseIterable, Identifiable {
+    case ultra = "ULTRA"
+    case balanced = "BALANCED"
+    case studio = "STUDIO"
+
+    var id: String { rawValue }
+
+    /// CLI flags to pass to the bridge server for this profile.
+    var cliFlags: [String] {
+        switch self {
+        case .ultra:
+            return ["--performance-mode", "--max-steps", "4", "--quantization", "q8"]
+        case .balanced:
+            return ["--performance-mode", "--max-steps", "8", "--quantization", "q8"]
+        case .studio:
+            return ["--max-steps", "20", "--quantization", "fp16"]
+        }
+    }
+
+    /// Human-readable description of the profile.
+    var description: String {
+        switch self {
+        case .ultra:    return "Ultra-Low Latency (4 steps, Q8)"
+        case .balanced: return "Balanced (8 steps, Q8)"
+        case .studio:   return "Studio Quality (20 steps, FP16)"
+        }
+    }
+
+    /// Short label for UI display.
+    var shortLabel: String {
+        switch self {
+        case .ultra:    return "U"
+        case .balanced: return "B"
+        case .studio:   return "S"
+        }
+    }
+}
+
 final class BridgeProcessManager: ObservableObject {
 
     // MARK: - Server State
@@ -35,11 +76,23 @@ final class BridgeProcessManager: ObservableObject {
         case error      = "ERROR"
     }
 
+    // MARK: - Performance Profile
+
+    /// Current performance profile. Defaults to balanced for general use.
+    /// Changing profile requires bridge restart (disabled during playback per D6).
+    @Published var currentProfile: PerformanceProfile = .balanced
+
+    /// Whether profile switching is allowed (false during playback).
+    var canSwitchProfile: Bool {
+        return state != .running
+    }
+
     // MARK: - Published State
 
     @Published var state: ServerState = .idle
     @Published var lastError: String?
     @Published var setupLog: [String] = []
+    @Published var realtimeLog: [String] = []
 
     // MARK: - Process Management
 
@@ -199,6 +252,7 @@ final class BridgeProcessManager: ObservableObject {
 
     /// Launch the bridge server. Creates venv and installs deps if needed.
     /// Safe to call multiple times -- no-ops if already running.
+    /// Uses the current `currentProfile` for performance settings.
     func launchServer() {
         guard state == .idle || state == .error else {
             log("Bridge already \(state.rawValue), skipping launch")
@@ -208,6 +262,37 @@ final class BridgeProcessManager: ObservableObject {
         setupQueue.async { [weak self] in
             self?.performLaunch()
         }
+    }
+
+    /// Switch performance profile.
+    /// DECISION D6: Profile switching disabled during playback.
+    /// - Parameters:
+    ///   - profile: The new profile to switch to
+    ///   - restart: If true, restarts the server to apply the new profile immediately
+    /// - Returns: True if switch was successful, false if blocked (running state)
+    @discardableResult
+    func switchProfile(to profile: PerformanceProfile, restart: Bool = false) -> Bool {
+        // D6: Disallow switching while bridge is running
+        guard canSwitchProfile else {
+            log("[WARN] Profile switch blocked: cannot switch while bridge is running (D6)")
+            return false
+        }
+
+        let oldProfile = currentProfile
+        currentProfile = profile
+        log("Performance profile: \(oldProfile.rawValue) -> \(profile.rawValue)")
+
+        // Restart server with new profile if requested and currently running
+        if restart && state == .running {
+            log("Restarting bridge with new profile...")
+            terminateServer()
+            // Wait for stop to complete, then restart
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.launchServer()
+            }
+        }
+
+        return true
     }
 
     /// Full launch sequence: pre-flight -> setup if needed -> start server.
@@ -302,8 +387,18 @@ final class BridgeProcessManager: ObservableObject {
             }
 
             log("[ok] Dependencies installed")
+            
+            // --- Step 2b: Install ACE-Step package from GitHub (if not present) ---
+            installACEStepPackageIfNeeded()
+            
+            // --- Step 2c: Download model if not present ---
+            downloadModelIfNeeded()
+            
         } else {
             log("Existing venv found: \(venvDir.lastPathComponent)")
+            // Even with existing venv, check if ace_step is installed and model exists
+            installACEStepPackageIfNeeded()
+            downloadModelIfNeeded()
         }
 
         // --- Step 3: Start the bridge server (or reuse if already listening) ---
@@ -377,9 +472,11 @@ final class BridgeProcessManager: ObservableObject {
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
 
-        URLSession.shared.dataTask(with: request) { _, response, _ in
-            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                result = true
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let http = response as? HTTPURLResponse {
+                if http.statusCode == 200 {
+                    result = true
+                }
             }
             semaphore.signal()
         }.resume()
@@ -390,9 +487,13 @@ final class BridgeProcessManager: ObservableObject {
 
     // MARK: - Server Process
 
-    private func startServerProcess() throws {
+    /// Start the bridge server with the current performance profile.
+    /// - Parameter profile: The performance profile to use (defaults to currentProfile)
+    private func startServerProcess(profile: PerformanceProfile? = nil) throws {
         let process = Process()
         process.executableURL = pythonInVenv
+
+        let effectiveProfile = profile ?? currentProfile
 
         var args = [
             serverScript.path,
@@ -403,10 +504,21 @@ final class BridgeProcessManager: ObservableObject {
         // Auto-discover model weights in models/ directory.
         // When found, pass --model-path so the bridge loads the AI model
         // instead of running in passthrough mode.
-        if let modelPath = discoverModelPath() {
+        // #region agent log
+        let rawModelPath = discoverModelPath()
+        log("[DEBUG] discoverModelPath() returned: \(rawModelPath ?? "nil")")
+        // #endregion
+        if let modelPath = rawModelPath {
             args += ["--model-path", modelPath]
+            // #region agent log
+            log("[DEBUG] Adding --model-path to args. Current args count: \(args.count)")
+            log("[DEBUG] Full command will be: \(pythonInVenv.path) \(args.joined(separator: " "))")
+            // #endregion
             log("Model weights discovered: \(modelPath)")
         } else {
+            // #region agent log
+            log("[DEBUG] No model path found - server will run in passthrough mode")
+            // #endregion
             log("No model weights found -- passthrough mode")
         }
 
@@ -416,6 +528,10 @@ final class BridgeProcessManager: ObservableObject {
         if LRConstants.ACEBridge.forceCPU {
             log("Using CPU device (MPS disabled due to rsub crash)")
         }
+
+        // Performance profile: apply profile-specific CLI flags
+        args += effectiveProfile.cliFlags
+        log("Performance profile: \(effectiveProfile.rawValue) - \(effectiveProfile.description)")
 
         process.arguments = args
         process.currentDirectoryURL = Self.scriptsDir
@@ -443,6 +559,12 @@ final class BridgeProcessManager: ObservableObject {
             guard !data.isEmpty, let str = String(data: data, encoding: .utf8) else { return }
             for line in str.components(separatedBy: .newlines) where !line.isEmpty {
                 self?.log("[server] \(line)")
+                DispatchQueue.main.async {
+                    self?.realtimeLog.append(line)
+                    if (self?.realtimeLog.count ?? 0) > 100 {
+                        self?.realtimeLog.removeFirst(20)
+                    }
+                }
             }
         }
 
@@ -454,6 +576,12 @@ final class BridgeProcessManager: ObservableObject {
             guard !data.isEmpty, let str = String(data: data, encoding: .utf8) else { return }
             for line in str.components(separatedBy: .newlines) where !line.isEmpty {
                 self?.log("[server] \(line)")
+                DispatchQueue.main.async {
+                    self?.realtimeLog.append(line)
+                    if (self?.realtimeLog.count ?? 0) > 100 {
+                        self?.realtimeLog.removeFirst(20)
+                    }
+                }
             }
         }
 
@@ -663,6 +791,193 @@ final class BridgeProcessManager: ObservableObject {
             if (self?.setupLog.count ?? 0) > 200 {
                 self?.setupLog.removeFirst(50)
             }
+        }
+    }
+    
+    // MARK: - ACE-Step Package Auto-Installation
+    
+    /// Check if ace_step package is installed, and install from GitHub if not.
+    private func installACEStepPackageIfNeeded() {
+        log("Checking ACE-Step package...")
+
+        // Test if ace_step can be imported (multiple import patterns)
+        let importTests = [
+            ("acestep", "import acestep; print('acestep available')"),
+            ("acestep.pipeline_ace_step", "from acestep.pipeline_ace_step import ACEStepPipeline; print('ACEStepPipeline available')"),
+            ("ace_step", "import ace_step; print('ace_step available')"),
+            ("ace-step", "import ace_step; print('ace-step available')"),
+        ]
+
+        var importResults: [String: String] = [:]
+        for (name, code) in importTests {
+            let (ok, output) = runSyncProcess(pythonInVenv.path, ["-c", code])
+            importResults[name] = ok ? "OK: \(output.trimmingCharacters(in: .whitespacesAndNewlines))" : "FAIL: \(output.trimmingCharacters(in: .whitespacesAndNewlines))"
+        }
+
+        // Check which imports succeeded - MUST have acestep.pipeline_ace_step fully working
+        let canImportBasic = importResults["acestep"]?.hasPrefix("OK:") ?? false
+        let canImportPipeline = importResults["acestep.pipeline_ace_step"]?.hasPrefix("OK:") ?? false
+        let canImport = canImportBasic && canImportPipeline
+
+        if canImport {
+            log("[ok] ACE-Step package already installed (verified pipeline import)")
+            return
+        }
+
+        // If pipeline import fails but basic acestep exists, we may need to install missing deps
+        if canImportBasic && !canImportPipeline {
+            log("[WARN] acestep package exists but pipeline import fails - likely missing dependencies")
+            log("[INFO] Attempting to install inference dependencies...")
+            updateState(.installing)
+
+            // Install inference dependencies including torchvision
+            log("Installing inference dependencies (torchvision fix)...")
+            let (depsOk, depsOut) = runSyncProcess(pipInVenv.path, [
+                "install", "torch", "torchaudio", "torchvision", "transformers==4.50.0",
+                "diffusers", "accelerate==1.6.0", "soundfile==0.13.1",
+                "numpy", "tqdm", "loguru", "spacy", "py3langid", "pypinyin",
+                "num2words", "hangul-romanize", "librosa", "matplotlib",
+                "pytorch_lightning", "peft", "cutlet", "fugashi[unidic-lite]",
+                "click", "--quiet"
+            ])
+            
+            if depsOk {
+                log("[ok] Dependencies installed successfully")
+                // Re-test import
+                let (retestOk, retestOut) = runSyncProcess(pythonInVenv.path, ["-c", "from acestep.pipeline_ace_step import ACEStepPipeline; print('pipeline_ok')"])
+                if retestOk {
+                    log("[ok] Pipeline import verified after dependency install")
+                    return
+                } else {
+                    log("[WARN] Pipeline import still fails after deps install: \(retestOut)")
+                }
+            } else {
+                log("[WARN] Failed to install dependencies: \(depsOut)")
+            }
+        }
+        
+        log("ACE-Step package not found. Installing from GitHub...")
+        updateState(.installing)
+        
+        let aceStepRepoDir = Self.projectRoot.appendingPathComponent("ACE-Step")
+        
+        // Clone or update the ACE-Step repo
+        if FileManager.default.fileExists(atPath: aceStepRepoDir.path) {
+            log("Updating ACE-Step repo...")
+            let _ = runSyncProcess("/usr/bin/git", ["-C", aceStepRepoDir.path, "pull"])
+        } else {
+            log("Cloning ACE-Step from GitHub...")
+            let (cloneOk, cloneOut) = runSyncProcess("/usr/bin/git", [
+                "clone", "https://github.com/ace-step/ACE-Step.git",
+                aceStepRepoDir.path
+            ])
+            if !cloneOk {
+                log("[WARN] Failed to clone ACE-Step: \(cloneOut)")
+                log("Server will run in passthrough mode (no neural inference)")
+                return
+            }
+        }
+        
+        // Install ACE-Step package
+        if FileManager.default.fileExists(atPath: aceStepRepoDir.path) {
+            log("Installing ACE-Step package (this may take a while)...")
+            
+            // Install with --no-deps first to avoid version conflicts
+            let (installOk, installOut) = runSyncProcess(pipInVenv.path, [
+                "install", "-e", aceStepRepoDir.path, "--no-deps", "--quiet"
+            ])
+            
+            if !installOk {
+                log("[WARN] ACE-Step install failed: \(installOut)")
+                return
+            }
+            
+            // Install inference dependencies
+            log("Installing inference dependencies...")
+            let (depsOk, depsOut) = runSyncProcess(pipInVenv.path, [
+                "install", "torch", "torchaudio", "torchvision", "transformers==4.50.0",
+                "diffusers", "accelerate==1.6.0", "soundfile==0.13.1",
+                "numpy", "tqdm", "loguru", "spacy", "py3langid", "pypinyin",
+                "num2words", "hangul-romanize", "librosa", "matplotlib",
+                "pytorch_lightning", "peft", "cutlet", "fugashi[unidic-lite]",
+                "click", "--quiet"
+            ])
+            
+            if depsOk {
+                log("[ok] ACE-Step package installed successfully")
+            } else {
+                log("[WARN] Some dependencies failed: \(depsOut)")
+            }
+        }
+    }
+    
+    // MARK: - Model Auto-Download
+    
+    /// Download ACE-Step model if not present in Application Support.
+    /// Uses huggingface_hub for automatic download (~7GB).
+    private func downloadModelIfNeeded() {
+        let fm = FileManager.default
+        let modelsDir = LRConstants.ModelConfig.appSupportModelsDir
+        
+        // Check if any model already exists
+        if let existingModel = discoverModelPath() {
+            log("[ok] Model found: \(existingModel)")
+            return
+        }
+        
+        log("No ACE-Step model found. Downloading base model (~7GB)...")
+        log("This only happens once and may take 10-30 minutes.")
+        updateState(.installing)
+        
+        // Ensure models directory exists
+        do {
+            try fm.createDirectory(at: modelsDir, withIntermediateDirectories: true)
+        } catch {
+            log("[ERROR] Cannot create models directory: \(error.localizedDescription)")
+            return
+        }
+        
+        // Install huggingface_hub if not present
+        let (hfOk, _) = runSyncProcess(pipInVenv.path, [
+            "install", "huggingface_hub", "--quiet"
+        ])
+        if !hfOk {
+            log("[WARN] Failed to install huggingface_hub")
+        }
+        
+        // Download using Python script
+        let modelType = "base"
+        let hfModelID = "ACE-Step/Ace-Step1.5"
+        let modelDir = modelsDir.appendingPathComponent("ace-step-v1.5-\(modelType)")
+        
+        log("Downloading \(hfModelID)...")
+        
+        let downloadScript = """
+        from huggingface_hub import snapshot_download
+        import sys
+        
+        try:
+            snapshot_download(
+                repo_id='\(hfModelID)',
+                local_dir='\(modelDir.path)',
+                local_dir_use_symlinks=False,
+            )
+            print('DOWNLOAD_COMPLETE')
+        except Exception as e:
+            print(f'DOWNLOAD_FAILED: {e}', file=sys.stderr)
+            sys.exit(1)
+        """
+        
+        let (downloadOk, downloadOut) = runSyncProcess(pythonInVenv.path, [
+            "-c", downloadScript
+        ])
+        
+        if downloadOk && downloadOut.contains("DOWNLOAD_COMPLETE") {
+            log("[ok] Model downloaded to \(modelDir.path)")
+        } else {
+            log("[WARN] Model download failed: \(downloadOut)")
+            log("Server will start in passthrough mode")
+            log("You can manually download later with: --with-model")
         }
     }
 }

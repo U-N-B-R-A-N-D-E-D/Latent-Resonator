@@ -1,4 +1,4 @@
-# Latent Resonator v1.0.3 — Testing
+# Latent Resonator v2.0 — Testing
 
 ## Quick start
 

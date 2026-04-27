@@ -76,13 +76,13 @@ enum LRConstants {
 
     // MARK: - Spectral Feature Logging
 
-    /// Maximum number of spectral feature snapshots retained per lane.
+    /// Maximum number of spectral feature snapshots retained per macro node.
     /// At ~1 snapshot per inference cycle (~20s), 256 entries ~ 85 min of data.
     static let featureLogMaxEntries: Int = 256
 
     // MARK: - Iteration Archive
 
-    /// Max number of past iteration audio buffers to retain per lane.
+    /// Max number of past iteration audio buffers to retain per macro node.
     static let iterationArchiveSize: Int = 16
 
     // MARK: - Timing Intervals (nanoseconds)
@@ -145,15 +145,15 @@ enum LRConstants {
     /// Raise to 15-25 when using MPS (GPU) or on fast machines.
     static let aceStepsDefault: Int = 8
 
-    // MARK: - Multi-Lane Architecture
+    // MARK: - v2.0 Graph Architecture Defaults
 
-    /// Maximum number of simultaneous lanes.
-    /// 4 lanes keeps CPU/GPU load manageable. With MPS inference (~5s/step),
-    /// 4 lanes cycle in ~20s total. Beyond 4, IOWorkLoop overload occurs.
-    static let maxLanes: Int = 4
+    /// Default number of MacroNodes created on app launch.
+    /// These are graph-based nodes, not legacy lanes.
+    static let defaultMacroNodeCount: Int = 4
 
-    /// Default number of lanes created on app launch.
-    static let defaultLaneCount: Int = 1
+    /// Maximum number of MacroNodes allowed.
+    /// v2.0: Replaces maxLanes from v1.x architecture.
+    static let maxMacroNodes: Int = 8
 
     // MARK: - Latent Pipeline (ACE-Step Three-Model Architecture)
 
@@ -203,7 +203,7 @@ enum LRConstants {
     /// drift audible to the performer. Was 0.7 (too subtle).
     static let spectralMemoryCoeff: Float = 0.85
 
-    // MARK: - Signal Generator (Max/MSP Excitation Sources)
+    // MARK: - Signal Generator (dataflow system Excitation Sources)
 
     /// Sine oscillator frequency range (Hz). Covers sub-bass to mid-range.
     static let sineFrequencyRange: ClosedRange<Float> = 20.0...2000.0
@@ -272,6 +272,35 @@ enum LRConstants {
     /// Filter resonance range. Self-oscillation near 0.95.
     static let filterResonanceRange: ClosedRange<Float> = 0.0...0.95
     static let filterResonanceDefault: Float = 0.0
+    /// Filter drive amount for waveshaping within the filter.
+    static let filterDriveRange: ClosedRange<Float> = 0.0...1.0
+    static let filterDriveDefault: Float = 0.0
+
+    // MARK: - Waveshaper
+
+    /// Waveshaper input gain. Higher values = more distortion.
+    static let waveshaperGainRange: ClosedRange<Float> = 0.0...2.0
+    static let waveshaperGainDefault: Float = 1.0
+
+    // MARK: - Comb Filter
+
+    /// Number of comb filter delay taps.
+    static let combTapCountRange: ClosedRange<Int> = 1...8
+    static let combTapCountDefault: Int = 5
+    /// Per-tap feedback amount for comb filter.
+    static let combFeedbackRange: ClosedRange<Float> = 0.0...0.95
+    static let combFeedbackDefault: Float = 0.78
+
+    // MARK: - Noise Source
+
+    /// Output amplitude for noise generator.
+    static let noiseAmplitudeRange: ClosedRange<Float> = 0.0...1.0
+    static let noiseAmplitudeDefault: Float = 0.5
+
+    // MARK: - Oscillator Source
+
+    /// Oscillator waveform selection (0=sine, 1=square, 2=saw, 3=triangle).
+    static let oscillatorWaveformDefault: Int = 0  // sine
 
     // MARK: - Pulse Width (Square Oscillator PWM)
 
@@ -349,14 +378,12 @@ enum LRConstants {
     // MARK: - Design System (DS)
     //
     // Centralized design tokens for typography, color, spacing, and radii.
-    // Aesthetic: JP-future mecha module — brushed titanium, neon accents, flat panels.
     // All view files reference these instead of hardcoded values.
-    // Zero wiring change — purely visual consistency.
 
     enum DS {
 
         // -- Typography Scale (Fira Code) --
-        // 5 levels using Fira Code for legible mono. JP-future module style.
+        // 5 levels using Fira Code for legible mono.
         static let fontCaption2: CGFloat = 9    // metadata, status dots, tiny readouts
         static let fontCaption:  CGFloat = 10   // section headers, labels, bridge status
         static let fontBody:     CGFloat = 12   // primary text, lane names, buttons
@@ -380,7 +407,7 @@ enum LRConstants {
             return Font.custom(name, size: size)
         }
 
-        // -- Titanium Surface Palette (JP-future mecha) --
+        // -- Titanium Surface Palette --
         static let titanioTop    = Color(red: 0.17, green: 0.18, blue: 0.19)
         static let titanioBottom = Color(red: 0.10, green: 0.11, blue: 0.12)
         static let titanioBase   = Color(red: 0.12, green: 0.13, blue: 0.14)
@@ -473,7 +500,6 @@ enum LRConstants {
 
         // -- Accent Color Helper --
         // Single source of truth for lane accent color mapping.
-        // Replaces duplicated switch-on-name logic in LaneStripView and LatentResonatorView.
         static func accentColor(for colorName: String) -> Color {
             switch colorName {
             case "red":    return .red
@@ -690,28 +716,90 @@ enum LRConstants {
         "static":      [0.5, 0.5, 1.5, 1.5],   // high-heavy static
 
         // Analog character profiles (Phase 8: Analog Vocabulary)
-        "analog":      [1.6, 1.3, 0.9, 0.6],   // warm, heavy lows, rolled-off highs
-        "vintage":     [1.5, 1.2, 0.9, 0.5],   // similar to analog, slightly softer
-        "warm":        [1.4, 1.3, 1.0, 0.7],   // boosted lows and low-mids
-        "fat":         [1.8, 1.4, 0.8, 0.5],   // very heavy lows
-        "acid":        [0.8, 1.8, 1.5, 0.7],   // strong mid peak, scooped lows
-        "squelchy":    [0.7, 1.9, 1.6, 0.6],   // resonant mid emphasis
-        "buchla":      [0.9, 1.1, 1.5, 1.3],   // organic mid-high, soft lows
-        "west coast":  [0.8, 1.0, 1.4, 1.4],   // complex harmonic spectrum
-        "moog":        [1.8, 1.4, 0.8, 0.4],   // heavy lows, warm mids
-        "minimoog":    [1.9, 1.5, 0.7, 0.3],   // deepest low emphasis
-        "arp":         [0.7, 1.2, 1.5, 1.4],   // bright mids, present highs
-        "sequential":  [0.8, 1.1, 1.4, 1.3],   // balanced brightness
-        "roland":      [1.2, 1.2, 1.1, 0.9],   // balanced with warmth
-        "juno":        [1.3, 1.2, 1.1, 0.8],   // classic Juno warmth
-        "jupiter":     [1.4, 1.3, 1.0, 0.8],   // rich low-mids
-        "tb303":       [0.9, 1.7, 1.4, 0.6],   // mid-focused with resonant peak
-        "303":         [0.9, 1.7, 1.4, 0.6],   // alias
-        "tape":        [1.3, 1.1, 0.9, 0.5],   // rolled-off highs, low boost
-        "cassette":    [1.2, 1.0, 0.8, 0.4],   // duller tape character
-        "transistor":  [1.1, 1.4, 1.3, 0.8],   // mid saturation character
-        "tube":        [1.3, 1.3, 1.0, 0.6],   // warm, even harmonics
-        "valve":       [1.3, 1.3, 1.0, 0.6],   // alias for tube
+        "analog":      [1.6, 1.3, 0.9, 0.6],
+        "vintage":     [1.5, 1.2, 0.9, 0.5],
+        "warm":        [1.4, 1.3, 1.0, 0.7],
+        "fat":         [1.8, 1.4, 0.8, 0.5],
+        "acid":        [0.8, 1.8, 1.5, 0.7],
+        "squelchy":    [0.7, 1.9, 1.6, 0.6],
+        "buchla":      [0.9, 1.1, 1.5, 1.3],
+        "west coast":  [0.8, 1.0, 1.4, 1.4],
+        "moog":        [1.8, 1.4, 0.8, 0.4],
+        "minimoog":    [1.9, 1.5, 0.7, 0.3],
+        "arp":         [0.7, 1.2, 1.5, 1.4],
+        "sequential":  [0.8, 1.1, 1.4, 1.3],
+        "roland":      [1.2, 1.2, 1.1, 0.9],
+        "juno":        [1.3, 1.2, 1.1, 0.8],
+        "jupiter":     [1.4, 1.3, 1.0, 0.8],
+        "tb303":       [0.9, 1.7, 1.4, 0.6],
+        "303":         [0.9, 1.7, 1.4, 0.6],
+        "tape":        [1.3, 1.1, 0.9, 0.5],
+        "cassette":    [1.2, 1.0, 0.8, 0.4],
+        "transistor":  [1.1, 1.4, 1.3, 0.8],
+        "tube":        [1.3, 1.3, 1.0, 0.6],
+        "valve":       [1.3, 1.3, 1.0, 0.6],
+
+        // Timbral descriptors (expanded vocabulary)
+        "bass":        [1.9, 1.3, 0.6, 0.3],   // sub-heavy
+        "sub":         [2.0, 1.0, 0.4, 0.2],   // extreme low end
+        "fundamental": [1.8, 1.0, 0.5, 0.3],   // root-frequency focus
+        "sine":        [1.5, 0.8, 0.5, 0.3],   // pure tone emphasis
+        "low":         [1.7, 1.2, 0.7, 0.4],   // low-frequency tilt
+        "high":        [0.4, 0.6, 1.4, 1.8],   // high-frequency tilt
+        "bright":      [0.5, 0.8, 1.5, 1.8],   // presence + air
+        "dark":        [1.6, 1.2, 0.7, 0.4],   // muffled, rolled-off
+        "air":         [0.3, 0.5, 1.2, 2.0],   // extreme highs
+        "shimmer":     [0.4, 0.6, 1.5, 2.0],   // sparkling highs
+        "breath":      [0.5, 0.7, 1.3, 1.7],   // breathy presence
+        "hiss":        [0.3, 0.5, 1.5, 2.0],   // high-frequency noise
+        "rumble":      [2.0, 1.3, 0.5, 0.2],   // deep rumbling
+        "body":        [1.4, 1.5, 0.9, 0.5],   // mid-body warmth
+        "punch":       [1.4, 1.3, 1.2, 0.9],   // transient body + attack snap
+        "crack":       [0.6, 1.4, 1.8, 1.2],   // snappy transient
+        "pluck":       [0.7, 1.3, 1.6, 1.1],   // plucked string character
+        "pad":         [1.2, 1.3, 1.2, 0.9],   // even, full-spectrum sustain
+        "lush":        [1.3, 1.4, 1.1, 0.8],   // rich and full
+        "vocal":       [0.6, 1.6, 1.6, 0.7],   // formant-like mid peak
+        "cutting":     [0.5, 1.0, 1.8, 1.3],   // aggressive midrange
+        "lead":        [0.6, 1.3, 1.7, 1.2],   // lead synth presence
+        "drone":       [1.5, 1.4, 1.0, 0.6],   // sustained low-mid
+        "reverb":      [0.9, 1.1, 1.3, 1.3],   // diffused, even
+        "percuss":     [1.2, 1.5, 1.3, 0.8],   // mid-focused percussion
+        "percussion":  [1.2, 1.1, 1.4, 1.5],   // percussion: body + transient highs
+        "transient":   [0.8, 1.3, 1.5, 1.2],   // attack-heavy
+        "kick":        [2.0, 1.2, 0.5, 0.2],   // kick drum: all lows
+        "snare":       [0.8, 1.5, 1.5, 0.9],   // snare: mids + crack
+        "hat":         [0.3, 0.5, 1.5, 2.0],   // hi-hat: all highs
+        "cymbal":      [0.3, 0.6, 1.6, 1.8],   // cymbal: high shimmer
+        "808":         [1.6, 1.3, 1.0, 0.7],   // 808: bass body + presence
+        "industrial":  [1.0, 1.5, 1.5, 1.0],   // harsh mid presence
+        "mechanical":  [0.8, 1.4, 1.6, 0.9],   // machine-like
+        "glass":       [0.4, 0.7, 1.5, 1.8],   // crystalline highs
+        "dust":        [0.9, 1.0, 1.3, 1.4],   // fine-grain noise character
+        "erosion":     [1.2, 0.9, 1.1, 1.3],   // spectral erosion
+        "dissolution": [1.1, 0.8, 0.9, 1.4],   // dissolving tonality
+        "blur":        [1.2, 1.2, 1.0, 0.8],   // softened spectrum
+        "infrasonic":  [2.0, 0.8, 0.3, 0.1],   // below hearing threshold emphasis
+        "formless":    [1.0, 1.0, 1.0, 1.0],   // flat / no character
+        "filter":      [0.6, 1.8, 1.5, 0.6],   // resonant filter character
+        "sweep":       [0.7, 1.5, 1.5, 0.8],   // filter sweep midrange
+        "pwm":         [0.8, 1.3, 1.5, 1.0],   // pulse width modulation
+    ]
+
+    // MARK: - Preset Fallback Semantic Profiles
+    //
+    // When a prompt has no keyword matches, the processor falls back to these
+    // preset-specific profiles instead of flat [1,1,1,1]. Each profile is tuned
+    // to reinforce the lane's frequency slot and sonic identity.
+
+    static let presetFallbackProfiles: [String: [Float]] = [
+        "moog_bass":   [1.8, 1.3, 0.6, 0.3],   // sub-heavy fallback
+        "arp_lead":    [0.6, 1.3, 1.7, 1.2],   // mid-presence fallback
+        "buchla_perc": [0.8, 1.2, 1.6, 1.1],   // mid-bright percussive
+        "roland_pad":  [1.2, 1.3, 1.2, 0.9],   // even, lush
+        "tb303_acid":  [0.8, 1.8, 1.4, 0.6],   // resonant mid peak
+        "noise_scape": [0.4, 0.6, 1.4, 1.8],   // air-only
+        "drum_lane":   [1.4, 1.1, 1.4, 1.6],   // punch + transient attack
     ]
 }
 
@@ -719,7 +807,7 @@ enum LRConstants {
 //
 // Per-step prompt override for percussion-oriented lanes. Each case maps to a
 // semantic prompt that steers ACE-Step toward a distinct drum character.
-// References: Plan "Drum Lane" §0.2; Elektron sound-lock paradigm (prompt = sample).
+// References: Plan "Drum Lane" §0.2; fixed-layout sound-lock paradigm (prompt = sample).
 //
 // When locked on a step, the lane uses this prompt for the next inference cycle
 // instead of the preset's prompt phase chain. Enables one mono lane to produce
@@ -763,8 +851,8 @@ enum DrumVoice: String, CaseIterable, Codable, Identifiable {
 
 // MARK: - Lane Preset
 //
-// Encapsulates a complete parameter snapshot for one ResonatorLane.
-// Four factory presets ship with the app (DRUMS, BASS, SYNTH, NOISE),
+// Encapsulates a complete parameter snapshot for one MacroNode.
+// Seven factory presets ship with the app (MOOG BASS, ARP LEAD, etc.),
 // each tuned to elicit a distinct sonic character from the ACE-Step
 // base model. All presets use task="cover", thinking=false (§6.1
 // circumventing the LM for deterministic control), and model=Base
@@ -815,6 +903,10 @@ struct LanePreset: Identifiable {
 
     // FFT size (preset-level spectral resolution configuration)
     let fftSize: Int
+
+    // Comb filter base delay (samples). Per-preset for distinct metallic character.
+    // Lower = brighter ring (leads, percussion), higher = darker resonance (bass, pads).
+    let combBaseDelay: Int
 
     // Auto-decay trajectory (White Paper §4.2.2 -- Recursive Drift)
     //
@@ -879,6 +971,7 @@ extension LanePreset {
         chaos: 0.15,
         warmth: 0.75,
         fftSize: 1024,
+        combBaseDelay: 271,
         autoDecayTarget: 0.50,
         autoDecayIterations: 18.0,
         promptPhase1: "sub bass only, fundamental, sine-like, fat low end, NO highs",
@@ -918,6 +1011,7 @@ extension LanePreset {
         chaos: 0.28,
         warmth: 0.4,
         fftSize: 1024,
+        combBaseDelay: 89,
         autoDecayTarget: 0.38,
         autoDecayIterations: 12.0,
         promptPhase1: "midrange lead, cutting, vocal, PWM, NO sub NO air",
@@ -957,6 +1051,7 @@ extension LanePreset {
         chaos: 0.38,
         warmth: 0.32,
         fftSize: 512,
+        combBaseDelay: 61,
         autoDecayTarget: 0.38,
         autoDecayIterations: 10.0,
         promptPhase1: "mid pluck, metallic, buchla, NO sub",
@@ -996,6 +1091,7 @@ extension LanePreset {
         chaos: 0.18,
         warmth: 0.55,
         fftSize: 2048,
+        combBaseDelay: 199,
         autoDecayTarget: 0.48,
         autoDecayIterations: 22.0,
         promptPhase1: "high shimmer, air, lush pad, NO bass",
@@ -1035,6 +1131,7 @@ extension LanePreset {
         chaos: 0.28,
         warmth: 0.48,
         fftSize: 1024,
+        combBaseDelay: 109,
         autoDecayTarget: 0.35,
         autoDecayIterations: 10.0,
         promptPhase1: "acid bass, squelchy 303, low-mid resonance, NO air",
@@ -1074,6 +1171,7 @@ extension LanePreset {
         chaos: 0.88,
         warmth: 0.18,
         fftSize: 2048,
+        combBaseDelay: 43,
         autoDecayTarget: 0.15,
         autoDecayIterations: 14.0,
         promptPhase1: "high frequency hiss, air, breath, NO body",
@@ -1081,7 +1179,10 @@ extension LanePreset {
         promptPhase3: "white noise saturation, total spectral mass, heat death"
     )
 
-    /// DRUM LANE — Slot: perc body 280Hz. Human-centric, 808-aligned: punch, short decay (§0).
+    /// DRUM LANE — Perc-tuned: open filter for transient attack, short decay, 808-aligned (§0).
+    /// filterCutoff at 4500 Hz preserves kick click (2-5 kHz) and snare snap (2-8 kHz).
+    /// Low resonance avoids ringing. Short resonator decay prevents tonal droning.
+    /// combBaseDelay 31 = tight metallic snap (1423 Hz fundamental).
     static let drumLane = LanePreset(
         id: "drum_lane",
         name: "DRUM LANE",
@@ -1099,20 +1200,21 @@ extension LanePreset {
         euclideanPulses: 4,
         euclideanSteps: 8,
         delayTime: 0.08,
-        delayFeedback: 0.38,
+        delayFeedback: 0.28,
         delayMix: 0.10,
         bitCrushDepth: 12.0,
         resonatorNote: 36.0,
-        resonatorDecay: 0.48,
-        filterCutoff: 280.0,
-        filterResonance: 0.38,
+        resonatorDecay: 0.25,
+        filterCutoff: 4500.0,
+        filterResonance: 0.18,
         filterMode: .lowpass,
         saturationMode: .transistor,
         pulseWidth: 0.5,
-        texture: 0.38,
+        texture: 0.25,
         chaos: 0.32,
         warmth: 0.42,
         fftSize: 512,
+        combBaseDelay: 31,
         autoDecayTarget: 0.38,
         autoDecayIterations: 11.0,
         promptPhase1: "808 kick, punch, short decay, NO reverb tail, NO pad",

@@ -5,9 +5,9 @@
 [![Platform: macOS 14+](https://img.shields.io/badge/Platform-macOS%2014+-blue.svg)]()
 [![Swift 5](https://img.shields.io/badge/Swift-5-orange.svg)]()
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB.svg)]()
-[![v1.0.3](https://img.shields.io/badge/version-1.0.3-gray.svg)](CHANGELOG.md)
+[![v2.0.0](https://img.shields.io/badge/version-2.0.0-gray.svg)](CHANGELOG.md)
 
-**A Non-Linear Spectral Processor powered by recursive neural inference.**
+**A Non-Linear Spectral Processor powered by recursive neural inference and dataflow architecture.**
 
 Latent Resonator transforms the ACE-Step 1.5 neural audio synthesis architecture into an executable instrument. Instead of generating songs, it establishes a *Neural Feedback Loop*--where inference output feeds back as input--inducing **generative degradation** that reveals the latent timbral biases of the neural network.
 
@@ -210,6 +210,22 @@ python LatentResonator/LatentResonator/Scripts/ace_bridge_server.py \
 
 **Local use only:** The bridge binds to `127.0.0.1` by default and is intended for use on the same machine as the app. Binding to `0.0.0.0` or a network interface exposes unauthenticated endpoints; use only in trusted environments.
 
+### Performance Mode Optimization
+
+When switching to **PERFORM** mode, the app automatically restarts the Python bridge with the `--low-latency` flag:
+
+- **Inference steps capped at 6** (vs default 8-20)
+- **Faster iteration cycles** for real-time performance
+- **Lower quality but higher responsiveness** — trade visual polish for speed
+
+This happens transparently via `BridgeProcessManager.launchServer(performanceMode: true)`. The terminal console in PATCH mode will show:
+
+```
+Low-latency mode enabled: capping steps to 6
+```
+
+Switching back to SETUP mode restarts the bridge without the flag, restoring full-quality inference.
+
 The bridge server has three operating modes:
 | Mode | When | Behavior |
 |---|---|---|
@@ -241,12 +257,36 @@ xcodebuild -project LatentResonator.xcodeproj \
 4. The Koenig Seed (Euclidean rhythm of Dirac impulses) will be injected automatically.
 5. Adjust parameters in real-time to steer the generative degradation.
 
-### Setup vs Performance (Motherbase)
+### Three Interaction Modes
 
-The app has two modes (top bar: **SETUP** | **PERFORM**):
+The app has three modes (top bar: **SETUP** | **PATCH** | **PERFORM**). Cycle with `Tab`.
 
-- **SETUP** -- Full mixer, lane strips, DETAIL popovers. Use for sound design and prep.
-- **PERFORM** -- Fixed Motherbase surface: scenes (A/B crossfader), Elektron-style step sequencer, focus lane, master XY, vectorscope _(planned)_. Same controls in the same place for muscle memory.
+- **SETUP** -- Full mixer, lane strips, DETAIL popovers, audio visualizer. Use for sound design and prep.
+- **PATCH** -- Visual node graph editor (React Flow in WKWebView) + real-time terminal console showing Python bridge logs. Dataflow programming environment for v2.0 architecture.
+- **PERFORM** -- Fixed Motherbase surface: scenes (A/B crossfader), Elektron-style step sequencer, focus lane, auto-generated control surface. Same controls in the same place for muscle memory.
+
+### Terminal Console (PATCH Mode)
+
+The PATCH view includes a collapsible terminal console at the bottom showing live output from the Python bridge server:
+
+- **Real-time logs** — stdout/stderr from `ace_bridge_server.py`
+- **Status indicator** — RUNNING / LAUNCHING / ERROR
+- **Auto-scroll toggle** — Follow latest output or scroll freely
+- **Mecha Metal aesthetic** — Phosphor green monospaced text on black
+- **Bounded history** — Last 100 lines kept in memory
+
+Use the terminal to debug bridge issues, monitor inference cycles, and verify model loading.
+
+### Audio Visualizer (SETUP Mode)
+
+The DRIFT FIELD section in SETUP mode now features a real-time audio visualizer replacing the traditional XY pad:
+
+- **Waveform + FFT display** — Canvas 2D rendering of audio signal and spectrum
+- **Touch-reactive** — Still controls Texture and Chaos macros via drag
+- **Lightweight** — ~20KB memory footprint, 30fps throttled updates
+- **Fade trails** — Visual feedback of parameter changes
+
+The visualizer reads directly from `ResonatorLane.waveformSnapshot` (256-sample downsampled buffer) and `spectralBins` for FFT data.
 
 ### Step Sequencer (Perform View)
 
@@ -337,7 +377,7 @@ All major actions are reachable without a mouse. Also documented in Settings > S
 
 | Key | Action |
 |---|---|
-| `Tab` | Switch SETUP / PERFORM views |
+| `Tab` | Cycle modes: SETUP → PATCH → PERFORM → SETUP |
 | `Cmd + ,` | Open Settings |
 | `[` / `]` | Focus previous / next lane |
 
@@ -563,18 +603,20 @@ RLTNAS/
 ├── .gitignore
 ├── docs/
 │   ├── whitepaper.md                # Full research paper
+│   ├── ARCHITECTURE_v2_NODAL.md     # v2.0 dataflow architecture spec
+│   ├── GAP_ANALYSIS_2026-04-03.md   # Code vs docs gap analysis
 │   └── audio/
 │       └── latent_resonator_texture_improv.mp3  # Full session (14m 47s)
 └── LatentResonator/
     ├── LatentResonator.xcodeproj/
     └── LatentResonator/
         ├── LatentResonatorApp.swift    # App entry point
-        ├── RootView.swift              # SETUP | PERFORM mode switch + Settings
+        ├── RootView.swift              # SETUP | PATCH | PERFORM mode switch + Settings
         ├── NeuralEngine.swift          # Multi-lane audio engine + step grid + scenes
         ├── SequencerEngine.swift       # Step grid state, advance modes, BPM
         ├── SceneManager.swift          # Scene bank, apply/capture, crossfade
         ├── ResonatorLane.swift         # Per-lane recursive feedback loop (the core formula)
-        ├── BridgeProcessManager.swift  # Python bridge lifecycle + model auto-discovery
+        ├── BridgeProcessManager.swift  # Python bridge lifecycle + model auto-discovery + terminal logs
         ├── AudioRecorder.swift         # Master recording to WAV
         ├── CoreMLInference.swift       # Core ML pipeline (on-device fallback)
         ├── SpectralProcessor.swift     # FFT-based DSP processor (DSP fallback)
@@ -583,26 +625,37 @@ RLTNAS/
         ├── CircularAudioBuffer.swift   # Lock-free ring buffer
         ├── ACEStepBridge.swift         # Swift HTTP client for bridge server
         ├── WAVCodec.swift              # WAV encode/decode for HTTP transport
+        ├── ModulationEngine.swift      # Polyadic modulation system (Agitation, Control, Peak)
         ├── Config/
         │   ├── Constants.swift         # All tuning parameters, lane presets, design system (DS)
         │   ├── PerformanceState.swift  # Scenes, step grid, parameter locks (Motherbase)
         │   └── ParameterRouter.swift   # MIDI CC mapping (ControlParameter, scaleCCToValue)
-        ├── Metal/                          # (planned -- not yet implemented)
-        │   ├── Vectorscope.metal
-        │   └── VectorscopeRenderer.swift
+        ├── Graph/                      # v2.0 Node Graph architecture
+        │   ├── NodeGraph.swift         # Graph model, validation, serialization
+        │   ├── GraphNode.swift         # Protocol for all nodes
+        │   ├── MacroNode.swift         # Subgraph encapsulation
+        │   ├── ControlGraphEvaluator.swift  # 60Hz control-rate evaluation
+        │   └── Nodes/                  # Node implementations (TBD in Phase 2-3)
         ├── Views/
         │   ├── LRComponents.swift          # Reusable UI components (design system primitives)
-        │   ├── LatentResonatorView.swift   # Setup: full mixer + bridge status + DETAIL
-        │   ├── PerformanceMotherbaseView.swift  # Perform: scenes, crossfader, step grid
+        │   ├── LatentResonatorView.swift   # Setup: full mixer + bridge status + DETAIL + audio visualizer
+        │   ├── PerformanceMotherbaseView.swift  # Perform: scenes, crossfader, step grid, auto-gen controls
         │   ├── SceneCrossfaderView.swift        # Scene A/B crossfader + load buttons
         │   ├── LaneStripView.swift     # Per-lane mixer strip + DisclosureGroup detail popover
         │   ├── RetroKnob.swift         # Precision dial with 270-degree sweep and tick marks
-        │   └── LatentXYPad.swift       # CRT-style 2D XY pad with coordinate readout
+        │   ├── LatentXYPad.swift       # CRT-style 2D XY pad with coordinate readout
+        │   ├── TerminalConsoleView.swift   # Mecha Metal terminal for Python bridge logs
+        │   ├── AudioVisualizerXYPad.swift  # WKWebView wrapper for audio visualizer
+        │   └── PerformLayoutEngine.swift   # Auto-generates PERFORM control surface layout
+        ├── WebView/
+        │   ├── PatchViewCoordinator.swift   # WKWebView coordinator for PATCH mode (React Flow)
+        │   ├── WebViewBridge.swift          # Bidirectional Swift ↔ JavaScript bridge
+        │   └── AudioVisualizerHTML.swift    # Canvas 2D + WebAudio visualizer HTML/JS
         ├── Scripts/
         │   ├── requirements.txt      # Python conversion deps
         │   ├── requirements_bridge.txt # ACE-Step bridge deps
         │   ├── setup_ace_bridge.sh   # One-command bridge setup
-        │   ├── ace_bridge_server.py  # Python HTTP bridge server
+        │   ├── ace_bridge_server.py  # Python HTTP bridge server (with --low-latency flag)
         │   ├── convert_ace_to_coreml.py
         │   └── generate_koenig_seed.py
         ├── Resources/               # Core ML models go here

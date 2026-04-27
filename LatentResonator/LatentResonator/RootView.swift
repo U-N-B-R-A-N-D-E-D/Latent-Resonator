@@ -1,18 +1,26 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Root View (Setup vs Performance)
+// MARK: - Root View (Patch vs Performance)
 //
-// One window, two modes: Setup (full mixer + DETAIL) or Performance (Motherbase).
-// Prep vs perform -- reduces cognitive load during the act.
+// One window, two modes -- Max MSP-style architecture:
+// - PATCH: Node graph editor (v2.0 visual topology) -- DEFAULT, where sound is made
+// - PERFORM: Motherbase (scenes, crossfader, step sequencer) -- for live playing
+//
+// The graph is the source of truth. The sound flows through nodes.
 // Global keyboard shortcut system for hands-on-instrument control.
 
 private typealias DS = LRConstants.DS
 
+enum AppMode: String {
+    case patch
+    case perform
+}
+
 struct RootView: View {
 
     @ObservedObject var engine: NeuralEngine
-    @State private var showPerformanceView: Bool = false
+    @State private var currentMode: AppMode = .patch  // PATCH is now the default -- where sound is made
     @State private var showModeTransitionAlert: Bool = false
     @AppStorage("LatentResonator.hasSeenOnboarding") private var hasSeenOnboarding = false
     @State private var showOnboarding = false
@@ -20,31 +28,43 @@ struct RootView: View {
     var body: some View {
         VStack(spacing: 0) {
             modeToggleBar
-            if showPerformanceView {
+            switch currentMode {
+            case .patch:
+                patchViewWithTerminal
+            case .perform:
                 PerformanceMotherbaseView(engine: engine)
-            } else {
-                LatentResonatorView(engine: engine)
             }
         }
         .sheet(isPresented: $showOnboarding) {
             onboardingSheet
         }
-        .alert("ENTERING PERFORM MODE", isPresented: $showModeTransitionAlert) {
+            .alert("ENTERING PERFORM MODE", isPresented: $showModeTransitionAlert) {
             Button("CONTINUE", role: .destructive) {
                 engine.stopProcessing()
-                showPerformanceView = true
+                currentMode = .perform
             }
             Button("CANCEL", role: .cancel) {}
         } message: {
             Text(
-                "The current Setup session will stop. Lane parameters and presets are preserved -- "
-                + "you can return to Setup to adjust them at any time."
+                "Entering live performance mode. PATCH graph continues running -- "
+                + "scenes and crossfader control the performance."
             )
         }
         .background(KeyEventHandler(handler: handleKeyEvent))
-        .onChange(of: showPerformanceView) { _, isPerform in
-            if isPerform {
-                engine.syncSetupToScenesOnEnterPerform()
+        .onChange(of: currentMode) { _, newMode in
+            if newMode == .perform {
+                // v2.0: Scene sync is automatic via NodeGraph observation
+                // Scenes capture current graph state when switching to perform mode
+
+                // Restart bridge with ultra profile for low-latency inference
+                if engine.bridgeProcess.state == .running {
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        engine.bridgeProcess.terminateServer()
+                        Thread.sleep(forTimeInterval: 0.5)
+                        _ = engine.bridgeProcess.switchProfile(to: .ultra)
+                        engine.bridgeProcess.launchServer()
+                    }
+                }
             }
         }
         .onAppear {
@@ -74,11 +94,12 @@ struct RootView: View {
                 .padding(.horizontal, 40)
 
             VStack(alignment: .leading, spacing: DS.spacingMD) {
-                onboardingBullet("SETUP mode for sound design -- PERFORM mode for live performance")
+                onboardingBullet("PATCH mode: build sounds with the node graph (default)")
+                onboardingBullet("PERFORM mode: live scenes, crossfader, step sequencer")
+                onboardingBullet("Right-click PATCH canvas to add nodes")
                 onboardingBullet("Press SPACE to start/stop the neural feedback loop")
-                onboardingBullet("TAB switches between SETUP and PERFORM views")
-                onboardingBullet("The XY pad controls Texture (X) and Chaos (Y) macros")
-                onboardingBullet("MIDI CC 20-37 routes to the focus lane. Cmd+, for full shortcut list")
+                onboardingBullet("TAB cycles between PATCH ↔ PERFORM")
+                onboardingBullet("Cmd+, for full shortcut list")
             }
             .padding(.horizontal, 40)
 
@@ -113,21 +134,113 @@ struct RootView: View {
         }
     }
 
+    // MARK: - Patch View with Terminal
+
+    @State private var showTerminal = true
+    
+    private var patchViewWithTerminal: some View {
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                // Header explaining PATCH mode
+                patchModeHeader
+                    .frame(height: 40)
+                LRDivider()
+                
+                // Node graph editor WebView
+                PatchEditorView(nodeGraph: engine.nodeGraph, aceBridge: engine.aceBridge)
+                    .frame(height: showTerminal ? geometry.size.height - 240 : geometry.size.height - 40)
+                
+                if showTerminal {
+                    LRDivider()
+                    
+                    // Terminal console
+                    TerminalConsoleView(bridgeProcess: engine.bridgeProcess)
+                        .frame(height: 200)
+                }
+            }
+        }
+    }
+    
+    private var patchModeHeader: some View {
+        HStack(spacing: DS.spacingMD) {
+            HStack(spacing: DS.spacingSM) {
+                Text("PATCH MODE")
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(.purple)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.purple.opacity(0.15))
+                    .cornerRadius(2)
+                
+                Text("Visual Signal Routing")
+                    .font(DS.font(DS.fontBody, weight: .semibold))
+                    .foregroundColor(DS.textSecondary)
+            }
+            
+            Spacer()
+            
+            HStack(spacing: DS.spacingSM) {
+                Text("\(engine.nodeGraph.nodes.count) nodes")
+                    .font(DS.font(DS.fontCaption))
+                    .foregroundColor(DS.textTertiary)
+                Text("•")
+                    .foregroundColor(DS.textTertiary)
+                Text("\(engine.nodeGraph.edges.count) connections")
+                    .font(DS.font(DS.fontCaption))
+                    .foregroundColor(DS.textTertiary)
+            }
+            
+            Spacer()
+            
+            HStack(spacing: DS.spacingSM) {
+                Text("Right-click canvas to add nodes")
+                    .font(DS.font(DS.fontCaption))
+                    .foregroundColor(DS.neonTurquesa)
+                Text("→ Then go to PERFORM to play")
+                    .font(DS.font(DS.fontCaption))
+                    .foregroundColor(DS.textTertiary)
+            }
+        }
+        .padding(.horizontal, DS.spacingXL)
+        .background(DS.surfaceSubtle)
+    }
+
     // MARK: - Mode Toggle Bar
 
     private var modeToggleBar: some View {
         HStack(spacing: 0) {
-            modeTab(label: "SETUP", isActive: !showPerformanceView, activeColor: DS.neonTurquesa) {
-                if showPerformanceView && engine.isProcessing {
-                    engine.processingStartedInPerformMode = true  // returning later won't stop
+            modeTab(label: "PATCH", isActive: currentMode == .patch, activeColor: Color.purple) {
+                if currentMode == .perform && engine.isProcessing {
+                    engine.processingStartedInPerformMode = true
                 }
-                showPerformanceView = false
+                currentMode = .patch
             }
-            .help("Sound design mode -- configure lanes, presets, and parameters (Tab)")
-            modeTab(label: "PERFORM", isActive: showPerformanceView, activeColor: DS.neonAmbar) {
+            .help("Node graph editor -- build your sound here (Tab)")
+
+            modeTab(label: "PERFORM", isActive: currentMode == .perform, activeColor: DS.neonAmbar) {
                 requestPerformMode()
             }
             .help("Live performance mode -- scenes, crossfader, step sequencer (Tab)")
+            
+            Spacer()
+            
+            // START/STOP AUDIO BUTTON - visible control
+            Button(action: {
+                engine.toggleProcessing(initiatedFromPerformMode: currentMode == .perform)
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: engine.isProcessing ? "stop.fill" : "play.fill")
+                    Text(engine.isProcessing ? "STOP" : "START")
+                        .font(.system(size: 12, weight: .bold))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(engine.isProcessing ? Color.red : Color.green)
+                .foregroundColor(.white)
+                .cornerRadius(4)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .padding(.trailing, 8)
         }
         .overlay(
             Rectangle().fill(DS.border).frame(height: DS.dividerHeight),
@@ -164,27 +277,39 @@ struct RootView: View {
         let noMod = flags.isEmpty
         let key = event.charactersIgnoringModifiers ?? ""
 
-        // Tab -- Toggle SETUP / PERFORM
-        if noMod && event.keyCode == 48 { // Tab key
-            if showPerformanceView {
-                if engine.isProcessing { engine.processingStartedInPerformMode = true }
-                showPerformanceView = false
-            } else {
+        // Tab -- Cycle through modes: PATCH ↔ PERFORM
+        if noMod && event.keyCode == 48 {
+            switch currentMode {
+            case .patch:
                 requestPerformMode()
+            case .perform:
+                if engine.isProcessing { engine.processingStartedInPerformMode = true }
+                currentMode = .patch
             }
             return true
         }
 
         // Space -- Transport toggle (Start/Stop)
-        if noMod && event.keyCode == 49 { // Space
-            if engine.bridgeProcess.state == .running || engine.isProcessing {
-                engine.toggleProcessing(initiatedFromPerformMode: showPerformanceView)
+        if noMod && event.keyCode == 49 {
+            // Write to log file directly
+            let logPath = ("~/Library/Application Support/LatentResonator/debug.log" as NSString).expandingTildeInPath
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            let logMsg = "[\(timestamp)] [RootView:handleKeyEvent] SPACEBAR DETECTED - calling toggleProcessing\n"
+            if let handle = FileHandle(forWritingAtPath: logPath) {
+                handle.seekToEndOfFile()
+                handle.write(logMsg.data(using: .utf8)!)
+                handle.closeFile()
+            } else {
+                try? logMsg.write(toFile: logPath, atomically: false, encoding: .utf8)
             }
+            
+            // FIX: Always toggle processing when spacebar is pressed
+            engine.toggleProcessing(initiatedFromPerformMode: currentMode == .perform)
             return true
         }
 
         // Escape -- Panic (force stop)
-        if noMod && event.keyCode == 53 { // Escape
+        if noMod && event.keyCode == 53 {
             if engine.isProcessing { engine.stopProcessing() }
             return true
         }
@@ -195,31 +320,36 @@ struct RootView: View {
             return true
         }
 
-        // M -- Mute focus lane
+        // M -- Mute focus macro
         if noMod && key == "m" {
-            if let lane = engine.focusLane {
-                lane.isMuted.toggle()
-                engine.updateLaneMixerState()
+            if let macro = engine.focusMacro {
+                let current = macro.getParam("isMuted", default: false)
+                macro.setParam("isMuted", value: !current)
+                engine.updateMacroMixerState()
             }
             return true
         }
 
-        // S -- Solo focus lane
+        // S -- Solo focus macro
         if noMod && key == "s" {
-            if let lane = engine.focusLane {
-                lane.isSoloed.toggle()
-                engine.updateLaneMixerState()
+            if let macro = engine.focusMacro {
+                let current = macro.getParam("isSoloed", default: false)
+                macro.setParam("isSoloed", value: !current)
+                engine.updateMacroMixerState()
             }
             return true
         }
 
         // F -- Spectral Freeze toggle
         if noMod && key == "f" {
-            engine.focusLane?.spectralFreezeActive.toggle()
+            if let macro = engine.focusMacro {
+                let current = macro.getParam("spectralFreezeActive", default: false)
+                macro.setParam("spectralFreezeActive", value: !current)
+            }
             return true
         }
 
-        // [ and ] -- Navigate focus lane (previous / next)
+        // [ and ] -- Navigate focus macro (previous / next)
         if noMod && key == "[" {
             navigateFocusLane(direction: -1)
             return true
@@ -241,7 +371,6 @@ struct RootView: View {
         }
 
         // Shift+1-8 -- Select scene (B-side)
-        // Use charactersIgnoringModifiers because Shift+1 produces "!" on US keyboards.
         if hasShift, let digit = Int(key), digit >= 1 && digit <= 8 {
             let idx = digit - 1
             if idx < engine.sceneBank.scenes.count {
@@ -251,62 +380,53 @@ struct RootView: View {
             return true
         }
 
-        // . (period) -- Manual step advance (focus lane only)
+        // . (period) -- Manual step advance (focus sequencer only)
         if noMod && key == "." {
-            guard let lane = engine.focusLane else { return true }
-            engine.advanceLaneManually(lane: lane)
+            engine.focusSequencerNode?.advanceManually()
             return true
         }
 
-        // , (comma) and Shift+, / Shift+. -- Chain length -/+ (focus lane)
+        // , (comma) -- Chain length - (focus sequencer)
         if noMod && key == "," {
-            guard let lane = engine.focusLane else { return true }
-            var grid = lane.stepGrid
-            grid.chainLength = max(LRConstants.chainLengthRange.lowerBound, grid.chainLength - 1)
-            lane.stepGrid = grid
+            guard let sequencer = engine.focusSequencerNode else { return true }
+            sequencer.chainLength = max(LRConstants.chainLengthRange.lowerBound, sequencer.chainLength - 1)
             return true
         }
 
-        // Up / Down -- BPM +/- 10 (when in time mode, focus lane)
-        if noMod && event.keyCode == 126 { // Up arrow
-            guard let lane = engine.focusLane else { return true }
-            if lane.stepGrid.advanceMode == .time {
-                var grid = lane.stepGrid
-                grid.stepTimeBPM = min(grid.stepTimeBPM + 10, LRConstants.stepTimeBPMRange.upperBound)
-                lane.stepGrid = grid
+        // Up / Down -- BPM +/- 10 (when in time mode, focus sequencer)
+        if noMod && event.keyCode == 126 {
+            guard let sequencer = engine.focusSequencerNode else { return true }
+            if sequencer.advanceMode == .time {
+                sequencer.stepTimeBPM = min(sequencer.stepTimeBPM + 10, LRConstants.stepTimeBPMRange.upperBound)
                 engine.syncStepTimer()
             }
             return true
         }
-        if noMod && event.keyCode == 125 { // Down arrow
-            guard let lane = engine.focusLane else { return true }
-            if lane.stepGrid.advanceMode == .time {
-                var grid = lane.stepGrid
-                grid.stepTimeBPM = max(grid.stepTimeBPM - 10, LRConstants.stepTimeBPMRange.lowerBound)
-                lane.stepGrid = grid
+        if noMod && event.keyCode == 125 {
+            guard let sequencer = engine.focusSequencerNode else { return true }
+            if sequencer.advanceMode == .time {
+                sequencer.stepTimeBPM = max(sequencer.stepTimeBPM - 10, LRConstants.stepTimeBPMRange.lowerBound)
                 engine.syncStepTimer()
             }
             return true
         }
 
         // Left / Right -- Crossfader nudge
-        if noMod && event.keyCode == 123 { // Left arrow
+        if noMod && event.keyCode == 123 {
             engine.crossfaderPosition = max(0, engine.crossfaderPosition - 0.05)
             engine.applyCrossfader()
             return true
         }
-        if noMod && event.keyCode == 124 { // Right arrow
+        if noMod && event.keyCode == 124 {
             engine.crossfaderPosition = min(1, engine.crossfaderPosition + 0.05)
             engine.applyCrossfader()
             return true
         }
 
-        // Shift+. -- Chain length + (focus lane)
+        // Shift+. -- Chain length + (focus sequencer)
         if hasShift && key == "." {
-            guard let lane = engine.focusLane else { return true }
-            var grid = lane.stepGrid
-            grid.chainLength = min(LRConstants.chainLengthRange.upperBound, grid.chainLength + 1)
-            lane.stepGrid = grid
+            guard let sequencer = engine.focusSequencerNode else { return true }
+            sequencer.chainLength = min(LRConstants.chainLengthRange.upperBound, sequencer.chainLength + 1)
             return true
         }
 
@@ -314,20 +434,21 @@ struct RootView: View {
     }
 
     private func requestPerformMode() {
-        if showPerformanceView { return }
-        // Only show stop-warning when Setup was playing. Returning from Perform→Setup→Perform keeps sound.
+        if currentMode == .perform { return }
         if engine.isProcessing && !engine.processingStartedInPerformMode {
             showModeTransitionAlert = true
         } else {
-            showPerformanceView = true
+            currentMode = .perform
         }
     }
 
     private func navigateFocusLane(direction: Int) {
-        guard !engine.lanes.isEmpty else { return }
-        let currentIdx = engine.lanes.firstIndex(where: { $0.id == engine.focusLaneId }) ?? 0
-        let nextIdx = (currentIdx + direction + engine.lanes.count) % engine.lanes.count
-        engine.focusLaneId = engine.lanes[nextIdx].id
+        // v2.0: Navigate through MacroNodes instead of lanes
+        let macros = engine.macroNodes
+        guard !macros.isEmpty else { return }
+        let currentIdx = macros.firstIndex(where: { $0.id == engine.focusMacroId }) ?? 0
+        let nextIdx = (currentIdx + direction + macros.count) % macros.count
+        engine.focusMacroId = macros[nextIdx].id
     }
 }
 
@@ -575,6 +696,7 @@ struct LRSettingsView: View {
                         .foregroundColor(inferenceDeviceColor)
                 }
             }
+
         }
     }
 
@@ -606,20 +728,20 @@ struct LRSettingsView: View {
 
             shortcutSection("TRANSPORT", shortcuts: [
                 ("Space", "Start / Stop engine"),
-                ("Escape", "Panic -- force stop all lanes"),
+                ("Escape", "Panic -- force stop all macros"),
                 ("R", "Toggle master recording"),
             ])
 
             shortcutSection("NAVIGATION", shortcuts: [
-                ("Tab", "Switch between SETUP and PERFORM views"),
+                ("Tab", "Cycle modes: PATCH ↔ PERFORM"),
                 ("Cmd + ,", "Open Settings (macOS menu)"),
-                ("[", "Focus previous lane"),
-                ("]", "Focus next lane"),
+                ("[", "Focus previous macro"),
+                ("]", "Focus next macro"),
             ])
 
-            shortcutSection("FOCUS LANE", shortcuts: [
-                ("M", "Mute / unmute focus lane"),
-                ("S", "Solo / unsolo focus lane"),
+            shortcutSection("FOCUS MACRO", shortcuts: [
+                ("M", "Mute / unmute focus macro"),
+                ("S", "Solo / unsolo focus macro"),
                 ("F", "Toggle spectral freeze"),
             ])
 
@@ -672,7 +794,7 @@ struct LRSettingsView: View {
                 HStack(spacing: DS.spacingLG) {
                     Text(
                         "Latent Resonator listens on all connected MIDI sources. CC messages are routed to the "
-                        + "focus lane. Connect any class-compliant USB, network, or Bluetooth MIDI controller."
+                        + "focus macro. Connect any class-compliant USB, network, or Bluetooth MIDI controller."
                     )
                         .font(DS.font(DS.fontCaption))
                         .foregroundColor(DS.textTertiary)
@@ -832,7 +954,7 @@ struct LRSettingsView: View {
                 Text(
                     "Receive Open Sound Control messages over UDP or TCP. "
                     + "The service is advertised via Bonjour so compatible apps "
-                    + "(TouchOSC, Max/MSP, SuperCollider, PureData, etc.) can discover it automatically. "
+                    + "(TouchOSC, Pure Data, SuperCollider, or custom OSC clients) can discover it automatically. "
                     + "Messages must use OSC format: /lr/<parameter> <float_value>"
                 )
                     .font(DS.font(DS.fontCaption))

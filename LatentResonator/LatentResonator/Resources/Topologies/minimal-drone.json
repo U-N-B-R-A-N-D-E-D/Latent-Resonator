@@ -1,0 +1,157 @@
+{
+  "version": "2.0.0",
+  "metadata": {
+    "name": "Minimal Drone",
+    "description": "Pure generative degradation. Two oscillators beating against each other through a ladder filter into the void.",
+    "author": "Latent Resonator Factory",
+    "stageTopology": ["seed", "seed", "ladder", "flat"]
+  },
+  "nodes": [
+    {
+      "id": "OSC1-DDDD-DDDD-DDDD-DDDDDDDDDDDD",
+      "nodeType": "oscillator",
+      "displayName": "Drone A",
+      "parameters": {
+        "frequency": 55.0,
+        "amplitude": 0.5,
+        "waveform": "sine",
+        "pitchDrift": 0.1,
+        "driftRate": 0.05
+      },
+      "position": { "x": 100.0, "y": 150.0 },
+      "stageKind": "seed"
+    },
+    {
+      "id": "OSC2-EEEE-EEEE-EEEE-EEEEEEEEEEEE",
+      "nodeType": "oscillator",
+      "displayName": "Drone B",
+      "parameters": {
+        "frequency": 55.5,
+        "amplitude": 0.5,
+        "waveform": "sine",
+        "pitchDrift": 0.08,
+        "driftRate": 0.07
+      },
+      "position": { "x": 100.0, "y": 350.0 },
+      "stageKind": "seed"
+    },
+    {
+      "id": "MIX2-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+      "nodeType": "mixer",
+      "displayName": "Blend",
+      "parameters": {
+        "gain1": 0.5,
+        "gain2": 0.5,
+        "gain3": 0.0,
+        "gain4": 0.0,
+        "masterGain": 1.0
+      },
+      "position": { "x": 350.0, "y": 250.0 }
+    },
+    {
+      "id": "LADR-7777-7777-7777-777777777777",
+      "nodeType": "ladder_filter",
+      "displayName": "Warm Ladder",
+      "parameters": {
+        "cutoff": 400.0,
+        "resonance": 0.6,
+        "drive": 0.15
+      },
+      "position": { "x": 600.0, "y": 250.0 },
+      "stageKind": "ladder"
+    },
+    {
+      "id": "MSTR-8888-8888-8888-888888888888",
+      "nodeType": "master_output",
+      "displayName": "Out",
+      "parameters": {
+        "volume": 0.85,
+        "limiterThreshold": -0.2
+      },
+      "position": { "x": 850.0, "y": 250.0 },
+      "stageKind": "flat"
+    }
+  ],
+  "edges": [
+    {
+      "id": "EDG1-DDDD-DDDD-DDDD-DDDDDDDDDDDD",
+      "sourceNodeId": "OSC1-DDDD-DDDD-DDDD-DDDDDDDDDDDD",
+      "sourcePortId": "out",
+      "targetNodeId": "MIX2-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+      "targetPortId": "in1",
+      "signalType": "audio"
+    },
+    {
+      "id": "EDG2-EEEE-EEEE-EEEE-EEEEEEEEEEEE",
+      "sourceNodeId": "OSC2-EEEE-EEEE-EEEE-EEEEEEEEEEEE",
+      "sourcePortId": "out",
+      "targetNodeId": "MIX2-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+      "targetPortId": "in2",
+      "signalType": "audio"
+    },
+    {
+      "id": "EDG3-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+      "sourceNodeId": "MIX2-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+      "sourcePortId": "out",
+      "targetNodeId": "LADR-7777-7777-7777-777777777777",
+      "targetPortId": "in",
+      "signalType": "audio"
+    },
+    {
+      "id": "EDG4-7777-7777-7777-777777777777",
+      "sourceNodeId": "LADR-7777-7777-7777-777777777777",
+      "sourcePortId": "out",
+      "targetNodeId": "MSTR-8888-8888-8888-888888888888",
+      "targetPortId": "in",
+      "signalType": "audio"
+    }
+  ],
+  "exposedControls": [
+    {
+      "id": "CTL1-DDDD-DDDD-DDDD-DDDDDDDDDDDD",
+      "nodeId": "OSC1-DDDD-DDDD-DDDD-DDDDDDDDDDDD",
+      "paramId": "frequency",
+      "label": "Drone A Freq",
+      "controlType": "knob",
+      "range": { "lower": 27.5, "upper": 110 },
+      "defaultValue": 55,
+      "position": 0
+    },
+    {
+      "id": "CTL2-EEEE-EEEE-EEEE-EEEEEEEEEEEE",
+      "nodeId": "OSC2-EEEE-EEEE-EEEE-EEEEEEEEEEEE",
+      "paramId": "frequency",
+      "label": "Drone B Freq",
+      "controlType": "knob",
+      "range": { "lower": 27.5, "upper": 110 },
+      "defaultValue": 55.5,
+      "position": 1
+    },
+    {
+      "id": "CTL3-7777-7777-7777-777777777777",
+      "nodeId": "LADR-7777-7777-7777-777777777777",
+      "paramId": "cutoff",
+      "label": "Filter Cutoff",
+      "controlType": "knob",
+      "range": { "lower": 40, "upper": 2000 },
+      "defaultValue": 400,
+      "position": 2
+    },
+    {
+      "id": "CTL4-8888-8888-8888-888888888888",
+      "nodeId": "MSTR-8888-8888-8888-888888888888",
+      "paramId": "volume",
+      "label": "Output Level",
+      "controlType": "knob",
+      "range": { "lower": 0, "upper": 1 },
+      "defaultValue": 0.85,
+      "position": 3
+    }
+  ],
+  "macroBindings": [],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  }
+}

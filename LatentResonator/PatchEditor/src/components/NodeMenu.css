@@ -1,0 +1,120 @@
+.node-menu {
+  background: #0a0b0c;
+  border: 2px solid #00ccff;
+  border-radius: 4px;
+  box-shadow: 0 8px 32px rgba(0, 204, 255, 0.3);
+  width: 360px;
+  max-height: 600px;
+  display: flex;
+  flex-direction: column;
+  z-index: 9999;
+  font-family: 'Fira Code', 'Courier New', monospace;
+}
+
+.node-menu-header {
+  padding: 12px;
+  border-bottom: 1px solid #252627;
+}
+
+.node-menu-search {
+  width: 100%;
+  background: #1a1b1c;
+  border: 1px solid #252627;
+  border-radius: 3px;
+  padding: 8px 12px;
+  color: #eaeaea;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+}
+
+.node-menu-search:focus {
+  border-color: #00ccff;
+  box-shadow: 0 0 0 2px rgba(0, 204, 255, 0.2);
+}
+
+.node-menu-search::placeholder {
+  color: #666;
+}
+
+.node-menu-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.node-menu-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.node-menu-content::-webkit-scrollbar-track {
+  background: #0a0b0c;
+}
+
+.node-menu-content::-webkit-scrollbar-thumb {
+  background: #252627;
+  border-radius: 4px;
+}
+
+.node-menu-content::-webkit-scrollbar-thumb:hover {
+  background: #333;
+}
+
+.node-menu-category {
+  margin-bottom: 12px;
+}
+
+.node-menu-category:last-child {
+  margin-bottom: 0;
+}
+
+.node-menu-category-name {
+  font-size: 11px;
+  font-weight: bold;
+  color: #00ccff;
+  padding: 6px 16px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.node-menu-item {
+  padding: 10px 16px;
+  cursor: pointer;
+  transition: background 0.1s ease;
+  border-left: 3px solid transparent;
+}
+
+.node-menu-item:hover,
+.node-menu-item.selected {
+  background: rgba(0, 204, 255, 0.1);
+  border-left-color: #00ccff;
+}
+
+.node-menu-item-label {
+  font-size: 14px;
+  color: #eaeaea;
+  font-weight: 500;
+  margin-bottom: 2px;
+}
+
+.node-menu-item-description {
+  font-size: 11px;
+  color: #888;
+  line-height: 1.3;
+}
+
+.node-menu-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: #666;
+  font-size: 13px;
+}
+
+.node-menu-footer {
+  padding: 8px 16px;
+  border-top: 1px solid #252627;
+  font-size: 10px;
+  color: #666;
+  text-align: center;
+  letter-spacing: 0.3px;
+}

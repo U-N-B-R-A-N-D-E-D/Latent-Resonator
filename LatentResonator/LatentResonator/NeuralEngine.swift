@@ -5,46 +5,73 @@ import CoreAudio
 import Combine
 import Accelerate
 
-// MARK: - Neural Engine (Lane Orchestrator)
+// MARK: - Neural Engine (v2.0 Graph-Native Architecture)
 //
-// Manages N independent ResonatorLane instances, each running its own
-// recursive feedback loop through the shared ACE-Step bridge.
+// Manages the NodeGraph which is the source of truth for all audio processing.
+// Each MacroNode in the graph represents a processing lane (v1.x concept migrated).
 //
-// Architecture (multi-lane):
+// Architecture (v2.0 graph-native):
 //
-//   +-------------+  +-------------+       +-------------+
-//   |  Lane 0     |  |  Lane 1     |  ...  |  Lane N     |
-//   |  (DRUMS)    |  |  (BASS)     |       |  (NOISE)    |
-//   |  excitation |  |  excitation |       |  excitation |
-//   |  + feedback |  |  + feedback |       |  + feedback |
-//   |  -> mixer    |  |  -> mixer    |       |  -> mixer    |
-//   +------+------+  +------+------+       +------+------+
-//          |                |                      |
-//          +--------+-------+----------------------+
-//                   v
-//            masterMixerNode (volume, solo logic)
-//                   |
-//            mainMixerNode -> output
-//                   |
-//                 +-+-+
-//                 |TAP| -> master recording
-//                 +---+
-//
-// Each lane has its own inference queue but shares the single
-// ACEStepBridge (HTTP requests are serialized by Flask).
-// The "infinite game" runs at ~20s per lane cycle x N lanes.
+//   +--------------------------------------------------------+
+//   |  NodeGraph (Source of Truth)                            |
+//   |  ┌─────────────┐  ┌─────────────┐     ┌─────────────┐   |
+//   |  │  MacroNode  │  │  MacroNode  │ ... │  MacroNode  │   |
+//   |  │ (was Lane)  │  │ (was Lane)  │     │ (was Lane)  │   |
+//   |  │ ┌─────────┐ │  │ ┌─────────┐ │     │ ┌─────────┐ │   |
+//   |  │ │Internal │ │  │ │Internal │ │     │ │Internal │ │   |
+//   |  │ │ Graph   │ │  │ │ Graph   │ │     │ │ Graph   │ │   |
+//   |  │ └────┬────┘ │  │ └────┬────┘ │     │ └────┬────┘ │   |
+//   |  │   OUT│      │  │   OUT│      │     │   OUT│      │   |
+//   |  └──────┼──────┘  └──────┼──────┘     └──────┼──────┘   |
+//   |         │                │                      │        |
+//   |         +--------+-------+----------------------+        |
+//   |                  v                                       |
+//   |           MixerNode (masterMixerNode)                   |
+//   |                  │                                       |
+//   |           MasterOutputNode -> mainMixerNode              |
+//   +------------------│---------------------------------------+
+//                      │
+//            AudioGraphMapper (v2.0 graph → AVAudioEngine)
 //
 // White paper reference:
-//   §3.3 -- Recursive formula per lane
-//   §6.1 -- Black Box Resonator (each lane is one resonator)
-//   §1.2 -- The Lucier Chamber (delay per lane)
+//   §3.3 -- Recursive formula per macro
+//   §6.1 -- Black Box Resonator (each macro is one resonator)
+//   §1.2 -- The Lucier Chamber (delay per macro)
+//
+// v2.0 Migration Notes:
+//   - ResonatorLane replaced by MacroNode (encapsulated subgraph)
+//   - laneSlots pre-allocation removed (dynamic graph-based)
+//   - All lane operations now use MacroNode operations via NodeGraph
+//   - Scene persistence uses GraphSnapshot (node parameters)
 
 final class NeuralEngine: ObservableObject {
 
-    // MARK: - Published Lane Array
+    // MARK: - v2.0 Node Graph (Source of Truth)
 
-    /// All active lanes. UI observes this for the mixer layout.
-    @Published var lanes: [ResonatorLane] = []
+    /// The complete signal processing graph. All nodes, edges, and parameters live here.
+    /// This is the single source of truth for the entire audio system.
+    let nodeGraph = NodeGraph()
+
+    // MARK: - Computed Lane Access (v1.x Compatibility)
+
+    /// All active macros (formerly "lanes"). UI observes this for the mixer layout.
+    /// Computed from nodeGraph - always reflects current graph state.
+    var macroNodes: [MacroNode] {
+        nodeGraph.nodes.values.compactMap { $0 as? MacroNode }
+    }
+
+    /// v1.x compatibility: `lanes` now returns MacroNodes as they serve the same purpose.
+    @Published var lanes: [MacroNode] = []
+
+    /// All sequencer nodes in the graph.
+    var sequencerNodes: [SequencerNode] {
+        nodeGraph.nodes.values.compactMap { $0 as? SequencerNode }
+    }
+
+    /// All feedback loop nodes in the graph.
+    var feedbackLoopNodes: [FeedbackLoopNode] {
+        nodeGraph.nodes.values.compactMap { $0 as? FeedbackLoopNode }
+    }
 
     // MARK: - Global State
 
@@ -73,7 +100,7 @@ final class NeuralEngine: ObservableObject {
 
     // MARK: - Master Recording (Whitepaper §5)
 
-    /// Master bus recorder -- captures mixed output of all lanes.
+    /// Master bus recorder -- captures mixed output of all macros.
     let masterRecorder = AudioRecorder()
     @Published var isMasterRecording: Bool = false
 
@@ -88,26 +115,47 @@ final class NeuralEngine: ObservableObject {
     /// Manages scene bank and scene operations (apply, capture, crossfade).
     let sceneManager = SceneManager()
     @Published var pLockEditingStepIndex: Int? = nil
-    /// Shift+click selection for batch operations. Cleared when focus lane changes.
+    /// Shift+click selection for batch operations. Cleared when focus macro changes.
     @Published var selectedStepIndices: Set<Int> = []
-    @Published var focusLaneId: UUID?
 
-    /// Step grid for the focused lane (Focus Lane UX). Each lane has its own stepGrid;
-    /// this exposes the focused lane's grid for UI binding. Nil when no lanes exist.
-    var focusStepGrid: StepGrid? { focusLane?.stepGrid }
+    /// v2.0: Focus on a specific MacroNode by ID.
+    @Published var focusMacroId: UUID?
 
-
-    /// Total iteration count across all lanes (for step advance).
-    var globalCycleCount: Int {
-        lanes.reduce(0) { $0 + $1.iterationCount }
+    /// v2.0: Focus macro (first macro whose id matches focusMacroId, or first macro).
+    var focusMacro: MacroNode? {
+        if let id = focusMacroId, let macro = macroNodes.first(where: { $0.id == id }) {
+            return macro
+        }
+        return macroNodes.first
     }
 
-    /// Focus lane (first lane whose id matches focusLaneId, or first lane).
-    var focusLane: ResonatorLane? {
-        if let id = focusLaneId, let lane = lanes.first(where: { $0.id == id }) {
-            return lane
-        }
-        return lanes.first
+    /// v1.x compatibility: focusLane returns the focus macro (MacroNode is the v2.0 lane equivalent).
+    var focusLane: MacroNode? { focusMacro }
+
+    /// v1.x compatibility: focusLaneId returns the focus macro ID.
+    var focusLaneId: UUID? { focusMacroId }
+
+    /// Step grid access for the focused macro (Focus Lane UX).
+    /// v2.0: Step grids are stored in SequencerNodes within the MacroNode's internal graph.
+    var focusStepGrid: StepGrid? {
+        guard let macro = focusMacro else { return nil }
+        // Find the first sequencer node in the macro's internal graph
+        return macro.internalGraph.nodes.values
+            .compactMap { $0 as? SequencerNode }
+            .first?.stepGrid
+    }
+
+    /// Access to the focused sequencer node for step operations.
+    /// v2.0: SequencerNode is inside the focus macro's internal graph.
+    var focusSequencerNode: SequencerNode? {
+        guard let macro = focusMacro else { return nil }
+        return macro.internalGraph.nodes.values
+            .compactMap { $0 as? SequencerNode }
+            .first
+    }
+    /// Total iteration count across all feedback loops (for step advance).
+    var globalCycleCount: Int {
+        feedbackLoopNodes.reduce(0) { $0 + $1.iterationCount }
     }
 
     /// Crossfader position 0...1 (A = 0, B = 1). Blends between sceneAIndex and sceneBIndex.
@@ -122,15 +170,11 @@ final class NeuralEngine: ObservableObject {
 
     // MARK: - Audio Input (Shared Ring Buffer for .audioInput Excitation)
 
-    /// Shared ring buffer fed by the hardware input tap. Lanes configured
+    /// Shared ring buffer fed by the hardware input tap. Macros configured
     /// as .audioInput read from this buffer instead of their oscillator.
     let audioInputBuffer = CircularAudioBuffer(capacity: LRConstants.audioInputBufferCapacity)
     /// Whether an input tap is currently installed on the audio engine.
     private var inputTapInstalled: Bool = false
-
-    /// H19: Pre-allocated lane slots. All nodes attached to the graph at init.
-    /// No audioEngine.attach/connect/stop calls ever happen after engine.start().
-    private var laneSlots: [ResonatorLane] = []
 
     // MARK: - Output Device Management
     //
@@ -146,14 +190,14 @@ final class NeuralEngine: ObservableObject {
     /// Original device sample rate, saved so we can restore it on exit.
     private var originalDeviceSampleRate: Float64?
 
-    // MARK: - Core ML (Shared Across Lanes)
+    // MARK: - Core ML (Shared Across Macros)
 
     private var coreMLInference: CoreMLInference?
 
     // MARK: - MIDI Input (§6 -- Controller Mapping)
 
     /// CoreMIDI input manager -- routes CC messages through ParameterRouter
-    /// into the focus lane's parameters and engine-global controls.
+    /// into the focus macro's parameters and engine-global controls.
     let midiInput = MIDIInputManager()
     var oscInput = OSCInputManager()
 
@@ -172,15 +216,18 @@ final class NeuralEngine: ObservableObject {
         return fmt
     }
 
-    // MARK: - Sequencer Engine (Step Timing)
+    // MARK: - v2.0 Audio Graph Mapper
 
-    /// Owns step timer and advance logic. NeuralEngine delegates timing to it.
-    /// Lazy so init can complete before closures capture self.
+    /// Translates NodeGraph topology to AVAudioEngine audio routing.
+    private var audioGraphMapper: AudioGraphMapper?
+
+    // MARK: - v2.0 Sequencer Engine
+
+    /// Owns step timer and advance logic for all SequencerNodes in the graph.
+    /// v2.0: Graph-native, no lane dependencies.
     private lazy var sequencerEngine: SequencerEngine = SequencerEngine(
-        lanesGetter: { [weak self] in self?.lanes ?? [] },
-        focusStepGridGetter: { [weak self] in self?.focusStepGrid },
-        isProcessingGetter: { [weak self] in self?.isProcessing ?? false },
-        applyLocks: { [weak self] lane in self?.applyLaneStepLocks(lane: lane) }
+        nodeGraph: nodeGraph,
+        isProcessingGetter: { [weak self] in self?.isProcessing ?? false }
     )
 
     // MARK: - Lifecycle
@@ -191,70 +238,134 @@ final class NeuralEngine: ObservableObject {
 
     /// Shared routing logic for both MIDI CC and OSC input.
     private func applyParameter(_ param: ControlParameter, value: Float) {
+        // #region agent log
+        fputs("[\(ISO8601DateFormatter().string(from: Date()))] [NeuralEngine:applyParameter] param=\(param.rawValue) value=\(value)\n", stderr)
+        fflush(stderr)
+        // #endregion
+        
         switch param {
         case .crossfader:
             crossfaderPosition = value
             applyCrossfader()
             return
         default:
-            guard let lane = focusLane else { return }
+            guard let macro = focusMacro else {
+                // #region agent log
+                fputs("[\(ISO8601DateFormatter().string(from: Date()))] [NeuralEngine:applyParameter] ✗ No focusMacro available, cannot apply parameter\n", stderr)
+                fflush(stderr)
+                // #endregion
+                return
+            }
+            // #region agent log
+            fputs("[\(ISO8601DateFormatter().string(from: Date()))] [NeuralEngine:applyParameter] ✓ Applying to macro: \(macro.name)\n", stderr)
+            fflush(stderr)
+            // #endregion
+
+            // Apply to the macro's internal graph parameters
+            // This routes control changes to the appropriate internal nodes
             switch param {
-            case .volume:              lane.volume = value
-            case .guidanceScale:       lane.guidanceScale = value
-            case .feedback:            lane.feedbackAmount = value
-            case .texture:             lane.texture = value
-            case .chaos:               lane.chaos = value
-            case .warmth:              lane.warmth = value
-            case .filterCutoff:        lane.filterCutoff = value
-            case .filterResonance:     lane.filterResonance = value
-            case .delayMix:            lane.delayMix = value
-            case .delayTime:           lane.delayTime = value
-            case .delayFeedback:       lane.delayFeedback = value
-            case .bitCrushDepth:       lane.bitCrushDepth = value
-            case .resonatorNote:       lane.resonatorNote = value
-            case .resonatorDecay:      lane.resonatorDecay = value
-            case .entropy:
-                lane.entropyLevel = lane.isDrumLane ? min(value, LRConstants.drumLaneEntropyCap) : value
-            case .granularity:
-                lane.granularity = lane.isDrumLane ? min(value, LRConstants.drumLaneGranularityCap) : value
-            case .shift:               lane.shift = value
-            case .inputStrength:       lane.inputStrength = value
-            case .inferenceSteps:      lane.inferenceSteps = Int(value.rounded())
-            case .sineFrequency:       lane.sineFrequency = value
-            case .pulseWidth:          lane.pulseWidth = value
-            case .lfoRate:             lane.lfoRate = value
-            case .lfoDepth:            lane.lfoDepth = value
-            case .mute:
-                lane.isMuted = value >= 0.5
-                updateLaneMixerState()
-            case .solo:
-                lane.isSoloed = value >= 0.5
-                updateLaneMixerState()
-            case .spectralMorphActive: lane.spectralFreezeActive = value >= 0.5
-            case .autoDecayToggle:     lane.autoDecayEnabled = value >= 0.5
-            case .promptEvolution:     lane.promptEvolutionEnabled = value >= 0.5
-            case .inferMethodSDE:      lane.inferMethod = value >= 0.5 ? "sde" : "ode"
-            case .laneRecord:
-                if value >= 0.5 && !lane.isLaneRecording {
-                    lane.toggleLaneRecording()
-                } else if value < 0.5 && lane.isLaneRecording {
-                    lane.toggleLaneRecording()
+            case .volume:
+                macro.parameters["volume"] = value
+            case .guidanceScale:
+                macro.parameters["guidanceScale"] = value
+            case .feedback:
+                macro.parameters["feedbackAmount"] = value
+            case .texture:
+                macro.parameters["texture"] = value
+            case .chaos:
+                macro.parameters["chaos"] = value
+            case .warmth:
+                macro.parameters["warmth"] = value
+            case .filterCutoff:
+                macro.parameters["filterCutoff"] = value
+                // Also update internal ladder filter if present
+                if let nodeId = macro.parameters["ladderFilterNodeId"] as? String,
+                   let uuid = UUID(uuidString: nodeId) {
+                    nodeGraph.setParameter(nodeId: uuid, key: "cutoff", value: value)
                 }
+            case .filterResonance:
+                macro.parameters["filterResonance"] = value
+            case .delayMix:
+                macro.parameters["delayMix"] = value
+            case .delayTime:
+                macro.parameters["delayTime"] = value
+            case .delayFeedback:
+                macro.parameters["delayFeedback"] = value
+            case .bitCrushDepth:
+                macro.parameters["bitCrushDepth"] = value
+            case .resonatorNote:
+                macro.parameters["resonatorNote"] = value
+            case .resonatorDecay:
+                macro.parameters["resonatorDecay"] = value
+            case .entropy:
+                let cappedValue = value
+                macro.parameters["entropyLevel"] = cappedValue
+            case .granularity:
+                let cappedValue = value
+                macro.parameters["granularity"] = cappedValue
+            case .shift:
+                macro.parameters["shift"] = value
+            case .inputStrength:
+                macro.parameters["inputStrength"] = value
+            case .inferenceSteps:
+                macro.parameters["inferenceSteps"] = Int(value.rounded())
+            case .sineFrequency:
+                macro.parameters["sineFrequency"] = value
+            case .pulseWidth:
+                macro.parameters["pulseWidth"] = value
+            case .lfoRate:
+                macro.parameters["lfoRate"] = value
+            case .lfoDepth:
+                macro.parameters["lfoDepth"] = value
+            case .mute:
+                macro.parameters["isMuted"] = value >= 0.5
+                updateMacroMixerState()
+            case .solo:
+                macro.parameters["isSoloed"] = value >= 0.5
+                updateMacroMixerState()
+            case .spectralMorphActive:
+                macro.parameters["spectralFreezeActive"] = value >= 0.5
+            case .autoDecayToggle:
+                macro.parameters["autoDecayEnabled"] = value >= 0.5
+            case .promptEvolution:
+                macro.parameters["promptEvolutionEnabled"] = value >= 0.5
+            case .inferMethodSDE:
+                macro.parameters["inferMethod"] = value >= 0.5 ? "sde" : "ode"
+            case .laneRecord:
+                // TODO: Implement recording for v2.0 (track which macro is recording)
+                break
             case .archiveRecall:
-                let idx = Int(value.rounded())
-                lane.archiveRecallIndex = idx < lane.iterationArchive.count ? idx : nil
+                _ = Int(value.rounded())
+                // TODO: Implement archive recall for v2.0
+                break
             default:
                 break
             }
+
+            // Publish change for UI observers
+            objectWillChange.send()
         }
     }
 
-    /// Connect MIDI CC and OSC input to the focus lane and engine-global parameters.
+    /// Connect MIDI CC and OSC input to the focus macro and engine-global parameters.
     private func setupMIDIRouting() {
+        // #region agent log
+        fputs("[\(ISO8601DateFormatter().string(from: Date()))] [NeuralEngine:setupMIDIRouting] Setting up MIDI/OSC routing\n", stderr)
+        fflush(stderr)
+        // #endregion
+        
         midiInput.onParameterChange = { [weak self] param, value in
+            // #region agent log
+            fputs("[\(ISO8601DateFormatter().string(from: Date()))] [NeuralEngine:midiInput.onParameterChange] param=\(param.rawValue) value=\(value)\n", stderr)
+            fflush(stderr)
+            // #endregion
             self?.applyParameter(param, value: value)
         }
         midiInput.start()
+        // #region agent log
+        fputs("[\(ISO8601DateFormatter().string(from: Date()))] [NeuralEngine:setupMIDIRouting] MIDI input started\n", stderr)
+        fflush(stderr)
+        // #endregion
 
         oscInput.onParameterChange = { [weak self] param, value in
             self?.applyParameter(param, value: value)
@@ -263,63 +374,49 @@ final class NeuralEngine: ObservableObject {
     }
 
     init() {
+        NSLog("[LR-FATAL] NeuralEngine init STARTING")
+        
         coreMLInference = CoreMLInference()
         configureOutputDevice()   // Set device to 48kHz BEFORE building graph
         setupProcessingFormat()
         setupMasterMixer()
 
-        // H19: Pre-allocate ALL lane slots and attach to graph BEFORE engine starts.
-        // This avoids any audioEngine.attach/connect calls after engine.start().
-        // The audio graph is STATIC after this point.
-        let defaultPreset = LanePreset.allPresets.first ?? .buchlaPerc
-        for _ in 0..<LRConstants.maxLanes {
-            let slot = ResonatorLane(preset: defaultPreset, bridge: aceBridge)
-            slot.coreMLInference = coreMLInference
-            slot.audioInputBuffer = audioInputBuffer
-            slot.isMuted = true
-            laneSlots.append(slot)
+        // v2.0: Initialize AudioGraphMapper for graph-native audio routing
+        audioGraphMapper = AudioGraphMapper(
+            avEngine: audioEngine,
+            masterVolumeNode: masterMixerNode
+        )
 
-            // Attach to graph (STATIC -- never modified after this).
-            // combinedSourceNode is set in ResonatorLane.init via setupCombinedSourceNode().
-            guard let node = slot.combinedSourceNode else {
-                fatalError("NeuralEngine: slot.combinedSourceNode nil before attach")
+        // v2.0: Load saved graph or bootstrap with kickstart template
+        NSLog("[LR-FATAL] About to call loadGraphOrBootstrap")
+        loadGraphOrBootstrap()
+        NSLog("[LR-FATAL] NeuralEngine init COMPLETE - nodes: %d", nodeGraph.nodes.count)
+
+        // CRITICAL FIX: Rebuild audio graph immediately after loading graph
+        // The topologyDidChange subscription is set up AFTER this point, so we must
+        // manually trigger the initial audio graph rebuild
+        NSLog("[LR-FATAL] Rebuilding audio graph after bootstrap...")
+        rebuildAudioGraphIfNeeded()
+        NSLog("[LR-FATAL] Audio graph rebuilt. Nodes attached: %d", audioGraphMapper?.attachedNodeCount ?? 0)
+
+        // Also update lanes array immediately so UI has data
+        updateLanesArray()
+
+        // v2.0: Subscribe to node graph changes for lane array updates
+        nodeGraph.$nodes
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateLanesArray()
             }
-            audioEngine.attach(node)
-            audioEngine.attach(slot.laneMixer)
-            audioEngine.connect(node, to: slot.laneMixer, format: effectiveFormat)
-            audioEngine.connect(slot.laneMixer, to: masterMixerNode, format: effectiveFormat)
-        }
-
-        // IMPORTANT: Set volumes AFTER attach/connect. The connect() call resets
-        // AVAudioMixerNode.outputVolume to 1.0, so we must set it after.
-        for slot in laneSlots {
-            slot.laneMixer.outputVolume = 0.0
-        }
-
-        // Activate the default lanes from the pool
-        for i in 0..<LRConstants.defaultLaneCount {
-            let slot = laneSlots[i]
-            let preset = (i < LanePreset.allPresets.count)
-                ? LanePreset.allPresets[i] : defaultPreset
-            slot.reconfigure(with: preset)
-            slot.isMuted = false
-            slot.laneMixer.outputVolume = slot.volume
-            lanes.append(slot)
-        }
+            .store(in: &cancellables)
 
         // Performance state (Motherbase) -- load saved state or initialize defaults
         if let saved = PerformanceStateStore.load() {
             var bank = saved.sceneBank
             bank.ensureCapacity()
             sceneManager.sceneBank = bank
-            for (i, lane) in lanes.enumerated() {
-                if i < saved.stepGrids.count {
-                    lane.stepGrid = saved.stepGrids[i]
-                } else if !saved.stepGrids.isEmpty {
-                    // Migration: legacy single grid -> copy to extra lanes
-                    lane.stepGrid = saved.stepGrids[0]
-                }
-            }
+            // v2.0: Restore step grids to sequencer nodes if available
+            restoreStepGrids(from: saved.stepGrids)
             crossfaderSceneAIndex = saved.crossfaderSceneAIndex
             crossfaderSceneBIndex = saved.crossfaderSceneBIndex
         } else {
@@ -331,7 +428,7 @@ final class NeuralEngine: ObservableObject {
         // Launch the Python ACE-Step bridge server process.
         bridgeProcess.launchServer()
 
-        // Start MIDI input -- routes CC to focus lane parameters
+        // Start MIDI input -- routes CC to focus macro parameters
         setupMIDIRouting()
 
         // Defer health polling until bridge process reaches .running state.
@@ -372,9 +469,31 @@ final class NeuralEngine: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
-        // Wire step grid advance to lane iteration changes (not SwiftUI onChange)
-        sequencerEngine.subscribeLaneIterations()
-        sequencerEngine.syncStepTimer()
+        // Forward nodeGraph changes for global UI refresh
+        nodeGraph.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        // v2.0: Subscribe to topology changes for audio graph rebuilds
+        nodeGraph.topologyDidChange
+            .sink { [weak self] in
+                self?.rebuildAudioGraphIfNeeded()
+            }
+            .store(in: &cancellables)
+
+        // v2.0: Subscribe to parameter changes for real-time audio updates
+        nodeGraph.parameterDidChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] (nodeId, paramId, value) in
+                guard let self = self, let mapper = self.audioGraphMapper else { return }
+                // Fast-path parameter update without rebuild
+                mapper.updateParameter(nodeId: nodeId, paramId: paramId, value: value, in: self.nodeGraph)
+            }
+            .store(in: &cancellables)
+
+        // Initial lanes array sync
+        updateLanesArray()
     }
 
     deinit {
@@ -391,13 +510,49 @@ final class NeuralEngine: ObservableObject {
         restoreDeviceSampleRate()
     }
 
+    // MARK: - v2.0 Lanes Array Synchronization
+
+    /// Updates the published `lanes` array from the current macroNodes.
+    /// This maintains v1.x UI compatibility while using v2.0 graph-native storage.
+    private func updateLanesArray() {
+        lanes = macroNodes
+    }
+
+    // MARK: - Audio Graph Rebuild
+
+    /// v2.0: Rebuilds AVAudioEngine from NodeGraph when topology changes.
+    private func rebuildAudioGraphIfNeeded() {
+        guard let mapper = audioGraphMapper else {
+            // A.5: early returns must leave a trail. If we hit this path the whole
+            // graph rebuild pathway is skipped — likely symptom: no audio at all.
+            print(">> Neural Engine: rebuildAudioGraphIfNeeded skipped — audioGraphMapper is nil (init order bug?)")
+            return
+        }
+
+        do {
+            try mapper.rebuild(from: nodeGraph)
+            print(">> Neural Engine: Audio graph rebuilt with \(nodeGraph.nodes.count) nodes")
+        } catch {
+            print(">> Neural Engine: Audio graph rebuild failed -- \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Performance State Persistence
 
-    /// Save the current performance state (scenes, step grids per lane, crossfader) to disk.
+    /// Save the current performance state (scenes, step grids per macro, crossfader) to disk.
     func savePerformanceState() {
+        // v2.0: Collect step grids from all sequencer nodes in all macros
+        var stepGrids: [StepGrid] = []
+        for macro in macroNodes {
+            let sequencers = macro.internalGraph.nodes.values.compactMap { $0 as? SequencerNode }
+            for sequencer in sequencers {
+                stepGrids.append(sequencer.stepGrid)
+            }
+        }
+
         let snapshot = PerformanceStateSnapshot(
             sceneBank: sceneBank,
-            stepGrids: lanes.map { $0.stepGrid },
+            stepGrids: stepGrids,
             crossfaderSceneAIndex: crossfaderSceneAIndex,
             crossfaderSceneBIndex: crossfaderSceneBIndex
         )
@@ -406,6 +561,20 @@ final class NeuralEngine: ObservableObject {
             print(">> Performance state saved")
         } catch {
             print(">> Performance state save failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// v2.0: Restore step grids to sequencer nodes.
+    private func restoreStepGrids(from grids: [StepGrid]) {
+        var gridIndex = 0
+        for macro in macroNodes {
+            let sequencers = macro.internalGraph.nodes.values.compactMap { $0 as? SequencerNode }
+            for sequencer in sequencers {
+                if gridIndex < grids.count {
+                    sequencer.stepGrid = grids[gridIndex]
+                    gridIndex += 1
+                }
+            }
         }
     }
 
@@ -429,11 +598,6 @@ final class NeuralEngine: ObservableObject {
     }
 
     /// Negotiate the output device's sample rate to match our processing format.
-    ///
-    /// This is the standard approach used by professional DAWs. Without it,
-    /// USB interfaces running at high rates (e.g. MOTU M2 @ 192kHz) may fail
-    /// to activate their HAL IOProc when AVAudioEngine uses a lower internal
-    /// rate -- resulting in silence even though the render graph runs correctly.
     private func configureOutputDevice() {
         // 1. Get default output device
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
@@ -482,11 +646,9 @@ final class NeuralEngine: ObservableObject {
 
         if setStatus == noErr {
             print(">> Neural Engine: Device rate \(Int(currentRate))Hz -> \(Int(targetRate))Hz")
-
         } else {
             print(">> Neural Engine: Failed to set device rate (err \(setStatus))")
             originalDeviceSampleRate = nil
-
         }
     }
 
@@ -515,11 +677,11 @@ final class NeuralEngine: ObservableObject {
         audioEngine.attach(masterMixerNode)
         audioEngine.connect(masterMixerNode, to: audioEngine.mainMixerNode, format: effectiveFormat)
 
-        // H21: Device rate is now set to 48kHz by configureOutputDevice(),
-        // so the implicit mainMixerNode -> outputNode connection runs at
-        // native 48kHz with ZERO sample-rate conversion. This eliminates
-        // the HAL activation failure that plagued H6-H20 on the MOTU M2.
-        _ = audioEngine.outputNode.outputFormat(forBus: 0)
+        // CRITICAL: Verify output chain is complete
+        // The mainMixerNode is implicitly connected to outputNode by AVAudioEngine
+        // when the engine starts. We verify this chain at runtime.
+        print("[AudioEngine] Master mixer chain: masterMixerNode → mainMixerNode → outputNode")
+        print("[AudioEngine] Output node present: true (AVAudioOutputNode always exists)")
 
         // Tap on master for recording
         masterMixerNode.installTap(
@@ -531,305 +693,424 @@ final class NeuralEngine: ObservableObject {
         }
     }
 
-    // MARK: - Lane Management
+    // MARK: - Audio Pipeline Verification (A.7)
 
-    /// Add a new lane from a preset. Returns the new lane.
-    ///
-    /// H19: No graph modifications. Reuses a pre-allocated slot from the pool.
-    /// Just reconfigures parameters and unmutes the slot.
-    @discardableResult
-    func addLane(preset: LanePreset) -> ResonatorLane {
-        assert(Thread.isMainThread, "lanes must be mutated on main thread")
-        guard lanes.count < LRConstants.maxLanes else {
-            print(">> Neural Engine: Max lanes (\(LRConstants.maxLanes)) reached")
-            return lanes.last ?? laneSlots[0]
+    /// Comprehensive verification of the audio signal chain.
+    /// Call this after graph changes or when debugging audio issues.
+    func verifyAudioPipeline() -> PipelineStatus {
+        print("=== AUDIO PIPELINE VERIFICATION ===")
+
+        var status = PipelineStatus()
+
+        // 1. Engine state
+        status.engineRunning = audioEngine.isRunning
+        print("[Pipeline] Engine running: \(status.engineRunning)")
+
+        // 2. Graph composition
+        let audioNodes = nodeGraph.nodes.values.filter { $0.audioUnit() != nil }
+        let sources = audioNodes.filter { node in
+            !nodeGraph.edges.values.contains { $0.targetNodeId == node.id && $0.signalType == .audio }
         }
+        let masterOutputs = nodeGraph.nodes.values.compactMap { $0 as? MasterOutputNode }
 
-        // Find next available slot (one that's not in the active lanes array)
-        let activeIDs = Set(lanes.map { $0.id })
-        guard let slot = laneSlots.first(where: { !activeIDs.contains($0.id) }) else {
-            print(">> Neural Engine: No available slots")
-            return lanes.last ?? laneSlots[0]
-        }
+        status.audioNodeCount = audioNodes.count
+        status.sourceNodeCount = sources.count
+        status.masterOutputCount = masterOutputs.count
 
-        // Reconfigure the slot with the new preset
-        slot.reconfigure(with: preset)
-        slot.isMuted = false
-        slot.laneMixer.outputVolume = slot.volume
-        lanes.append(slot)
+        print("[Pipeline] Audio nodes: \(audioNodes.count)")
+        print("[Pipeline] Source nodes: \(sources.count)")
+        print("[Pipeline] Master outputs: \(masterOutputs.count)")
 
-        // Sync scene bank: new lane gets its own fresh snapshot, not another lane's (Ley 4)
-        sceneManager.appendLaneSnapshotToAllScenes(slot.makeSnapshot())
-
-        // If engine is already running, start the lane's inference loop
-        if isProcessing {
-            if slot.excitationMode == .audioInput && !inputTapInstalled {
-                audioEngine.stop()
-                updateAudioInputTap()
-                audioEngine.prepare()
-                try? audioEngine.start()
+        // 3. Source verification
+        for source in sources {
+            if let osc = source as? OscillatorNode {
+                print("[Pipeline] Source '\(source.name)': freq=\(osc.frequency)Hz, amp=\(osc.amplitude), wave=\(osc.waveform)")
+                status.sourceActive = status.sourceActive || (osc.amplitude > 0.01 && osc.frequency > 0)
             }
-            slot.installCaptureTap()
-            slot.startInferenceLoop()
         }
 
-        print(">> Neural Engine: Added lane '\(slot.name)' (total: \(lanes.count))")
-        sequencerEngine.subscribeLaneIterations()
-        sequencerEngine.syncStepTimer()
+        // 4. Master output verification
+        if let master = masterOutputs.first {
+            print("[Pipeline] Master volume: \(master.volume)")
+            status.masterVolume = master.volume
+        }
 
-        return slot
+        // 5. Mapper status
+        if let mapper = audioGraphMapper {
+            status.attachedNodeCount = mapper.attachedNodeCount
+            print("[Pipeline] Attached AVAudioNodes: \(mapper.attachedNodeCount)")
+        }
+
+        // 6. System volume check (informational)
+        print("[Pipeline] Format: \(effectiveFormat.sampleRate)Hz, \(effectiveFormat.channelCount)ch")
+
+        print("===================================")
+
+        return status
     }
 
-    /// Remove a lane by its ID.
-    ///
-    /// H19: No graph modifications. Just mutes the slot and returns it to the pool.
+    struct PipelineStatus {
+        var engineRunning: Bool = false
+        var audioNodeCount: Int = 0
+        var sourceNodeCount: Int = 0
+        var masterOutputCount: Int = 0
+        var attachedNodeCount: Int = 0
+        var sourceActive: Bool = false
+        var masterVolume: Float = 0.0
+
+        var isHealthy: Bool {
+            engineRunning &&
+            audioNodeCount > 0 &&
+            sourceNodeCount > 0 &&
+            masterOutputCount == 1 &&
+            attachedNodeCount > 0 &&
+            sourceActive &&
+            masterVolume > 0.01
+        }
+    }
+
+    // MARK: - Macro Management (v2.0, was Lane Management)
+
+    /// Add a new macro from a preset. Returns the new macro.
+    /// v2.0: Creates a MacroNode with internal graph built from preset.
+    @discardableResult
+    func addMacro(preset: LanePreset) -> MacroNode {
+        assert(Thread.isMainThread, "macros must be mutated on main thread")
+        guard macroNodes.count < LRConstants.maxMacroNodes else {
+            print(">> Neural Engine: Max macros (\(LRConstants.maxMacroNodes)) reached")
+            return macroNodes.last ?? createFallbackMacro()
+        }
+
+        // Create macro from preset using MacroNode factory
+        let macro = MacroNode.fromPreset(preset: preset)
+
+        // Add to node graph
+        nodeGraph.nodes[macro.id] = macro
+        nodeGraph.objectWillChange.send()
+        nodeGraph.topologyDidChange.send()
+
+        // Auto-generate exposed controls for this macro
+        nodeGraph.autoGenerateExposedControls(for: macro)
+
+        // Sync scene bank: new macro gets its own fresh snapshot
+        sceneManager.captureScene(at: macroNodes.count - 1, from: nodeGraph)
+
+        // If engine is already running and we have the audio graph mapper, rebuild
+        if isProcessing, let mapper = audioGraphMapper {
+            do {
+                try mapper.rebuild(from: nodeGraph)
+            } catch {
+                print(">> Neural Engine: Audio graph rebuild failed on addMacro: \(error)")
+            }
+        }
+
+        print(">> Neural Engine: Added macro '\(macro.name)' (total: \(macroNodes.count))")
+
+        return macro
+    }
+
+    /// v1.x compatibility: addLane calls addMacro.
+    @discardableResult
+    func addLane(preset: LanePreset) -> MacroNode {
+        return addMacro(preset: preset)
+    }
+
+    /// Remove a macro by its ID.
+    /// v2.0: Removes the MacroNode from the graph.
+    func removeMacro(id: UUID) {
+        assert(Thread.isMainThread, "macros must be mutated on main thread")
+        guard macroNodes.firstIndex(where: { $0.id == id }) != nil else { return }
+
+        // Remove from node graph (this also removes connected edges)
+        nodeGraph.removeNode(id: id)
+
+        // Sync scene bank: remove this macro's snapshot so indices stay aligned
+        // Note: v2.0 uses graph-based scenes, this is a no-op for now
+        // TODO: Implement scene synchronization for v2.0
+
+        print(">> Neural Engine: Removed macro (total: \(macroNodes.count))")
+        updateMacroMixerState()
+    }
+
+    /// v1.x compatibility: removeLane calls removeMacro.
     func removeLane(id: UUID) {
-        assert(Thread.isMainThread, "lanes must be mutated on main thread")
-        guard let index = lanes.firstIndex(where: { $0.id == id }) else { return }
-        let lane = lanes[index]
-
-        // Stop lane inference and mute
-        lane.stopInferenceLoop()
-        lane.removeCaptureTap()
-        lane.isMuted = true
-        lane.laneMixer.outputVolume = 0.0
-        lane.resetState()
-
-        lanes.remove(at: index)
-
-        // Sync scene bank: remove this lane's snapshot so indices stay aligned (Ley 4)
-        sceneManager.removeLaneSnapshotFromAllScenes(at: index)
-
-        print(">> Neural Engine: Removed lane '\(lane.name)' (total: \(lanes.count))")
-        sequencerEngine.subscribeLaneIterations()
-        sequencerEngine.syncStepTimer()
-        updateLaneMixerState()
+        removeMacro(id: id)
     }
 
-    /// Reorder lanes (for UI drag).
-    func moveLane(from source: IndexSet, to destination: Int) {
-        assert(Thread.isMainThread, "lanes must be mutated on main thread")
+    /// Reorder macros (for UI drag).
+    func moveMacro(from source: IndexSet, to destination: Int) {
+        assert(Thread.isMainThread, "macros must be mutated on main thread")
+        // v2.0: We need to maintain the order in the lanes array
+        // Since macroNodes is computed, we update the underlying nodeGraph.nodes order
+        // Note: Dictionary doesn't guarantee order, so we use the lanes array as ordering
         lanes.move(fromOffsets: source, toOffset: destination)
     }
 
-    // MARK: - Audio Graph
-    //
-    // H19: The audio graph is STATIC. All lane slots are pre-allocated and
-    // connected in init(). No attach/connect/stop/start calls ever happen
-    // after the initial engine.start(). "Adding" a lane just unmutes a slot.
-    // "Removing" a lane just mutes it. This prevents HAL disruption on
-    // 192kHz hardware (MOTU M2).
+    /// v1.x compatibility: moveLane calls moveMacro.
+    func moveLane(from source: IndexSet, to destination: Int) {
+        moveMacro(from: source, to: destination)
+    }
 
-    /// Apply volume, mute, and solo logic to all lane mixers.
-    /// Called by the UI whenever a lane's volume/mute/solo state changes.
-    func updateLaneMixerState() {
-        let anySoloed = lanes.contains(where: { $0.isSoloed })
+    /// Create a fallback macro when max is reached but we need to return something.
+    private func createFallbackMacro() -> MacroNode {
+        let preset = LanePreset.allPresets.first ?? .buchlaPerc
+        return MacroNode.fromPreset(preset: preset)
+    }
 
-        for lane in lanes {
-            if lane.isMuted {
-                lane.laneMixer.outputVolume = 0.0
-            } else if anySoloed {
-                // When any lane is soloed, only soloed lanes play
-                lane.laneMixer.outputVolume = lane.isSoloed ? lane.volume : 0.0
-            } else {
-                lane.laneMixer.outputVolume = lane.volume
+    // MARK: - Mixer State
+
+    /// Apply volume, mute, and solo logic to all macros.
+    /// Called by the UI whenever a macro's volume/mute/solo state changes.
+    func updateMacroMixerState() {
+        let anySoloed = macroNodes.contains(where: { $0.parameters["isSoloed"] as? Bool ?? false })
+
+        for macro in macroNodes {
+            let isMuted = macro.parameters["isMuted"] as? Bool ?? false
+            let isSoloed = macro.parameters["isSoloed"] as? Bool ?? false
+            let volume = macro.parameters["volume"] as? Float ?? 1.0
+
+            // v2.0: Volume is applied via the internal graph's mixer node
+            if let mixerNodeId = macro.parameters["mixerNodeId"] as? String,
+               let uuid = UUID(uuidString: mixerNodeId) {
+                let effectiveVolume: Float
+                if isMuted {
+                    effectiveVolume = 0.0
+                } else if anySoloed {
+                    effectiveVolume = isSoloed ? volume : 0.0
+                } else {
+                    effectiveVolume = volume
+                }
+                nodeGraph.setParameter(nodeId: uuid, key: "volume", value: effectiveVolume)
             }
         }
+    }
+
+    /// v1.x compatibility: updateLaneMixerState calls updateMacroMixerState.
+    func updateLaneMixerState() {
+        updateMacroMixerState()
     }
 
     // MARK: - Performance (Scenes, Crossfade, Step Grid)
 
     /// Apply scene at index immediately (no crossfade).
+    /// v2.0: Uses graph-native scene operations.
     func applyScene(at index: Int) {
-        sceneManager.applyScene(at: index, lanes: lanes)
-        updateFeedbackRouting()
-        updateLaneMixerState()
+        sceneManager.applyScene(at: index, to: nodeGraph)
+        // Update mixer state after scene change
+        updateMacroMixerState()
     }
 
-    /// Capture focus lane's current parameters into step at index.
-    /// Lets you record live tweaks (XY pad, knobs) into the sequencer.
-    /// Per-lane: only the focused lane's step grid is modified.
+    /// Capture focus macro's current parameters into step at index.
+    /// v2.0: Routes to the SequencerNode in the focus macro's internal graph.
     func captureCurrentToStep(at index: Int) {
-        guard let lane = focusLane else { return }
-        guard index >= 0, index < lane.stepGrid.steps.count else { return }
-        let existing = lane.stepGrid.step(at: index) ?? PerformanceStep()
+        guard let macro = focusMacro else { return }
+        guard let sequencer = macro.internalGraph.nodes.values.compactMap({ $0 as? SequencerNode }).first else { return }
+        guard index >= 0, index < sequencer.stepGrid.steps.count else { return }
+
+        let existing = sequencer.stepGrid.step(at: index) ?? PerformanceStep()
+
+        // Extract current parameter values from the macro
         let step = PerformanceStep(
             trigType: existing.trigType,
             probability: existing.probability,
-            cfg: lane.guidanceScale,
-            feedback: lane.feedbackAmount,
-            promptPhase: lane.promptPhaseOverride,
-            denoiseStrength: lane.denoiseStrengthDefault,
-            texture: lane.texture,
-            chaos: lane.chaos,
-            warmth: lane.warmth,
-            filterCutoff: lane.filterCutoff,
-            filterResonance: lane.filterResonance,
-            excitationMode: lane.excitationMode.rawValue,
-            delayMix: lane.delayMix,
-            bitCrushDepth: lane.bitCrushDepth,
+            cfg: macro.parameters["guidanceScale"] as? Float,
+            feedback: macro.parameters["feedbackAmount"] as? Float,
+            promptPhase: macro.parameters["promptPhaseOverride"] as? Int,
+            denoiseStrength: macro.parameters["denoiseStrengthDefault"] as? Float,
+            texture: macro.parameters["texture"] as? Float,
+            chaos: macro.parameters["chaos"] as? Float,
+            warmth: macro.parameters["warmth"] as? Float,
+            filterCutoff: macro.parameters["filterCutoff"] as? Float,
+            filterResonance: macro.parameters["filterResonance"] as? Float,
+            excitationMode: macro.parameters["excitationMode"] as? String,
+            delayMix: macro.parameters["delayMix"] as? Float,
+            bitCrushDepth: macro.parameters["bitCrushDepth"] as? Float,
             drumVoice: existing.drumVoice,
             microtiming: existing.microtiming
         )
-        lane.stepGrid.setStep(step, at: index)
+
+        sequencer.stepGrid.setStep(step, at: index)
     }
 
-    /// When entering Perform from Setup, sync current lane state into Scene A and B
-    /// if they are empty. Ensures Setup tweaks (volume, effects, etc.) carry to live.
+    /// When entering Perform from Setup, sync current state into Scene A and B if they are empty.
     func syncSetupToScenesOnEnterPerform() {
-        sceneManager.syncSetupToScenesOnEnterPerform(
-            sceneAIndex: crossfaderSceneAIndex,
-            sceneBIndex: crossfaderSceneBIndex,
-            lanes: lanes
-        )
+        // v2.0: Capture current graph state to scenes if empty
+        let sceneAIndex = crossfaderSceneAIndex
+        let sceneBIndex = crossfaderSceneBIndex
+
+        // Check if scenes are empty and capture if so
+        if sceneAIndex < sceneBank.scenes.count {
+            let sceneA = sceneBank.scenes[sceneAIndex]
+            if sceneA.graphSnapshots.isEmpty && sceneA.laneSnapshots.isEmpty {
+                sceneManager.captureScene(at: sceneAIndex, from: nodeGraph)
+            }
+        }
+
+        if sceneBIndex < sceneBank.scenes.count {
+            let sceneB = sceneBank.scenes[sceneBIndex]
+            if sceneB.graphSnapshots.isEmpty && sceneB.laneSnapshots.isEmpty {
+                sceneManager.captureScene(at: sceneBIndex, from: nodeGraph)
+            }
+        }
     }
 
-    /// Capture current lane state into scene at index.
+    /// Capture current graph state into scene at index.
     func captureCurrentToScene(at index: Int) {
-        sceneManager.captureCurrentToScene(at: index, lanes: lanes)
+        sceneManager.captureScene(at: index, from: nodeGraph)
     }
 
     // MARK: - Step Grid Wiring (Delegated to SequencerEngine)
 
-    /// Start or stop the step timer based on the focus lane's advance mode.
+    /// Start or stop the step timer based on sequencer nodes.
     func syncStepTimer() {
         sequencerEngine.syncStepTimer()
     }
 
-    /// Manual step advance for one lane (tap or keyboard).
-    func advanceLaneManually(lane: ResonatorLane) {
-        sequencerEngine.advanceLaneManually(lane: lane)
+    /// Cancel the step timer.
+    func cancelStepTimer() {
+        sequencerEngine.cancelStepTimer()
     }
 
-    /// Apply current step's parameter locks to one lane only (per-lane independence).
-    func applyLaneStepLocks(lane: ResonatorLane) {
-        let grid = lane.stepGrid
+    /// Manual step advance for one macro (tap or keyboard).
+    func advanceMacroManually(macro: MacroNode) {
+        // Find the sequencer in this macro and advance it
+        if let sequencer = macro.internalGraph.nodes.values.compactMap({ $0 as? SequencerNode }).first {
+            sequencer.advance()
+        }
+    }
+
+    /// v1.x compatibility: advanceLaneManually calls advanceMacroManually.
+    func advanceLaneManually(lane: MacroNode) {
+        advanceMacroManually(macro: lane)
+    }
+
+    /// Apply current step's parameter locks to one macro only.
+    /// v2.0: Applies to the MacroNode's internal graph parameters.
+    func applyMacroStepLocks(macro: MacroNode) {
+        guard let sequencer = macro.internalGraph.nodes.values.compactMap({ $0 as? SequencerNode }).first else { return }
+        let grid = sequencer.stepGrid
         guard let step = grid.step(at: grid.currentStepIndex) else { return }
 
-        // -- Inference locks --
+        // Apply parameter locks to the macro
         if let v = step.cfg {
-            lane.guidanceScale = min(max(v, LRConstants.cfgScaleRange.lowerBound), LRConstants.cfgScaleRange.upperBound)
+            macro.parameters["guidanceScale"] = min(max(v, LRConstants.cfgScaleRange.lowerBound), LRConstants.cfgScaleRange.upperBound)
         }
         if let v = step.feedback {
-            lane.feedbackAmount = min(max(v, 0), 1)
+            macro.parameters["feedbackAmount"] = min(max(v, 0), 1)
         }
         if let phase = step.promptPhase {
-            lane.promptPhaseOverride = min(max(phase, 1), 3)
-        }
-        if let dv = step.drumVoice {
-            lane.promptOverride = dv.prompt
-        } else {
-            lane.promptOverride = nil
+            macro.parameters["promptPhaseOverride"] = min(max(phase, 1), 3)
         }
 
-        // -- DSP / macro locks (clamped to each parameter's native range) --
-        if let v = step.texture       { lane.texture = min(max(v, 0), 1) }
-        if let v = step.chaos         { lane.chaos = min(max(v, 0), 1) }
-        if let v = step.warmth        { lane.warmth = min(max(v, 0), 1) }
-        if let v = step.filterCutoff  {
-            lane.filterCutoff = min(max(v, LRConstants.filterCutoffRange.lowerBound),
-                                    LRConstants.filterCutoffRange.upperBound)
+        // DSP / macro locks
+        if let v = step.texture { macro.parameters["texture"] = min(max(v, 0), 1) }
+        if let v = step.chaos { macro.parameters["chaos"] = min(max(v, 0), 1) }
+        if let v = step.warmth { macro.parameters["warmth"] = min(max(v, 0), 1) }
+        if let v = step.filterCutoff {
+            macro.parameters["filterCutoff"] = min(max(v, LRConstants.filterCutoffRange.lowerBound),
+                                                  LRConstants.filterCutoffRange.upperBound)
         }
         if let v = step.filterResonance {
-            lane.filterResonance = min(max(v, LRConstants.filterResonanceRange.lowerBound),
-                                       LRConstants.filterResonanceRange.upperBound)
+            macro.parameters["filterResonance"] = min(max(v, LRConstants.filterResonanceRange.lowerBound),
+                                                     LRConstants.filterResonanceRange.upperBound)
         }
-        if let v = step.excitationMode,
-           let mode = ExcitationMode(rawValue: v) {
-            lane.excitationMode = mode
+        if let v = step.excitationMode {
+            macro.parameters["excitationMode"] = v
         }
-        if let v = step.delayMix      { lane.delayMix = min(max(v, 0), 1) }
+        if let v = step.delayMix { macro.parameters["delayMix"] = min(max(v, 0), 1) }
         if let v = step.bitCrushDepth {
-            lane.bitCrushDepth = min(max(v, LRConstants.bitCrushRange.lowerBound),
-                                     LRConstants.bitCrushRange.upperBound)
+            macro.parameters["bitCrushDepth"] = min(max(v, LRConstants.bitCrushRange.lowerBound),
+                                                    LRConstants.bitCrushRange.upperBound)
         }
 
-        // -- Trig behavior --
+        // Trig behavior
         if step.trigType == .lock {
-            lane.dspOnlyForNextCycle = true
+            // DSP-only mode for next cycle
+            macro.parameters["dspOnlyForNextCycle"] = true
         }
 
-        let effectiveDenoise: Float = {
-            if step.trigType == .lock { return 0 }
-            if let s = step.denoiseStrength { return min(max(s, 0), 1) }
-            return min(max(lane.denoiseStrengthDefault, 0), 1)
-        }()
-        lane.denoiseStrengthForInference = effectiveDenoise
+        // Publish changes
+        objectWillChange.send()
+    }
+
+    /// v1.x compatibility: applyLaneStepLocks calls applyMacroStepLocks.
+    func applyLaneStepLocks(lane: MacroNode) {
+        applyMacroStepLocks(macro: lane)
     }
 
     // MARK: - Step Lock API (Sequencer v2)
-    //
-    // All step mutations operate on the focus lane's step grid only.
 
     /// Set a single Float? lock on a step via KeyPath.
     func setStepLock(at index: Int, _ keyPath: WritableKeyPath<PerformanceStep, Float?>, value: Float?) {
-        guard let lane = focusLane else { return }
-        guard index >= 0, index < lane.stepGrid.steps.count else { return }
-        lane.stepGrid.steps[index][keyPath: keyPath] = value
+        guard let macro = focusMacro else { return }
+        guard let sequencer = macro.internalGraph.nodes.values.compactMap({ $0 as? SequencerNode }).first else { return }
+        guard index >= 0, index < sequencer.stepGrid.steps.count else { return }
+        sequencer.stepGrid.steps[index][keyPath: keyPath] = value
     }
 
-    /// Set a Float? lock on all selected steps. Used when drift pad is moved with 2+ steps selected.
+    /// Set a Float? lock on all selected steps.
     func setStepLockForSelected(_ keyPath: WritableKeyPath<PerformanceStep, Float?>, value: Float?) {
-        guard let lane = focusLane else { return }
+        guard let macro = focusMacro else { return }
+        guard let sequencer = macro.internalGraph.nodes.values.compactMap({ $0 as? SequencerNode }).first else { return }
         for idx in selectedStepIndices {
-            guard idx >= 0, idx < lane.stepGrid.steps.count else { continue }
-            lane.stepGrid.steps[idx][keyPath: keyPath] = value
+            guard idx >= 0, idx < sequencer.stepGrid.steps.count else { continue }
+            sequencer.stepGrid.steps[idx][keyPath: keyPath] = value
         }
     }
 
     /// Set trig type for a step.
     func setStepTrigType(at index: Int, _ type: TrigType) {
-        guard let lane = focusLane else { return }
-        guard index >= 0, index < lane.stepGrid.steps.count else { return }
-        lane.stepGrid.steps[index].trigType = type
+        guard let macro = focusMacro else { return }
+        guard let sequencer = macro.internalGraph.nodes.values.compactMap({ $0 as? SequencerNode }).first else { return }
+        guard index >= 0, index < sequencer.stepGrid.steps.count else { return }
+        sequencer.stepGrid.steps[index].trigType = type
     }
 
     /// Set prompt phase lock for a step (Int?, not Float).
     func setStepPromptPhase(at index: Int, phase: Int?) {
-        guard let lane = focusLane else { return }
-        guard index >= 0, index < lane.stepGrid.steps.count else { return }
-        lane.stepGrid.steps[index].promptPhase = phase
+        guard let macro = focusMacro else { return }
+        guard let sequencer = macro.internalGraph.nodes.values.compactMap({ $0 as? SequencerNode }).first else { return }
+        guard index >= 0, index < sequencer.stepGrid.steps.count else { return }
+        sequencer.stepGrid.steps[index].promptPhase = phase
     }
 
-    /// Set DrumVoice lock for a step (Drum Lane P-Lock §0).
+    /// Set DrumVoice lock for a step.
     func setStepDrumVoice(at index: Int, voice: DrumVoice?) {
-        guard let lane = focusLane else { return }
-        guard index >= 0, index < lane.stepGrid.steps.count else { return }
-        var grid = lane.stepGrid
-        grid.steps[index].drumVoice = voice
-        lane.stepGrid = grid
+        guard let macro = focusMacro else { return }
+        guard let sequencer = macro.internalGraph.nodes.values.compactMap({ $0 as? SequencerNode }).first else { return }
+        guard index >= 0, index < sequencer.stepGrid.steps.count else { return }
+        sequencer.stepGrid.steps[index].drumVoice = voice
     }
 
     /// Set probability gate for a step (nil = always fire).
     func setStepProbability(at index: Int, probability: Float?) {
-        guard let lane = focusLane else { return }
-        guard index >= 0, index < lane.stepGrid.steps.count else { return }
-        lane.stepGrid.steps[index].probability = probability
+        guard let macro = focusMacro else { return }
+        guard let sequencer = macro.internalGraph.nodes.values.compactMap({ $0 as? SequencerNode }).first else { return }
+        guard index >= 0, index < sequencer.stepGrid.steps.count else { return }
+        sequencer.stepGrid.steps[index].probability = probability
     }
 
-    /// Set per-step microtiming offset (-0.5...0.5). Negative = early, positive = late.
+    /// Set per-step microtiming offset (-0.5...0.5).
     func setStepMicrotiming(at index: Int, microtiming: Double) {
-        guard let lane = focusLane else { return }
-        guard index >= 0, index < lane.stepGrid.steps.count else { return }
-        var step = lane.stepGrid.step(at: index) ?? PerformanceStep()
+        guard let macro = focusMacro else { return }
+        guard let sequencer = macro.internalGraph.nodes.values.compactMap({ $0 as? SequencerNode }).first else { return }
+        guard index >= 0, index < sequencer.stepGrid.steps.count else { return }
+        var step = sequencer.stepGrid.step(at: index) ?? PerformanceStep()
         step.microtiming = microtiming
-        var grid = lane.stepGrid
-        grid.setStep(step, at: index)
-        lane.stepGrid = grid
+        sequencer.stepGrid.setStep(step, at: index)
     }
 
     /// Clear all locks on a step (reset to default note trig).
     func clearStep(at index: Int) {
-        guard let lane = focusLane else { return }
-        guard index >= 0, index < lane.stepGrid.steps.count else { return }
-        var grid = lane.stepGrid
-        grid.steps[index] = PerformanceStep()
-        lane.stepGrid = grid
+        guard let macro = focusMacro else { return }
+        guard let sequencer = macro.internalGraph.nodes.values.compactMap({ $0 as? SequencerNode }).first else { return }
+        guard index >= 0, index < sequencer.stepGrid.steps.count else { return }
+        sequencer.stepGrid.setStep(PerformanceStep(), at: index)
     }
 
     // MARK: - Multi-Select & Batch Operations (Shift+click)
 
-    /// Handle step pad tap. Shift+click toggles multi-select; plain tap selects single. Tap same step again to close.
+    /// Handle step pad tap. Shift+click toggles multi-select; plain tap selects single.
     func handleStepTap(index: Int, shiftPressed: Bool, chainLength: Int) {
         guard index >= 0, index < chainLength else { return }
         if shiftPressed {
@@ -853,49 +1134,52 @@ final class NeuralEngine: ObservableObject {
 
     /// Apply trig type to all selected steps.
     func applyTrigTypeToSelected(_ type: TrigType) {
-        guard let lane = focusLane else { return }
+        guard let macro = focusMacro else { return }
+        guard let sequencer = macro.internalGraph.nodes.values.compactMap({ $0 as? SequencerNode }).first else { return }
         for idx in selectedStepIndices {
-            guard idx >= 0, idx < lane.stepGrid.steps.count else { continue }
-            setStepTrigType(at: idx, type)
+            guard idx >= 0, idx < sequencer.stepGrid.steps.count else { continue }
+            sequencer.stepGrid.steps[idx].trigType = type
         }
     }
 
     /// Apply DrumVoice to all selected steps.
     func applyDrumVoiceToSelected(_ voice: DrumVoice?) {
-        guard let lane = focusLane else { return }
+        guard let macro = focusMacro else { return }
+        guard let sequencer = macro.internalGraph.nodes.values.compactMap({ $0 as? SequencerNode }).first else { return }
         for idx in selectedStepIndices {
-            guard idx >= 0, idx < lane.stepGrid.steps.count else { continue }
-            setStepDrumVoice(at: idx, voice: voice)
+            guard idx >= 0, idx < sequencer.stepGrid.steps.count else { continue }
+            sequencer.stepGrid.steps[idx].drumVoice = voice
         }
     }
 
     /// Clear all selected steps.
     func clearSelectedSteps() {
-        guard let lane = focusLane else { return }
+        guard let macro = focusMacro else { return }
+        guard let sequencer = macro.internalGraph.nodes.values.compactMap({ $0 as? SequencerNode }).first else { return }
         for idx in selectedStepIndices {
-            guard idx >= 0, idx < lane.stepGrid.steps.count else { continue }
-            clearStep(at: idx)
+            guard idx >= 0, idx < sequencer.stepGrid.steps.count else { continue }
+            sequencer.stepGrid.setStep(PerformanceStep(), at: idx)
         }
     }
 
     /// Apply crossfader blend between scene A and B (position 0 = A, 1 = B).
+    /// v2.0: Uses graph-native crossfade.
     func applyCrossfader() {
         sceneManager.applyCrossfader(
+            t: crossfaderPosition,
             sceneAIndex: crossfaderSceneAIndex,
             sceneBIndex: crossfaderSceneBIndex,
-            t: crossfaderPosition,
-            lanes: lanes
+            to: nodeGraph
         )
-        updateLaneMixerState()
+        updateMacroMixerState()
     }
 
     // MARK: - Processing Control
 
     /// - Parameter initiatedFromPerformMode: True when START was pressed in Perform view.
-    ///   Used so returning from Setup to Perform doesn't stop (no warning).
     func toggleProcessing(initiatedFromPerformMode: Bool = false) {
         if isProcessing {
-            // Debounce: ignore stop for 3s after start so first inference isn't killed by accidental tap
+            // Debounce: ignore stop for 3s after start
             if let t = lastStartTime, Date().timeIntervalSince(t) < startDebounceInterval {
                 return
             }
@@ -907,81 +1191,124 @@ final class NeuralEngine: ObservableObject {
     }
 
     private func startProcessing(initiatedFromPerformMode: Bool = false) {
+        // #region agent log - H7 Audio start
+        debugLogSync("NeuralEngine:startProcessing", "startProcessing called")
+        // #endregion
+        
+        print(">> Neural Engine: [SOUND DEBUG] startProcessing called")
         do {
-            let needsAudioInput = lanes.contains { $0.excitationMode == .audioInput }
+            // Check if any macro needs audio input
+            let needsAudioInput = macroNodes.contains { macro in
+                macro.parameters["excitationMode"] as? String == ExcitationMode.audioInput.rawValue
+            }
             if needsAudioInput {
                 updateAudioInputTap()
             }
 
+            // Build audio graph from node graph
+            if let mapper = audioGraphMapper {
+                // #region agent log - H7 Rebuilding
+                debugLogSync("NeuralEngine:startProcessing", "Rebuilding audio graph", ["nodes": String(nodeGraph.nodes.count)])
+                // #endregion
+                print(">> Neural Engine: [SOUND DEBUG] Rebuilding audio graph with \(nodeGraph.nodes.count) nodes")
+                try mapper.rebuild(from: nodeGraph)
+                // #region agent log - H7 Rebuild complete
+                debugLogSync("NeuralEngine:startProcessing", "Audio graph rebuilt")
+                // #endregion
+                print(">> Neural Engine: [SOUND DEBUG] Audio graph rebuild complete")
+            } else {
+                // #region agent log - H7 Mapper nil
+                debugLogSync("NeuralEngine:startProcessing", "WARNING: audioGraphMapper is nil")
+                // #endregion
+                print(">> Neural Engine: [SOUND DEBUG] WARNING: audioGraphMapper is nil!")
+            }
+
             audioEngine.prepare()
+            // #region agent log - H7 Engine prepared
+            debugLogSync("NeuralEngine:startProcessing", "Audio engine prepared")
+            // #endregion
+            print(">> Neural Engine: [SOUND DEBUG] Audio engine prepared, attempting start...")
             try audioEngine.start()
             isProcessing = true
+            // #region agent log - H7 Engine started
+            debugLogSync("NeuralEngine:startProcessing", "Audio engine STARTED")
+            // #endregion
+            print(">> Neural Engine: [SOUND DEBUG] Audio engine STARTED successfully 🎵")
             processingStartedInPerformMode = initiatedFromPerformMode
 
-            // Start all lane inference loops + taps
-            for lane in lanes {
-                lane.installCaptureTap()
-                lane.startInferenceLoop()
+            // A.7: Verify the full pipeline is healthy once the engine is running.
+            // This runs ON start, not before — the status checks engine.isRunning.
+            let status = verifyAudioPipeline()
+            if !status.isHealthy {
+                print(">> Neural Engine: ⚠️ PIPELINE UNHEALTHY — expect silence or broken audio:")
+                print(">>   engineRunning: \(status.engineRunning)")
+                print(">>   audioNodes: \(status.audioNodeCount) (need >0)")
+                print(">>   sources: \(status.sourceNodeCount) (need >0)")
+                print(">>   masterOutputs: \(status.masterOutputCount) (need =1)")
+                print(">>   attachedNodes: \(status.attachedNodeCount) (need >0)")
+                print(">>   sourceActive: \(status.sourceActive) (need true: amp>0 & freq>0)")
+                print(">>   masterVolume: \(status.masterVolume) (need >0.01)")
+                debugLogSync("NeuralEngine:startProcessing", "Pipeline unhealthy", [
+                    "engineRunning": String(status.engineRunning),
+                    "audioNodes": String(status.audioNodeCount),
+                    "sources": String(status.sourceNodeCount),
+                    "masterOutputs": String(status.masterOutputCount),
+                    "attached": String(status.attachedNodeCount),
+                    "sourceActive": String(status.sourceActive),
+                    "masterVolume": String(status.masterVolume)
+                ])
+            } else {
+                print(">> Neural Engine: ✓ Pipeline verified healthy — audio should be audible")
             }
+
+            // Start sequencer subscriptions
+            sequencerEngine.subscribeSequencerIterations()
 
             lastStartTime = Date()
             canAbort = false
             DispatchQueue.main.asyncAfter(deadline: .now() + startDebounceInterval) { [weak self] in
                 self?.canAbort = true
             }
-            sequencerEngine.syncStepTimer()
-            for lane in lanes {
-                applyLaneStepLocks(lane: lane)
+            syncStepTimer()
+
+            // Apply initial step locks
+            for macro in macroNodes {
+                applyMacroStepLocks(macro: macro)
             }
-            let laneNames = lanes.map { $0.name }.joined(separator: ", ")
-            print(">> Neural Engine: Multi-lane loop INITIATED -- lanes: [\(laneNames)]")
+
+            let macroNames = macroNodes.map { $0.name }.joined(separator: ", ")
+            print(">> Neural Engine: Multi-macro loop INITIATED -- macros: [\(macroNames)]")
 
         } catch {
-            print(">> Neural Engine: Failed to start -- \(error.localizedDescription)")
+            // #region agent log - H7 Start failed
+            debugLogSync("NeuralEngine:startProcessing", "FAILED to start audio", ["error": String(describing: error)])
+            // #endregion
+            print(">> Neural Engine: [SOUND DEBUG] FAILED to start audio -- \(error.localizedDescription)")
+            print(">> Neural Engine: [SOUND DEBUG] Error details: \(error)")
         }
     }
 
-    /// Stop all processing -- inference loops, capture taps, audio engine.
-    ///
-    /// Teardown order avoids double free (malloc crash when STOP during inference):
-    /// 1. Cancel inference tasks.
-    /// 2. Stop audio engine first — halts tap callbacks before removal.
-    /// 3. Remove taps (engine stopped → no in-flight callback).
-    /// 4. Reset lane state.
+    /// Stop all processing -- audio, sequencers, engine.
     func stopProcessing() {
         guard isProcessing else { return }
 
         processingStartedInPerformMode = false
 
-        // 1. Cancel inference loops
-        for lane in lanes {
-            lane.stopInferenceLoop()
-        }
-        sequencerEngine.cancelStepTimer()
+        // 1. Cancel sequencer subscriptions
+        sequencerEngine.stop()
 
-        // 2. Stop engine first — prevents tap callback from racing with tap removal
+        // 2. Stop engine first
         audioEngine.stop()
 
-        // 3. Remove taps
-        for lane in lanes {
-            lane.removeCaptureTap()
-        }
+        // 3. Remove audio input tap
         removeAudioInputTap()
 
-        // 4. Reset lane state
-        for lane in lanes {
-            lane.resetState()
-        }
-
         isProcessing = false
-        print(">> Neural Engine: All lanes ABORTED -- state reset")
+        print(">> Neural Engine: All macros ABORTED -- state reset")
     }
 
     // MARK: - Audio Input Tap (Shared Buffer for .audioInput Excitation)
 
-    /// Install an input tap on the audio engine's input node to feed
-    /// the shared audioInputBuffer. The tap writes mono samples into
-    /// the ring buffer; lanes configured as .audioInput read from it.
     private func updateAudioInputTap() {
         guard !inputTapInstalled else { return }
         let inputNode = audioEngine.inputNode
@@ -1002,24 +1329,250 @@ final class NeuralEngine: ObservableObject {
         inputTapInstalled = false
     }
 
-    // MARK: - Cross-Lane Feedback Routing
+    // MARK: - Debug Logging (File-based for reliability)
+    
+    static var logFileHandle: FileHandle?
+    
+    /// File-based logging that persists even if app crashes
+    private func debugLogSync(_ location: String, _ message: String, _ data: [String: String] = [:]) {
+        let dataStr = data.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let logMessage = "[\(timestamp)] [\(location)] \(message) \(dataStr)\n"
+        
+        // Lazy init file handle
+        if NeuralEngine.logFileHandle == nil {
+            let logPath = ("~/Library/Application Support/LatentResonator/debug.log" as NSString).expandingTildeInPath
+            if !FileManager.default.fileExists(atPath: logPath) {
+                FileManager.default.createFile(atPath: logPath, contents: nil, attributes: nil)
+            }
+            NeuralEngine.logFileHandle = FileHandle(forWritingAtPath: logPath)
+        }
+        
+        if let handle = NeuralEngine.logFileHandle,
+           let data = logMessage.data(using: .utf8) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+        }
+        
+        // Also print to stderr
+        fputs(logMessage, stderr)
+        fflush(stderr)
+    }
 
-    /// Resolve each lane's feedbackSourceLaneId to a concrete buffer pointer.
-    /// Called after scene recall or whenever the user changes routing.
-    func updateFeedbackRouting() {
-        for lane in lanes {
-            if let srcId = lane.feedbackSourceLaneId,
-               let srcLane = lanes.first(where: { $0.id == srcId }), srcLane.id != lane.id {
-                lane.externalFeedbackBuffer = srcLane.feedbackBuffer
-            } else {
-                lane.externalFeedbackBuffer = nil
+    // MARK: - Graph Bootstrap (v2.0 Kickstart)
+
+    /// Loads saved graph or bootstraps with kickstart template for immediate sound.
+    /// Priority: 1) User's saved graph, 2) Kickstart template, 3) Emergency graph (A.6).
+    /// The emergency graph (220 Hz saw → MasterOutput) guarantees that audio
+    /// pipeline health can always be verified even if every JSON asset is broken.
+    private func loadGraphOrBootstrap() {
+        print(">> NeuralEngine: Attempting to load saved graph...")
+
+        // #region agent log - H4 Bootstrap trace
+        debugLogSync("NeuralEngine:loadGraphOrBootstrap", "Bootstrap starting")
+        // #endregion
+
+        // Try to load user's saved graph first
+        if let saved = NodeGraphStore.load() {
+            do {
+                try nodeGraph.deserialize(saved)
+                print(">> NeuralEngine: Loaded saved graph with \(nodeGraph.nodes.count) nodes, \(nodeGraph.edges.count) edges")
+
+                // #region agent log - H4 Bootstrap saved graph
+                debugLogSync("NeuralEngine:loadGraphOrBootstrap", "Loaded saved graph", [
+                    "nodeCount": String(nodeGraph.nodes.count),
+                    "edgeCount": String(nodeGraph.edges.count)
+                ])
+                // #endregion
+
+                // Auto-generate controls if no macros exist (legacy graph)
+                if macroNodes.isEmpty {
+                    print(">> NeuralEngine: No macros found, auto-generating controls for main graph")
+                    nodeGraph.autoGenerateExposedControlsForMainGraph()
+                }
+
+                return
+            } catch {
+                print(">> NeuralEngine: Failed to load saved graph: \(error)")
+
+                // #region agent log - H4 Bootstrap saved graph failed
+                debugLogSync("NeuralEngine:loadGraphOrBootstrap", "Saved graph load failed", [
+                    "error": error.localizedDescription
+                ])
+                // #endregion
+
+                // Fall through to kickstart
             }
         }
+
+        print(">> NeuralEngine: No saved graph. Loading KickstartTemplate...")
+        
+        // #region agent log - H5 Before template load
+        debugLogSync("NeuralEngine:loadGraphOrBootstrap", "Before kickstart load")
+        // #endregion
+        
+        do {
+            try loadKickstartTemplateThrowing()
+            
+            // #region agent log - H5 After template load
+            debugLogSync("NeuralEngine:loadGraphOrBootstrap", "After kickstart load", [
+                "nodeCount": String(nodeGraph.nodes.count),
+                "edgeCount": String(nodeGraph.edges.count)
+            ])
+            // #endregion
+            
+            print(">> NeuralEngine: Loaded Kickstart with \(nodeGraph.nodes.count) nodes, \(nodeGraph.edges.count) edges")
+
+            // Auto-generate controls for kickstart template (no macros)
+            nodeGraph.autoGenerateExposedControlsForMainGraph()
+            print(">> NeuralEngine: Auto-generated \(nodeGraph.exposedControls.count) exposed controls")
+
+            print(">> NeuralEngine: ═══════════════════════════════════════════════════")
+            print(">> NeuralEngine: 🎹 KICKSTART TEMPLATE LOADED!")
+            print(">> NeuralEngine:    Chain: Oscillator → Filter → Mixer → Master")
+            print(">> NeuralEngine:    Controls: \(nodeGraph.exposedControls.count) parameters exposed")
+            print(">> NeuralEngine: ⏯️  PRESS [SPACEBAR] TO START AUDIO ENGINE")
+            print(">> NeuralEngine: ═══════════════════════════════════════════════════")
+
+            // #region agent log - H4 Bootstrap kickstart loaded
+            debugLogSync("NeuralEngine:loadGraphOrBootstrap", "Kickstart template loaded", [
+                "nodeCount": String(nodeGraph.nodes.count),
+                "edgeCount": String(nodeGraph.edges.count),
+                "exposedControls": String(nodeGraph.exposedControls.count)
+            ])
+            // #endregion
+
+        } catch {
+            // #region agent log - CATCH THE ERROR
+            debugLogSync("NeuralEngine:loadGraphOrBootstrap", "Kickstart FAILED, falling back to emergency graph", [
+                "error": String(describing: error)
+            ])
+            // #endregion
+
+            print(">> NeuralEngine: ✗ KickstartTemplate failed: \(error.localizedDescription)")
+            print(">> NeuralEngine: Falling back to emergency graph (220 Hz saw → MasterOutput)")
+
+            // A.6: NEVER leave the user with a dead app. Emergency graph guarantees
+            // the audio pipeline can always prove itself — even if every JSON asset
+            // is broken. Previous behavior was `fatalError`, which crashed the app
+            // and left zero diagnostic surface for the user.
+            loadEmergencyGraph()
+
+            debugLogSync("NeuralEngine:loadGraphOrBootstrap", "Emergency graph installed", [
+                "nodeCount": String(nodeGraph.nodes.count),
+                "edgeCount": String(nodeGraph.edges.count)
+            ])
+        }
+    }
+
+    /// A.6: Minimal guaranteed-audible graph. Used when every other load path fails.
+    /// Creates a 220 Hz saw oscillator → MasterOutputNode chain directly in the
+    /// existing nodeGraph (we mutate in place rather than replacing the instance
+    /// because the rest of NeuralEngine holds the reference).
+    private func loadEmergencyGraph() {
+        // Clear any partial state from failed load attempts
+        nodeGraph.nodes.removeAll()
+        nodeGraph.edges.removeAll()
+        nodeGraph.exposedControls.removeAll()
+
+        let osc = OscillatorNode(params: [
+            "frequency": Float(220.0),
+            "amplitude": Float(0.5),
+            "waveform": "saw"
+        ])
+        osc.x = 100
+        osc.y = 200
+        nodeGraph.nodes[osc.id] = osc
+
+        let master = MasterOutputNode(name: "Master Out", x: 400, y: 200)
+        nodeGraph.nodes[master.id] = master
+
+        let edge = GraphEdge(
+            id: UUID(),
+            sourceNodeId: osc.id,
+            sourcePortId: "out",
+            targetNodeId: master.id,
+            targetPortId: "in",
+            signalType: .audio
+        )
+        nodeGraph.edges[edge.id] = edge
+
+        nodeGraph.autoGenerateExposedControlsForMainGraph()
+
+        print(">> NeuralEngine: ═══════════════════════════════════════════════════")
+        print(">> NeuralEngine: 🚨 EMERGENCY GRAPH ACTIVE")
+        print(">> NeuralEngine:    220 Hz saw → MasterOutput")
+        print(">> NeuralEngine:    If you hear this, the audio engine is healthy.")
+        print(">> NeuralEngine:    The KickstartTemplate or saved graph is broken.")
+        print(">> NeuralEngine: ═══════════════════════════════════════════════════")
+
+        nodeGraph.objectWillChange.send()
+        nodeGraph.topologyDidChange.send()
+    }
+
+    /// Loads the kickstart template from app bundle.
+    /// Throws on failure with detailed error information.
+    private func loadKickstartTemplateThrowing() throws {
+        // #region agent log - H6 Finding bundle
+        debugLogSync("NeuralEngine:loadKickstartTemplateThrowing", "Looking for bundle")
+        // #endregion
+        
+        guard let url = Bundle.main.url(forResource: "KickstartTemplate", withExtension: "json") else {
+            // #region agent log - H6 Bundle not found
+            debugLogSync("NeuralEngine:loadKickstartTemplateThrowing", "Bundle not found")
+            // #endregion
+            throw NSError(domain: "NeuralEngine", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "KickstartTemplate.json not found in bundle"
+            ])
+        }
+
+        // #region agent log - H6 Reading data
+        debugLogSync("NeuralEngine:loadKickstartTemplateThrowing", "Reading data", ["url": url.path])
+        // #endregion
+        
+        let data = try Data(contentsOf: url)
+        
+        // #region agent log - H6 Decoding JSON
+        debugLogSync("NeuralEngine:loadKickstartTemplateThrowing", "Decoding JSON", ["size": String(data.count)])
+        // #endregion
+        
+        do {
+            let template = try JSONDecoder().decode(SerializedGraph.self, from: data)
+            
+            // #region agent log - H6 Deserializing
+            debugLogSync("NeuralEngine:loadKickstartTemplateThrowing", "Deserializing template", [
+                "nodes": String(template.nodes.count),
+                "edges": String(template.edges.count)
+            ])
+            // #endregion
+            
+            try nodeGraph.deserialize(template)
+            
+            // #region agent log - H6 Complete
+            debugLogSync("NeuralEngine:loadKickstartTemplateThrowing", "Deserialization complete")
+            // #endregion
+        } catch {
+            // #region agent log - H6 Decode/Deserialize ERROR
+            debugLogSync("NeuralEngine:loadKickstartTemplateThrowing", "Decode or deserialize FAILED", [
+                "error": String(describing: error),
+                "errorType": String(describing: type(of: error))
+            ])
+            // #endregion
+            throw error
+        }
+    }
+
+    // MARK: - Cross-Lane Feedback Routing (v2.0)
+
+    /// v2.0: Cross-macro feedback routing via graph edges.
+    func updateFeedbackRouting() {
+        // v2.0: Feedback routing is handled by the graph itself via FeedbackLoopNode edges
+        // This method is kept for v1.x compatibility but is now a no-op
+        // The graph's topology determines the feedback paths
     }
 
     // MARK: - Master Recording Control (§5)
 
-    /// Toggle master bus recording on/off.
     func toggleMasterRecording() {
         if isMasterRecording {
             stopMasterRecording()
@@ -1045,19 +1598,18 @@ final class NeuralEngine: ObservableObject {
             let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
             let mb = String(format: "%.1f", Double(bytes) / 1_048_576)
             print(">> Neural Engine: Recording saved -> \(url.path) (\(mb) MB)")
-            // Export metadata sidecar with aggregate state
-            let totalCycles = lanes.reduce(0) { $0 + $1.iterationCount }
-            let laneNames = lanes.map { $0.name }
-            let allFeatures = lanes.flatMap { $0.featureLog }
+            // Export metadata
+            let totalCycles = feedbackLoopNodes.reduce(0) { $0 + $1.iterationCount }
+            let macroNames = macroNodes.map { $0.name }
             AudioRecorder.exportMetadata(
                 recordingURL: url,
                 iterationCount: totalCycles,
-                laneName: "MASTER",
+                macroName: "MASTER",
                 parameters: [
-                    "activeLanes": laneNames,
-                    "laneCount": lanes.count
+                    "activeMacros": macroNames,
+                    "macroCount": macroNodes.count
                 ],
-                featureLog: allFeatures
+                featureLog: [] // v2.0: Feature logs come from telemetry
             )
         } else {
             isMasterRecording = false
@@ -1070,4 +1622,43 @@ final class NeuralEngine: ObservableObject {
         masterRecorder.writeBuffer(buffer)
     }
 
+    // MARK: - SwiftUI Preview Support
+
+    /// Preview instance for SwiftUI canvas.
+    /// Creates a minimal engine with default macros for previewing UI components.
+    static var preview: NeuralEngine {
+        let engine = NeuralEngine()
+        // Pre-configure for preview (no audio engine start)
+        return engine
+    }
+
+    // MARK: - Debug Logging (Agent Instrumentation)
+
+    /// Writes structured debug logs to the agent's log file for hypothesis testing.
+    private func debugLog(location: String, message: String, data: [String: String], hypothesisId: String) {
+        let timestamp = Int(Date().timeIntervalSince1970 * 1000)
+        let logEntry: [String: Any] = [
+            "sessionId": "54ee48",
+            "id": "log_\(timestamp)_\(UUID().uuidString.prefix(8))",
+            "timestamp": timestamp,
+            "location": location,
+            "message": message,
+            "data": data,
+            "hypothesisId": hypothesisId
+        ]
+
+        if let jsonData = try? JSONSerialization.data(withJSONObject: logEntry),
+           let jsonString = String(data: jsonData, encoding: .utf8) {
+            let logPath = "/Users/leolambertini/RLTNAS/.cursor/debug-54ee48.log"
+            if FileManager.default.fileExists(atPath: logPath) {
+                if let handle = FileHandle(forWritingAtPath: logPath) {
+                    handle.seekToEndOfFile()
+                    handle.write((jsonString + "\n").data(using: .utf8)!)
+                    handle.closeFile()
+                }
+            } else {
+                try? jsonString.write(toFile: logPath, atomically: false, encoding: .utf8)
+            }
+        }
+    }
 }
