@@ -26,43 +26,39 @@ final class LadderFilterNode: BaseGraphNode {
     }
     
     // MARK: - State
-    
-    private var ladderStage: (Float, Float, Float, Float) = (0, 0, 0, 0)
-    private var sourceNode: AVAudioSourceNode?
-    private let sampleRate: Double
-    
+
+    /// Independent ladder state per channel — true stereo. Sharing state
+    /// across channels would couple their decay characteristics and lose
+    /// the stereo image of the input signal.
+    private var ladderStageL: (Float, Float, Float, Float) = (0, 0, 0, 0)
+    private var ladderStageR: (Float, Float, Float, Float) = (0, 0, 0, 0)
+
     // MARK: - Smoothing
-    
+
     private var smoothedCutoff: Float = LRConstants.filterCutoffDefault
     private var smoothedResonance: Float = LRConstants.filterResonanceDefault
-    
+
     // MARK: - Init
-    
-    init(id: UUID = UUID(), params: [String: Any] = [:], sampleRate: Double = LRConstants.sampleRate) {
-        self.sampleRate = sampleRate
-        
+
+    init(id: UUID = UUID(), params: [String: Any] = [:]) {
         super.init(
             id: id,
             nodeType: "ladder_filter",
             category: .effect,
             displayName: "LADDER FILTER"
         )
-        
+
         for (key, value) in params {
             parameters[key] = value
         }
-        
-        createSourceNode()
     }
-    
+
     required init(from decoder: Decoder) throws {
-        self.sampleRate = LRConstants.sampleRate
         try super.init(from: decoder)
-        createSourceNode()
     }
-    
+
     // MARK: - Ports
-    
+
     override var ports: [NodePort] {
         [
             NodePort(id: "in", label: "IN", signalType: .audio, direction: .input),
@@ -71,73 +67,47 @@ final class LadderFilterNode: BaseGraphNode {
             NodePort(id: "out", label: "OUT", signalType: .audio, direction: .output)
         ]
     }
-    
-    // MARK: - Audio Unit
-    
-    override func audioUnit() -> AVAudioNode? {
-        return sourceNode
-    }
-    
-    private func createSourceNode() {
-        let format = AVAudioFormat(
-            standardFormatWithSampleRate: sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
-        
-        sourceNode = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
-            guard let self = self else { return noErr }
-            
-            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            guard let buffer = ablPointer.first else { return noErr }
-            
-            let data = buffer.mData!.assumingMemoryBound(to: Float.self)
-            
-            self.processFilter(data, frameCount: Int(frameCount))
-            
-            return noErr
-        }
-    }
-    
+
     // MARK: - Processing
-    
-    private func processFilter(_ data: UnsafeMutablePointer<Float>, frameCount: Int) {
-        // Smooth parameters
-        let alpha: Float = 0.05
-        smoothedCutoff += alpha * (cutoff - smoothedCutoff)
-        smoothedResonance += alpha * (resonance - smoothedResonance)
-        
-        guard smoothedCutoff < 19900.0 || smoothedResonance > 0.01 else { return }
-        
-        let sr = Float(sampleRate)
-        let g = tanf(.pi * min(smoothedCutoff, sr * 0.49) / sr)
-        let gComp = g / (1.0 + g)
-        let k = 4.0 * smoothedResonance
-        
-        var s0 = ladderStage.0
-        var s1 = ladderStage.1
-        var s2 = ladderStage.2
-        var s3 = ladderStage.3
-        
+
+    /// Single-channel TPT ladder filter (Zavalishin §4). The state tuple is
+    /// passed `inout` so the `render` method can hold separate state per
+    /// channel without duplicating the inner DSP loop.
+    @inline(__always)
+    fileprivate func processChannel(
+        _ data: UnsafeMutablePointer<Float>,
+        frameCount: Int,
+        sampleRate: Double,
+        gComp: Float,
+        feedbackK: Float,
+        state: inout (Float, Float, Float, Float),
+        mode: FilterMode
+    ) {
+        var s0 = state.0
+        var s1 = state.1
+        var s2 = state.2
+        var s3 = state.3
+
         for i in 0..<frameCount {
             let input = data[i]
-            let feedback = input - k * s3
-            
+            let feedback = input - feedbackK * s3
+
             let v0 = gComp * (feedback - s0)
             let t0 = v0 + s0
             s0 = t0 + v0
-            
+
             let v1 = gComp * (t0 - s1)
             let t1 = v1 + s1
             s1 = t1 + v1
-            
+
             let v2 = gComp * (t1 - s2)
             let t2 = v2 + s2
             s2 = t2 + v2
-            
+
             let v3 = gComp * (t2 - s3)
             let t3 = v3 + s3
             s3 = t3 + v3
-            
+
             switch mode {
             case .lowpass:
                 data[i] = t3
@@ -147,8 +117,86 @@ final class LadderFilterNode: BaseGraphNode {
                 data[i] = t1 - t3
             }
         }
-        
-        ladderStage = (s0, s1, s2, s3)
+
+        state = (s0, s1, s2, s3)
+    }
+}
+
+// MARK: - LadderFilterNode + DSPNode
+
+extension LadderFilterNode: GraphNodeDSPProvider, DSPNode {
+
+    var nodeId: UUID { id }
+
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double,
+        controls: [String: Float]
+    ) {
+        // 1-pole parameter smoothing (slide~ equivalent)
+        let alpha: Float = 0.05
+        smoothedCutoff += alpha * (cutoff - smoothedCutoff)
+        smoothedResonance += alpha * (resonance - smoothedResonance)
+
+        // No input → emit silence. (Would happen if the user disconnects
+        // the input cable; we don't want to filter the previous buffer
+        // forever.)
+        guard let inputBuffer = inputs.first else {
+            for i in 0..<frameCount {
+                output.left[i] = 0
+                output.right[i] = 0
+            }
+            return
+        }
+
+        // Copy input into output, then run the filter in-place on the
+        // output buffers. Two channels, two states.
+        for i in 0..<frameCount {
+            output.left[i] = inputBuffer.left[i]
+            output.right[i] = inputBuffer.right[i]
+        }
+
+        // Bypass: filter wide open and no resonance — pass through unchanged.
+        if smoothedCutoff >= 19900.0 && smoothedResonance < 0.01 {
+            return
+        }
+
+        // TPT coefficients (computed once per render block)
+        let sr = Float(sampleRate)
+        let g = tanf(.pi * min(smoothedCutoff, sr * 0.49) / sr)
+        let gComp = g / (1.0 + g)
+        let k = 4.0 * smoothedResonance
+        let m = mode
+
+        processChannel(
+            output.left,
+            frameCount: frameCount,
+            sampleRate: sampleRate,
+            gComp: gComp,
+            feedbackK: k,
+            state: &ladderStageL,
+            mode: m
+        )
+        processChannel(
+            output.right,
+            frameCount: frameCount,
+            sampleRate: sampleRate,
+            gComp: gComp,
+            feedbackK: k,
+            state: &ladderStageR,
+            mode: m
+        )
+    }
+
+    func reset() {
+        ladderStageL = (0, 0, 0, 0)
+        ladderStageR = (0, 0, 0, 0)
+        smoothedCutoff = cutoff
+        smoothedResonance = resonance
     }
 }
 

@@ -77,6 +77,11 @@
 		ACB1FEC8ED7DB4B1E86987BB /* PatternChain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A25E2541D797C4F4789EBDEA /* PatternChain.swift */; };
 		AF8E7453558044283BEF73AA /* MultiLaneTemplate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2402AC46DA2415C87AFEDD /* MultiLaneTemplate.swift */; };
 		ADA5A609312AC4D7981F5223 /* TemplateBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADD4C71833C3F453F8D83329 /* TemplateBrowserView.swift */; };
+		ENG3000000000000AB000001 /* AudioBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = ENG2000000000000AB000001 /* AudioBuffer.swift */; };
+		ENG3000000000000BP000001 /* BufferPool.swift in Sources */ = {isa = PBXBuildFile; fileRef = ENG2000000000000BP000001 /* BufferPool.swift */; };
+		ENG3000000000000DN000001 /* DSPNode.swift in Sources */ = {isa = PBXBuildFile; fileRef = ENG2000000000000DN000001 /* DSPNode.swift */; };
+		ENG3000000000000EP000001 /* ExecutionPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = ENG2000000000000EP000001 /* ExecutionPlan.swift */; };
+		ENG3000000000000GE000001 /* GraphAudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = ENG2000000000000GE000001 /* GraphAudioEngine.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -167,6 +172,11 @@
 		AA2402AC46DA2415C87AFEDD /* MultiLaneTemplate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MultiLaneTemplate.swift; path = LatentResonator/Config/MultiLaneTemplate.swift; sourceTree = "<group>"; };
 		ADD4C71833C3F453F8D83329 /* TemplateBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TemplateBrowserView.swift; path = LatentResonator/Views/TemplateBrowserView.swift; sourceTree = "<group>"; };		98B898FD671D4FE6A4976C6F /* KickstartTemplate.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "KickstartTemplate.json"; sourceTree = "<group>"; };
 
+		ENG2000000000000AB000001 /* AudioBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioBuffer.swift; sourceTree = "<group>"; };
+		ENG2000000000000BP000001 /* BufferPool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BufferPool.swift; sourceTree = "<group>"; };
+		ENG2000000000000DN000001 /* DSPNode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DSPNode.swift; sourceTree = "<group>"; };
+		ENG2000000000000EP000001 /* ExecutionPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutionPlan.swift; sourceTree = "<group>"; };
+		ENG2000000000000GE000001 /* GraphAudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GraphAudioEngine.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -317,6 +327,7 @@
 				4F393EFCCBF84376AB4E8486 /* ImplicitGraphBuilder.swift */,
 				EXT0000002 /* CGPoint+Codable.swift */,
 				799A66350529985900000000 /* Nodes */,
+				ENG10000000000000000ENG1 /* Engine */,
 			);
 			path = Graph;
 			sourceTree = "<group>";
@@ -364,6 +375,18 @@
 				FC00000004 /* FiraCode-Bold.ttf */,
 			);
 			path = Fonts;
+			sourceTree = "<group>";
+		};
+		ENG10000000000000000ENG1 /* Engine */ = {
+			isa = PBXGroup;
+			children = (
+				ENG2000000000000AB000001 /* AudioBuffer.swift */,
+				ENG2000000000000BP000001 /* BufferPool.swift */,
+				ENG2000000000000DN000001 /* DSPNode.swift */,
+				ENG2000000000000EP000001 /* ExecutionPlan.swift */,
+				ENG2000000000000GE000001 /* GraphAudioEngine.swift */,
+			);
+			path = Engine;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -513,6 +536,11 @@
 				DAE73F65B4C9C0F200000000 /* PatchViewCoordinator.swift in Sources */,
 				A1A21B6C3435A87700000000 /* PerformLayoutEngine.swift in Sources */,
 				B2C34D7E1234A56700000000 /* MacroBindingsPanel.swift in Sources */,
+				ENG3000000000000AB000001 /* AudioBuffer.swift in Sources */,
+				ENG3000000000000BP000001 /* BufferPool.swift in Sources */,
+				ENG3000000000000DN000001 /* DSPNode.swift in Sources */,
+				ENG3000000000000EP000001 /* ExecutionPlan.swift in Sources */,
+				ENG3000000000000GE000001 /* GraphAudioEngine.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
