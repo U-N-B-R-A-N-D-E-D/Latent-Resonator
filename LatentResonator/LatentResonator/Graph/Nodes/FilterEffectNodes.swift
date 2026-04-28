@@ -224,44 +224,45 @@ final class CombFilterNode: BaseGraphNode {
     }
     
     // MARK: - State
-    
-    private var combDelayLine: [Float]
-    private var combWritePos: Int = 0
+
+    /// Independent comb delay lines per channel.
+    private var combDelayLineL: [Float]
+    private var combDelayLineR: [Float]
+    private var combWritePosL: Int = 0
+    private var combWritePosR: Int = 0
     private let combDelayLength: Int
-    private var sourceNode: AVAudioSourceNode?
-    
+
     // MARK: - Init
-    
+
     init(id: UUID = UUID(), params: [String: Any] = [:]) {
         let base = (params["baseDelay"] as? Int) ?? LRConstants.combBaseDelay
         self.combDelayLength = base * LRConstants.combFilterTaps * 2
-        self.combDelayLine = [Float](repeating: 0, count: combDelayLength)
-        
+        self.combDelayLineL = [Float](repeating: 0, count: combDelayLength)
+        self.combDelayLineR = [Float](repeating: 0, count: combDelayLength)
+
         super.init(
             id: id,
             nodeType: "comb_filter",
             category: .effect,
             displayName: "COMB FILTER"
         )
-        
+
         for (key, value) in params {
             parameters[key] = value
         }
-        
-        createSourceNode()
     }
-    
+
     required init(from decoder: Decoder) throws {
-        // Initialize delay line with defaults - will be configured by setParam
+        // Initialize delay lines with defaults; they'll be configured by setParam.
         let base = LRConstants.combBaseDelay
         self.combDelayLength = base * LRConstants.combFilterTaps * 2
-        self.combDelayLine = [Float](repeating: 0, count: combDelayLength)
+        self.combDelayLineL = [Float](repeating: 0, count: combDelayLength)
+        self.combDelayLineR = [Float](repeating: 0, count: combDelayLength)
         try super.init(from: decoder)
-        createSourceNode()
     }
-    
+
     // MARK: - Ports
-    
+
     override var ports: [NodePort] {
         [
             NodePort(id: "in", label: "IN", signalType: .audio, direction: .input),
@@ -269,61 +270,98 @@ final class CombFilterNode: BaseGraphNode {
             NodePort(id: "out", label: "OUT", signalType: .audio, direction: .output)
         ]
     }
-    
-    // MARK: - Audio Unit
-    
-    override func audioUnit() -> AVAudioNode? {
-        return sourceNode
-    }
-    
-    private func createSourceNode() {
-        let format = AVAudioFormat(
-            standardFormatWithSampleRate: LRConstants.sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
-        
-        sourceNode = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
-            guard let self = self else { return noErr }
-            
-            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            guard let buffer = ablPointer.first else { return noErr }
-            
-            let data = buffer.mData!.assumingMemoryBound(to: Float.self)
-            
-            self.processComb(data, frameCount: Int(frameCount))
-            
-            return noErr
-        }
-    }
-    
+
     // MARK: - Processing
-    
-    private func processComb(_ data: UnsafeMutablePointer<Float>, frameCount: Int) {
-        guard feedback > 0.001 else { return }
-        
-        let delay = baseDelay
-        let taps = tapCount
-        
+
+    @inline(__always)
+    fileprivate func processChannel(
+        input: UnsafePointer<Float>,
+        output: UnsafeMutablePointer<Float>,
+        frameCount: Int,
+        delay: Int,
+        taps: Int,
+        feedback fb: Float,
+        buffer: inout [Float],
+        writePos: inout Int
+    ) {
+        let invTaps = 1.0 / Float(max(taps, 1))
         for i in 0..<frameCount {
             var combSum: Float = 0
-            
             for tap in 0..<taps {
                 let delayAmount = delay * (tap + 1)
                 if delayAmount < combDelayLength {
-                    let readPos = (combWritePos - delayAmount + combDelayLength) % combDelayLength
-                    combSum += combDelayLine[readPos]
+                    let readPos = (writePos - delayAmount + combDelayLength) % combDelayLength
+                    combSum += buffer[readPos]
                 }
             }
-            combSum /= Float(taps)
-            
-            let mixed = data[i] + combSum * feedback
+            combSum *= invTaps
+
+            let mixed = input[i] + combSum * fb
             let safe = mixed.isNaN || mixed.isInfinite ? 0 : mixed
-            
-            combDelayLine[combWritePos] = safe
-            combWritePos = (combWritePos + 1) % combDelayLength
-            
-            data[i] = safe
+
+            buffer[writePos] = safe
+            writePos = (writePos + 1) % combDelayLength
+
+            output[i] = safe
         }
+    }
+}
+
+// MARK: - CombFilterNode + DSPNode
+
+extension CombFilterNode: GraphNodeDSPProvider, DSPNode {
+
+    var nodeId: UUID { id }
+
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double,
+        controls: [String: Float]
+    ) {
+        guard let inBuf = inputs.first else {
+            for i in 0..<frameCount {
+                output.left[i] = 0
+                output.right[i] = 0
+            }
+            return
+        }
+
+        let fb = feedback
+
+        // Bypass when feedback is essentially zero — pass input through as-is
+        // rather than running the loop and emitting unchanged samples.
+        if fb <= 0.001 {
+            for i in 0..<frameCount {
+                output.left[i] = inBuf.left[i]
+                output.right[i] = inBuf.right[i]
+            }
+            return
+        }
+
+        let delay = baseDelay
+        let taps = tapCount
+
+        processChannel(
+            input: inBuf.left, output: output.left, frameCount: frameCount,
+            delay: delay, taps: taps, feedback: fb,
+            buffer: &combDelayLineL, writePos: &combWritePosL
+        )
+        processChannel(
+            input: inBuf.right, output: output.right, frameCount: frameCount,
+            delay: delay, taps: taps, feedback: fb,
+            buffer: &combDelayLineR, writePos: &combWritePosR
+        )
+    }
+
+    func reset() {
+        for i in 0..<combDelayLineL.count { combDelayLineL[i] = 0 }
+        for i in 0..<combDelayLineR.count { combDelayLineR[i] = 0 }
+        combWritePosL = 0
+        combWritePosR = 0
     }
 }
 
@@ -351,44 +389,43 @@ final class TunableResonatorNode: BaseGraphNode {
     }
     
     // MARK: - State
-    
-    private var resonatorDelayLine: [Float]
-    private var resonatorWritePos: Int = 0
+
+    private var resonatorDelayLineL: [Float]
+    private var resonatorDelayLineR: [Float]
+    private var resonatorWritePosL: Int = 0
+    private var resonatorWritePosR: Int = 0
     private let resonatorMaxDelay: Int
-    private var sourceNode: AVAudioSourceNode?
-    private let sampleRate: Double
-    
+
     // MARK: - Init
-    
-    init(id: UUID = UUID(), params: [String: Any] = [:], sampleRate: Double = LRConstants.sampleRate) {
-        self.sampleRate = sampleRate
-        self.resonatorMaxDelay = Int(sampleRate / Double(LRConstants.resonatorPitchRange.lowerBound))
-        self.resonatorDelayLine = [Float](repeating: 0, count: resonatorMaxDelay)
-        
+
+    init(id: UUID = UUID(), params: [String: Any] = [:]) {
+        // Sized for the lowest pitch in `LRConstants.resonatorPitchRange`
+        // (~20 Hz) at 48 kHz → ~2400 samples — once at init, never grown.
+        self.resonatorMaxDelay = Int(LRConstants.sampleRate / Double(LRConstants.resonatorPitchRange.lowerBound))
+        self.resonatorDelayLineL = [Float](repeating: 0, count: resonatorMaxDelay)
+        self.resonatorDelayLineR = [Float](repeating: 0, count: resonatorMaxDelay)
+
         super.init(
             id: id,
             nodeType: "tunable_resonator",
             category: .effect,
             displayName: "RESONATOR"
         )
-        
+
         for (key, value) in params {
             parameters[key] = value
         }
-        
-        createSourceNode()
     }
-    
+
     required init(from decoder: Decoder) throws {
-        self.sampleRate = LRConstants.sampleRate
         self.resonatorMaxDelay = Int(LRConstants.sampleRate / Double(LRConstants.resonatorPitchRange.lowerBound))
-        self.resonatorDelayLine = [Float](repeating: 0, count: resonatorMaxDelay)
+        self.resonatorDelayLineL = [Float](repeating: 0, count: resonatorMaxDelay)
+        self.resonatorDelayLineR = [Float](repeating: 0, count: resonatorMaxDelay)
         try super.init(from: decoder)
-        createSourceNode()
     }
-    
+
     // MARK: - Ports
-    
+
     override var ports: [NodePort] {
         [
             NodePort(id: "in", label: "IN", signalType: .audio, direction: .input),
@@ -397,57 +434,100 @@ final class TunableResonatorNode: BaseGraphNode {
             NodePort(id: "out", label: "OUT", signalType: .audio, direction: .output)
         ]
     }
-    
-    // MARK: - Audio Unit
-    
-    override func audioUnit() -> AVAudioNode? {
-        return sourceNode
-    }
-    
-    private func createSourceNode() {
-        let format = AVAudioFormat(
-            standardFormatWithSampleRate: sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
-        
-        sourceNode = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
-            guard let self = self else { return noErr }
-            
-            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            guard let buffer = ablPointer.first else { return noErr }
-            
-            let data = buffer.mData!.assumingMemoryBound(to: Float.self)
-            
-            self.processResonator(data, frameCount: Int(frameCount))
-            
-            return noErr
+
+    // MARK: - Processing
+
+    @inline(__always)
+    fileprivate func processChannel(
+        input: UnsafePointer<Float>,
+        output: UnsafeMutablePointer<Float>,
+        frameCount: Int,
+        delaySamples: Int,
+        feedback fb: Float,
+        wet: Float,
+        dry: Float,
+        buffer: inout [Float],
+        writePos: inout Int
+    ) {
+        for i in 0..<frameCount {
+            let readPos = (writePos - delaySamples + resonatorMaxDelay) % resonatorMaxDelay
+            let delayed = buffer[readPos]
+
+            let mixed = input[i] + delayed * fb
+            let safeMixed = mixed.isNaN || mixed.isInfinite ? 0 : mixed
+
+            buffer[writePos] = safeMixed
+            writePos = (writePos + 1) % resonatorMaxDelay
+
+            output[i] = dry * input[i] + wet * safeMixed
         }
     }
-    
-    // MARK: - Processing
-    
-    private func processResonator(_ data: UnsafeMutablePointer<Float>, frameCount: Int) {
-        guard pitch >= LRConstants.resonatorPitchRange.lowerBound else { return }
-        
-        let delaySamples = Int(sampleRate / Double(pitch))
-        guard delaySamples > 0, delaySamples < resonatorMaxDelay else { return }
-        
-        let resonatorFeedback = min(decay, 0.99)
+}
+
+// MARK: - TunableResonatorNode + DSPNode
+
+extension TunableResonatorNode: GraphNodeDSPProvider, DSPNode {
+
+    var nodeId: UUID { id }
+
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double,
+        controls: [String: Float]
+    ) {
+        guard let inBuf = inputs.first else {
+            for i in 0..<frameCount {
+                output.left[i] = 0
+                output.right[i] = 0
+            }
+            return
+        }
+
+        let p = pitch
+        guard p >= LRConstants.resonatorPitchRange.lowerBound else {
+            // Pitch out of range → passthrough so the user still hears
+            // their input while sweeping the knob across the dead zone.
+            for i in 0..<frameCount {
+                output.left[i] = inBuf.left[i]
+                output.right[i] = inBuf.right[i]
+            }
+            return
+        }
+
+        let delaySamples = Int(sampleRate / Double(p))
+        guard delaySamples > 0, delaySamples < resonatorMaxDelay else {
+            for i in 0..<frameCount {
+                output.left[i] = inBuf.left[i]
+                output.right[i] = inBuf.right[i]
+            }
+            return
+        }
+
+        let fb = min(decay, 0.99)
         let wet = wetDryMix
         let dry = 1.0 - wet
-        
-        for i in 0..<frameCount {
-            let readPos = (resonatorWritePos - delaySamples + resonatorMaxDelay) % resonatorMaxDelay
-            let delayed = resonatorDelayLine[readPos]
-            
-            let mixed = data[i] + delayed * resonatorFeedback
-            let safeMixed = mixed.isNaN || mixed.isInfinite ? 0 : mixed
-            
-            resonatorDelayLine[resonatorWritePos] = safeMixed
-            resonatorWritePos = (resonatorWritePos + 1) % resonatorMaxDelay
-            
-            data[i] = dry * data[i] + wet * safeMixed
-        }
+
+        processChannel(
+            input: inBuf.left, output: output.left, frameCount: frameCount,
+            delaySamples: delaySamples, feedback: fb, wet: wet, dry: dry,
+            buffer: &resonatorDelayLineL, writePos: &resonatorWritePosL
+        )
+        processChannel(
+            input: inBuf.right, output: output.right, frameCount: frameCount,
+            delaySamples: delaySamples, feedback: fb, wet: wet, dry: dry,
+            buffer: &resonatorDelayLineR, writePos: &resonatorWritePosR
+        )
+    }
+
+    func reset() {
+        for i in 0..<resonatorDelayLineL.count { resonatorDelayLineL[i] = 0 }
+        for i in 0..<resonatorDelayLineR.count { resonatorDelayLineR[i] = 0 }
+        resonatorWritePosL = 0
+        resonatorWritePosR = 0
     }
 }
 
@@ -464,12 +544,8 @@ final class BitCrusherNode: BaseGraphNode {
         set { setParam("depth", value: newValue) }
     }
     
-    // MARK: - State
-    
-    private var sourceNode: AVAudioSourceNode?
-    
     // MARK: - Init
-    
+
     init(id: UUID = UUID(), params: [String: Any] = [:]) {
         super.init(
             id: id,
@@ -477,21 +553,18 @@ final class BitCrusherNode: BaseGraphNode {
             category: .effect,
             displayName: "BIT CRUSHER"
         )
-        
+
         for (key, value) in params {
             parameters[key] = value
         }
-        
-        createSourceNode()
     }
-    
+
     required init(from decoder: Decoder) throws {
         try super.init(from: decoder)
-        createSourceNode()
     }
-    
+
     // MARK: - Ports
-    
+
     override var ports: [NodePort] {
         [
             NodePort(id: "in", label: "IN", signalType: .audio, direction: .input),
@@ -499,46 +572,53 @@ final class BitCrusherNode: BaseGraphNode {
             NodePort(id: "out", label: "OUT", signalType: .audio, direction: .output)
         ]
     }
-    
-    // MARK: - Audio Unit
-    
-    override func audioUnit() -> AVAudioNode? {
-        return sourceNode
-    }
-    
-    private func createSourceNode() {
-        let format = AVAudioFormat(
-            standardFormatWithSampleRate: LRConstants.sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
-        
-        sourceNode = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
-            guard let self = self else { return noErr }
-            
-            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            guard let buffer = ablPointer.first else { return noErr }
-            
-            let data = buffer.mData!.assumingMemoryBound(to: Float.self)
-            
-            self.processBitCrush(data, frameCount: Int(frameCount))
-            
-            return noErr
+}
+
+// MARK: - BitCrusherNode + DSPNode
+
+extension BitCrusherNode: GraphNodeDSPProvider, DSPNode {
+
+    var nodeId: UUID { id }
+
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double,
+        controls: [String: Float]
+    ) {
+        guard let inBuf = inputs.first else {
+            for i in 0..<frameCount {
+                output.left[i] = 0
+                output.right[i] = 0
+            }
+            return
         }
-    }
-    
-    // MARK: - Processing
-    
-    private func processBitCrush(_ data: UnsafeMutablePointer<Float>, frameCount: Int) {
-        guard depth > 0.001 else { return }
-        
+
+        let d = depth
+
+        // Bypass when depth is essentially zero — passthrough avoids
+        // round-off noise floor introduced by quantizing at 16 bits.
+        if d <= 0.001 {
+            for i in 0..<frameCount {
+                output.left[i] = inBuf.left[i]
+                output.right[i] = inBuf.right[i]
+            }
+            return
+        }
+
         let maxBits: Float = 16.0
         let minBits: Float = 2.0
-        let shaped = powf(depth, 1.5)
+        let shaped = powf(d, 1.5)
         let bits = maxBits - shaped * (maxBits - minBits)
         let levels = powf(2.0, bits)
-        
+        let invLevels = 1.0 / levels
+
         for i in 0..<frameCount {
-            data[i] = roundf(data[i] * levels) / levels
+            output.left[i]  = roundf(inBuf.left[i]  * levels) * invLevels
+            output.right[i] = roundf(inBuf.right[i] * levels) * invLevels
         }
     }
 }
@@ -566,12 +646,8 @@ final class WaveshaperNode: BaseGraphNode {
         set { setParam("morphPosition", value: newValue) }
     }
     
-    // MARK: - State
-    
-    private var sourceNode: AVAudioSourceNode?
-    
     // MARK: - Init
-    
+
     init(id: UUID = UUID(), params: [String: Any] = [:]) {
         super.init(
             id: id,
@@ -579,21 +655,18 @@ final class WaveshaperNode: BaseGraphNode {
             category: .effect,
             displayName: "WAVESHAPER"
         )
-        
+
         for (key, value) in params {
             parameters[key] = value
         }
-        
-        createSourceNode()
     }
-    
+
     required init(from decoder: Decoder) throws {
         try super.init(from: decoder)
-        createSourceNode()
     }
-    
+
     // MARK: - Ports
-    
+
     override var ports: [NodePort] {
         [
             NodePort(id: "in", label: "IN", signalType: .audio, direction: .input),
@@ -601,54 +674,12 @@ final class WaveshaperNode: BaseGraphNode {
             NodePort(id: "out", label: "OUT", signalType: .audio, direction: .output)
         ]
     }
-    
-    // MARK: - Audio Unit
-    
-    override func audioUnit() -> AVAudioNode? {
-        return sourceNode
-    }
-    
-    private func createSourceNode() {
-        let format = AVAudioFormat(
-            standardFormatWithSampleRate: LRConstants.sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
-        
-        sourceNode = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
-            guard let self = self else { return noErr }
-            
-            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            guard let buffer = ablPointer.first else { return noErr }
-            
-            let data = buffer.mData!.assumingMemoryBound(to: Float.self)
-            
-            self.processWaveshaper(data, frameCount: Int(frameCount))
-            
-            return noErr
-        }
-    }
-    
-    // MARK: - Processing
-    
-    private func processWaveshaper(_ data: UnsafeMutablePointer<Float>, frameCount: Int) {
-        let g = gain
-        let modes = SaturationMode.allCases
-        let currentIdx = modes.firstIndex(of: mode) ?? 0
-        let nextIdx = (currentIdx + 1) % modes.count
-        let nextMode = modes[nextIdx]
-        
-        let morph = morphPosition
-        
-        for i in 0..<frameCount {
-            let x = data[i]
-            let a = shapeSample(x, gain: g, mode: mode)
-            let b = shapeSample(x, gain: g, mode: nextMode)
-            data[i] = (1.0 - morph) * a + morph * b
-        }
-    }
-    
+
+    // MARK: - Saturation primitives
+
+    /// Per-sample analog-circuit emulation. Stateless; selected by `SaturationMode`.
     @inline(__always)
-    private func shapeSample(_ x: Float, gain: Float, mode: SaturationMode) -> Float {
+    fileprivate func shapeSample(_ x: Float, gain: Float, mode: SaturationMode) -> Float {
         switch mode {
         case .clean:
             return tanhf(x * gain)
@@ -661,6 +692,60 @@ final class WaveshaperNode: BaseGraphNode {
         case .diode:
             let g = x * gain
             return g > 0.0 ? min(g, 0.6) : max(g * 1.2, -1.0)
+        }
+    }
+}
+
+// MARK: - WaveshaperNode + DSPNode
+
+extension WaveshaperNode: GraphNodeDSPProvider, DSPNode {
+
+    var nodeId: UUID { id }
+
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double,
+        controls: [String: Float]
+    ) {
+        guard let inBuf = inputs.first else {
+            for i in 0..<frameCount {
+                output.left[i] = 0
+                output.right[i] = 0
+            }
+            return
+        }
+
+        let g = gain
+        let m = mode
+        let morph = morphPosition
+
+        if morph < 0.001 {
+            // Single-mode fast path — avoids the second `shapeSample` call.
+            for i in 0..<frameCount {
+                output.left[i]  = shapeSample(inBuf.left[i],  gain: g, mode: m)
+                output.right[i] = shapeSample(inBuf.right[i], gain: g, mode: m)
+            }
+            return
+        }
+
+        // Two-mode crossfade morph (CLEAN → TUBE → TRANSISTOR → DIODE).
+        let modes = SaturationMode.allCases
+        let currentIdx = modes.firstIndex(of: m) ?? 0
+        let nextMode = modes[(currentIdx + 1) % modes.count]
+        let oneMinus = 1.0 - morph
+
+        for i in 0..<frameCount {
+            let aL = shapeSample(inBuf.left[i],  gain: g, mode: m)
+            let bL = shapeSample(inBuf.left[i],  gain: g, mode: nextMode)
+            output.left[i] = oneMinus * aL + morph * bL
+
+            let aR = shapeSample(inBuf.right[i], gain: g, mode: m)
+            let bR = shapeSample(inBuf.right[i], gain: g, mode: nextMode)
+            output.right[i] = oneMinus * aR + morph * bR
         }
     }
 }
@@ -688,44 +773,46 @@ final class DelayLineNode: BaseGraphNode {
     }
     
     // MARK: - State
-    
-    private var delayBuffer: [Float]
-    private var writePos: Int = 0
+
+    /// Independent delay buffers per channel — true stereo. Sharing one
+    /// buffer across L/R would collapse the stereo image of the input
+    /// signal into mono.
+    private var delayBufferL: [Float]
+    private var delayBufferR: [Float]
+    private var writePosL: Int = 0
+    private var writePosR: Int = 0
     private let maxDelayLength: Int
-    private var sourceNode: AVAudioSourceNode?
-    private let sampleRate: Double
-    
+
     // MARK: - Init
-    
-    init(id: UUID = UUID(), params: [String: Any] = [:], sampleRate: Double = LRConstants.sampleRate) {
-        self.sampleRate = sampleRate
-        self.maxDelayLength = Int(sampleRate * 2.0)
-        self.delayBuffer = [Float](repeating: 0, count: maxDelayLength)
-        
+
+    init(id: UUID = UUID(), params: [String: Any] = [:]) {
+        // Two-second maximum delay at the canonical sample rate. Sized
+        // once so the audio thread never reallocates.
+        self.maxDelayLength = Int(LRConstants.sampleRate * 2.0)
+        self.delayBufferL = [Float](repeating: 0, count: maxDelayLength)
+        self.delayBufferR = [Float](repeating: 0, count: maxDelayLength)
+
         super.init(
             id: id,
             nodeType: "delay_line",
             category: .effect,
             displayName: "DELAY"
         )
-        
+
         for (key, value) in params {
             parameters[key] = value
         }
-        
-        createSourceNode()
     }
-    
+
     required init(from decoder: Decoder) throws {
-        self.sampleRate = LRConstants.sampleRate
         self.maxDelayLength = Int(LRConstants.sampleRate * 2.0)
-        self.delayBuffer = [Float](repeating: 0, count: maxDelayLength)
+        self.delayBufferL = [Float](repeating: 0, count: maxDelayLength)
+        self.delayBufferR = [Float](repeating: 0, count: maxDelayLength)
         try super.init(from: decoder)
-        createSourceNode()
     }
-    
+
     // MARK: - Ports
-    
+
     override var ports: [NodePort] {
         [
             NodePort(id: "in", label: "IN", signalType: .audio, direction: .input),
@@ -734,54 +821,94 @@ final class DelayLineNode: BaseGraphNode {
             NodePort(id: "out", label: "OUT", signalType: .audio, direction: .output)
         ]
     }
-    
-    // MARK: - Audio Unit
-    
-    override func audioUnit() -> AVAudioNode? {
-        return sourceNode
-    }
-    
-    private func createSourceNode() {
-        let format = AVAudioFormat(
-            standardFormatWithSampleRate: sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
-        
-        sourceNode = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
-            guard let self = self else { return noErr }
-            
-            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            guard let buffer = ablPointer.first else { return noErr }
-            
-            let data = buffer.mData!.assumingMemoryBound(to: Float.self)
-            
-            self.processDelay(data, frameCount: Int(frameCount))
-            
-            return noErr
+
+    // MARK: - Processing
+
+    /// Single-channel feedback delay loop. The delay buffer + write head
+    /// are passed `inout` so `render(...)` can hold separate state per
+    /// channel without duplicating the inner loop.
+    @inline(__always)
+    fileprivate func processChannel(
+        input: UnsafePointer<Float>,
+        output: UnsafeMutablePointer<Float>,
+        frameCount: Int,
+        delaySamples: Int,
+        feedback fb: Float,
+        wet: Float,
+        dry: Float,
+        buffer: inout [Float],
+        writePos: inout Int
+    ) {
+        for i in 0..<frameCount {
+            let readPos = (writePos - delaySamples + maxDelayLength) % maxDelayLength
+            let delayed = buffer[readPos]
+
+            let mixed = input[i] + delayed * fb
+            let safe = mixed.isNaN || mixed.isInfinite ? 0 : mixed
+
+            buffer[writePos] = safe
+            writePos = (writePos + 1) % maxDelayLength
+
+            output[i] = dry * input[i] + wet * delayed
         }
     }
-    
-    // MARK: - Processing
-    
-    private func processDelay(_ data: UnsafeMutablePointer<Float>, frameCount: Int) {
+}
+
+// MARK: - DelayLineNode + DSPNode
+
+extension DelayLineNode: GraphNodeDSPProvider, DSPNode {
+
+    var nodeId: UUID { id }
+
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double,
+        controls: [String: Float]
+    ) {
+        guard let inBuf = inputs.first else {
+            // No input — emit silence (and stop chasing the tail of an
+            // arbitrary previous buffer).
+            for i in 0..<frameCount {
+                output.left[i] = 0
+                output.right[i] = 0
+            }
+            return
+        }
+
         let delaySamples = Int(delayTime * Float(sampleRate))
-        guard delaySamples > 0, delaySamples < maxDelayLength else { return }
-        
+        guard delaySamples > 0, delaySamples < maxDelayLength else {
+            // Delay time out of range → passthrough.
+            for i in 0..<frameCount {
+                output.left[i] = inBuf.left[i]
+                output.right[i] = inBuf.right[i]
+            }
+            return
+        }
+
         let fb = min(feedback, 0.99)
         let wet = wetDryMix
         let dry = 1.0 - wet
-        
-        for i in 0..<frameCount {
-            let readPos = (writePos - delaySamples + maxDelayLength) % maxDelayLength
-            let delayed = delayBuffer[readPos]
-            
-            let mixed = data[i] + delayed * fb
-            let safe = mixed.isNaN || mixed.isInfinite ? 0 : mixed
-            
-            delayBuffer[writePos] = safe
-            writePos = (writePos + 1) % maxDelayLength
-            
-            data[i] = dry * data[i] + wet * delayed
-        }
+
+        processChannel(
+            input: inBuf.left, output: output.left, frameCount: frameCount,
+            delaySamples: delaySamples, feedback: fb, wet: wet, dry: dry,
+            buffer: &delayBufferL, writePos: &writePosL
+        )
+        processChannel(
+            input: inBuf.right, output: output.right, frameCount: frameCount,
+            delaySamples: delaySamples, feedback: fb, wet: wet, dry: dry,
+            buffer: &delayBufferR, writePos: &writePosR
+        )
+    }
+
+    func reset() {
+        for i in 0..<delayBufferL.count { delayBufferL[i] = 0 }
+        for i in 0..<delayBufferR.count { delayBufferR[i] = 0 }
+        writePosL = 0
+        writePosR = 0
     }
 }

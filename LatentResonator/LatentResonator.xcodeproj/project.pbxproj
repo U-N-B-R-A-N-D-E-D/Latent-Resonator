@@ -41,7 +41,6 @@
 		37900CCD912F02B800000000 /* MacroNode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33D2274DBD4F662100000000 /* MacroNode.swift */; };
 		3B28E17FA57CD00700000000 /* FilterEffectNodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FE279D584A128A700000000 /* FilterEffectNodes.swift */; };
 		3E1A833AD0D6FF2500000000 /* AudioVisualizerHTML.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB818EDED28AC77800000000 /* AudioVisualizerHTML.swift */; };
-		43F78D806DF4060400000000 /* AudioGraphMapper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 731C703F8BCE053F00000000 /* AudioGraphMapper.swift */; };
 		44F2E2B09B8DA22F00000000 /* ControlGraphEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBD97F4B3287F68500000000 /* ControlGraphEvaluator.swift */; };
 		539312BCDB97FE8500000000 /* NodeGraphStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5066EC9413728E1100000000 /* NodeGraphStore.swift */; };
 		56FDD26957C4509400000000 /* SpectralNodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F33425EA0EC25B200000000 /* SpectralNodes.swift */; };
@@ -136,7 +135,6 @@
 		5066EC9413728E1100000000 /* NodeGraphStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeGraphStore.swift; sourceTree = "<group>"; };
 		594AB5AB0E88E4F400000000 /* SpectralPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpectralPipeline.swift; sourceTree = "<group>"; };
 		5F33425EA0EC25B200000000 /* SpectralNodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpectralNodes.swift; sourceTree = "<group>"; };
-		731C703F8BCE053F00000000 /* AudioGraphMapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioGraphMapper.swift; sourceTree = "<group>"; };
 		85F6431619E7EB1500000000 /* PatchViewCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PatchViewCoordinator.swift; sourceTree = "<group>"; };
 		8681BEB746A0586800000000 /* AudioQualityABTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioQualityABTests.swift; sourceTree = "<group>"; };
 		9D03300FD72A9CEC00000000 /* ControlNodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlNodes.swift; sourceTree = "<group>"; };
@@ -319,7 +317,6 @@
 				EB865DDAAA266E6D00000000 /* NodeGraph.swift */,
 				FDEF985ABBA14A9300000000 /* GraphNode.swift */,
 				39F4813CF9A45A1A00000000 /* GraphEdge.swift */,
-				731C703F8BCE053F00000000 /* AudioGraphMapper.swift */,
 				33D2274DBD4F662100000000 /* MacroNode.swift */,
 				5066EC9413728E1100000000 /* NodeGraphStore.swift */,
 				DBD97F4B3287F68500000000 /* ControlGraphEvaluator.swift */,
@@ -516,7 +513,6 @@
 				DBC439E68D62F3D500000000 /* NodeGraph.swift in Sources */,
 				15F59879CE091D6E00000000 /* GraphNode.swift in Sources */,
 				B0595342FE403DD100000000 /* GraphEdge.swift in Sources */,
-				43F78D806DF4060400000000 /* AudioGraphMapper.swift in Sources */,
 				37900CCD912F02B800000000 /* MacroNode.swift in Sources */,
 				539312BCDB97FE8500000000 /* NodeGraphStore.swift in Sources */,
 				EXT0000020 /* CGPoint+Codable.swift in Sources */,
