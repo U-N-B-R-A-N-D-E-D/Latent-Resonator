@@ -403,73 +403,55 @@ final class KoenigSeedNode: BaseGraphNode {
     
     /// Cached Euclidean rhythm pattern
     private var rhythmPattern: [Bool] = []
-    
+
     /// Current position in pattern
     private var stepIndex: Int = 0
-    
+
     /// Sample rate for time calculations
     private let sampleRate: Double = Double(LRConstants.sampleRate)
-    
+
     /// Current phase for clock generation
     private var phase: Double = 0.0
-    
+
     /// Gate state
     private var gateOpen: Bool = true
-    
-    /// AVAudioSourceNode reference
-    private var sourceNode: AVAudioSourceNode?
-    private let format: AVAudioFormat
-    
+
+    /// Cumulative sample counter across render blocks. Replaces the
+    /// `mSampleTime` timestamp the old AVAudioSourceNode callback used to
+    /// drive event scheduling — under the new pull-render model the engine
+    /// invokes us with `frameCount` only, so we count samples ourselves.
+    private var totalSamplesProcessed: Int = 0
+
     // MARK: - Init
-    
+
     init(id: UUID = UUID(), params: [String: Any] = [:]) {
-        let fmt = AVAudioFormat(
-            standardFormatWithSampleRate: LRConstants.sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
-        self.format = fmt
-        
         super.init(
             id: id,
             nodeType: "koenig_seed",
             category: .source,
             displayName: "KOENIG SEED"
         )
-        
-        // Apply initial parameters
+
         for (key, value) in params {
             parameters[key] = value
         }
-        
-        // Initialize rhythm
+
         updateRhythm()
-        createSourceNode()
     }
-    
+
     required init(from decoder: Decoder) throws {
-        self.format = AVAudioFormat(
-            standardFormatWithSampleRate: LRConstants.sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
         try super.init(from: decoder)
         updateRhythm()
-        createSourceNode()
     }
-    
+
     // MARK: - Ports
-    
+
     override var ports: [NodePort] {
         [
             NodePort(id: "gate", label: "GATE", signalType: .gate, direction: .input),
             NodePort(id: "clk", label: "CLK", signalType: .gate, direction: .input),
             NodePort(id: "out", label: "OUT", signalType: .audio, direction: .output)
         ]
-    }
-    
-    // MARK: - Audio Unit
-    
-    override func audioUnit() -> AVAudioNode? {
-        return sourceNode
     }
     
     // MARK: - Rhythm Management
@@ -533,102 +515,42 @@ final class KoenigSeedNode: BaseGraphNode {
     }
     
     // MARK: - Audio Generation
-    
-    private func createSourceNode() {
-        sourceNode = AVAudioSourceNode(format: format) { [weak self] _, timestamp, frameCount, audioBufferList in
-            guard let self = self else { return OSStatus(kAudio_ParamError) }
-            
-            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            guard ablPointer.count >= 2 else { return OSStatus(kAudio_ParamError) }
-            
-            let leftPtr = ablPointer[0].mData!.assumingMemoryBound(to: Float.self)
-            let rightPtr = ablPointer[1].mData!.assumingMemoryBound(to: Float.self)
-            
-            // Clear buffer
-            memset(leftPtr, 0, Int(frameCount) * MemoryLayout<Float>.size)
-            memset(rightPtr, 0, Int(frameCount) * MemoryLayout<Float>.size)
-            
-            // Check gate
-            guard self.gateOpen || !self.gated else {
-                return noErr
-            }
-            
-            // Determine step duration in samples
-            let stepsPerSecond: Double
-            if self.clockRate > 0 {
-                stepsPerSecond = Double(self.clockRate)
-            } else {
-                stepsPerSecond = Double(self.tempo) / 60.0 // beats per second (quarter notes)
-            }
-            
-            let samplesPerStep = Int(self.sampleRate / stepsPerSecond)
-            guard samplesPerStep > 0 else { return noErr }
-            
-            // Convert ms to samples
-            let decaySamples = Int((Double(self.impulseDecay) / 1000.0) * self.sampleRate)
-            let tailSamples = Int((Double(self.tailDuration) / 1000.0) * self.sampleRate)
-            
-            // Generate events
-            for i in 0..<Int(frameCount) {
-                // Advance step counter
-                let totalSample = Int(timestamp.pointee.mSampleTime) + i
-                let currentStepIndex = (totalSample / samplesPerStep) % self.rhythmPattern.count
-                
-                // Check if we're at the start of a step
-                let isStepStart = (totalSample % samplesPerStep) == 0
-                
-                // Check if this step has an impulse
-                let shouldTrigger = isStepStart && 
-                                   self.rhythmPattern[currentStepIndex] &&
-                                   Float.random(in: 0...1) < self.eventProbability * self.nucleationDensity
-                
-                if shouldTrigger {
-                    // Generate Dirac impulse with decay
-                    self.generateImpulse(at: i, 
-                                        left: leftPtr, 
-                                        right: rightPtr, 
-                                        frameCount: Int(frameCount),
-                                        decaySamples: decaySamples,
-                                        tailSamples: tailSamples)
-                }
-            }
-            
-            return noErr
-        }
-    }
-    
-    /// Generate a single nucleation event (impulse + noise tail)
-    private func generateImpulse(at index: Int, 
-                                  left: UnsafeMutablePointer<Float>,
-                                  right: UnsafeMutablePointer<Float>,
-                                  frameCount: Int,
-                                  decaySamples: Int,
-                                  tailSamples: Int) {
+
+    /// Generate a single nucleation event (impulse + noise tail) into the
+    /// caller-provided stereo output. Same DSP body as the v1
+    /// AVAudioSourceNode path, just operating on engine-owned pointers.
+    fileprivate func generateImpulse(
+        at index: Int,
+        left: UnsafeMutablePointer<Float>,
+        right: UnsafeMutablePointer<Float>,
+        frameCount: Int,
+        decaySamples: Int,
+        tailSamples: Int
+    ) {
         let impulseAmp = self.impulseAmplitude
         let tailAmp = self.tailAmplitude * impulseAmp
         let decayFactor = self.tailDecay
-        
-        // Generate impulse with exponential decay
+
         for i in 0..<min(decaySamples + tailSamples, frameCount - index) {
             let sampleIndex = index + i
             let t = Double(i)
-            
+
             var sample: Float
             if i < decaySamples {
-                // Impulse phase - exponential decay
+                // Impulse phase — exponential decay
                 let decay = exp(-t / (Double(decaySamples) * 0.3))
                 sample = impulseAmp * Float(decay)
             } else {
-                // Tail phase - Gaussian noise with exponential decay
+                // Tail phase — Gaussian-ish noise with exponential decay
                 let tailIndex = i - decaySamples
-                let gauss = Float.random(in: -1...1) // Simplified Gaussian
+                let gauss = Float.random(in: -1...1)
                 let tailIndexF = Float(tailIndex)
                 let tailSamplesF = Float(tailSamples)
                 let decayConstant = tailIndexF / (tailSamplesF * decayFactor)
                 let tailDecay = exp(-decayConstant)
                 sample = tailAmp * gauss * tailDecay
             }
-            
+
             left[sampleIndex] += sample
             right[sampleIndex] += sample
         }
@@ -646,9 +568,11 @@ final class KoenigSeedNode: BaseGraphNode {
         gateOpen = false
     }
     
-    /// Reset pattern to start position
+    /// Reset pattern to start position. Also implements `DSPNode.reset()`.
     func reset() {
         stepIndex = 0
+        totalSamplesProcessed = 0
+        phase = 0.0
     }
     
     /// Get current rhythm pattern for visualization
@@ -676,5 +600,73 @@ final class KoenigSeedNode: BaseGraphNode {
         }
         
         updateRhythm()
+    }
+}
+
+// MARK: - KoenigSeedNode + DSPNode
+
+extension KoenigSeedNode: GraphNodeDSPProvider, DSPNode {
+
+    var nodeId: UUID { id }
+
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double,
+        controls: [String: Float]
+    ) {
+        // Always start by zeroing the buffer; events accumulate on top.
+        let bytes = frameCount * MemoryLayout<Float>.stride
+        memset(output.left, 0, bytes)
+        memset(output.right, 0, bytes)
+
+        // Gate honors the legacy semantics: when `gated == true`, the node
+        // emits nothing unless `gateOpen == true`. Free-running mode bypasses
+        // the gate entirely.
+        if gated && !gateOpen { return }
+
+        // Step duration in samples — driven by either the external clock
+        // rate or the internal tempo (BPM as quarter-notes-per-second).
+        let stepsPerSecond: Double = clockRate > 0
+            ? Double(clockRate)
+            : Double(tempo) / 60.0
+
+        let samplesPerStep = Int(self.sampleRate / stepsPerSecond)
+        guard samplesPerStep > 0, !rhythmPattern.isEmpty else {
+            totalSamplesProcessed += frameCount
+            return
+        }
+
+        let decaySamples = Int((Double(impulseDecay) / 1000.0) * self.sampleRate)
+        let tailSamples = Int((Double(tailDuration) / 1000.0) * self.sampleRate)
+        let probability = eventProbability * nucleationDensity
+
+        // Walk the buffer one sample at a time looking for step boundaries.
+        // When the modulus aligns with the start of an "on" step in the
+        // Euclidean pattern (and the probability roll succeeds), drop a
+        // Dirac impulse + noise tail starting at that frame.
+        for i in 0..<frameCount {
+            let totalSample = totalSamplesProcessed + i
+            let isStepStart = (totalSample % samplesPerStep) == 0
+            guard isStepStart else { continue }
+
+            let stepIdx = (totalSample / samplesPerStep) % rhythmPattern.count
+            guard rhythmPattern[stepIdx] else { continue }
+            guard Float.random(in: 0...1) < probability else { continue }
+
+            generateImpulse(
+                at: i,
+                left: output.left,
+                right: output.right,
+                frameCount: frameCount,
+                decaySamples: decaySamples,
+                tailSamples: tailSamples
+            )
+        }
+
+        totalSamplesProcessed += frameCount
     }
 }
