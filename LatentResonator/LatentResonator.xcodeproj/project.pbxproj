@@ -81,6 +81,17 @@
 		ENG3000000000000DN000001 /* DSPNode.swift in Sources */ = {isa = PBXBuildFile; fileRef = ENG2000000000000DN000001 /* DSPNode.swift */; };
 		ENG3000000000000EP000001 /* ExecutionPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = ENG2000000000000EP000001 /* ExecutionPlan.swift */; };
 		ENG3000000000000GE000001 /* GraphAudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = ENG2000000000000GE000001 /* GraphAudioEngine.swift */; };
+		PCH3000000000000PT000001 /* PatchTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = PCH2000000000000PT000001 /* PatchTypes.swift */; };
+		PCH3000000000000PV000001 /* PatchCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = PCH2000000000000PV000001 /* PatchCanvasView.swift */; };
+		PCH3000000000000CL000001 /* CableLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = PCH2000000000000CL000001 /* CableLayer.swift */; };
+		PCH3000000000000NF000001 /* NodeCardFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = PCH2000000000000NF000001 /* NodeCardFactory.swift */; };
+		PCH3000000000000NC000001 /* NodeCardChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = PCH2000000000000NC000001 /* NodeCardChrome.swift */; };
+		PCH3000000000000OC000001 /* OscillatorCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = PCH2000000000000OC000001 /* OscillatorCard.swift */; };
+		PCH3000000000000LC000001 /* LadderFilterCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = PCH2000000000000LC000001 /* LadderFilterCard.swift */; };
+		PCH3000000000000DC000001 /* DelayCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = PCH2000000000000DC000001 /* DelayCard.swift */; };
+		PCH3000000000000MC000001 /* MixerCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = PCH2000000000000MC000001 /* MixerCard.swift */; };
+		PCH3000000000000MO000001 /* MasterOutputCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = PCH2000000000000MO000001 /* MasterOutputCard.swift */; };
+		PCH3000000000000GC000001 /* GenericNodeCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = PCH2000000000000GC000001 /* GenericNodeCard.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -175,6 +186,17 @@
 		ENG2000000000000DN000001 /* DSPNode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DSPNode.swift; sourceTree = "<group>"; };
 		ENG2000000000000EP000001 /* ExecutionPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutionPlan.swift; sourceTree = "<group>"; };
 		ENG2000000000000GE000001 /* GraphAudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GraphAudioEngine.swift; sourceTree = "<group>"; };
+		PCH2000000000000PT000001 /* PatchTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PatchTypes.swift; sourceTree = "<group>"; };
+		PCH2000000000000PV000001 /* PatchCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PatchCanvasView.swift; sourceTree = "<group>"; };
+		PCH2000000000000CL000001 /* CableLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CableLayer.swift; sourceTree = "<group>"; };
+		PCH2000000000000NF000001 /* NodeCardFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeCardFactory.swift; sourceTree = "<group>"; };
+		PCH2000000000000NC000001 /* NodeCardChrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeCardChrome.swift; sourceTree = "<group>"; };
+		PCH2000000000000OC000001 /* OscillatorCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OscillatorCard.swift; sourceTree = "<group>"; };
+		PCH2000000000000LC000001 /* LadderFilterCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LadderFilterCard.swift; sourceTree = "<group>"; };
+		PCH2000000000000DC000001 /* DelayCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DelayCard.swift; sourceTree = "<group>"; };
+		PCH2000000000000MC000001 /* MixerCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MixerCard.swift; sourceTree = "<group>"; };
+		PCH2000000000000MO000001 /* MasterOutputCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MasterOutputCard.swift; sourceTree = "<group>"; };
+		PCH2000000000000GC000001 /* GenericNodeCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenericNodeCard.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -252,6 +274,7 @@
 				A99B4CB73935D3E600000000 /* TerminalConsoleView.swift */,
 						ADD4C71833C3F453F8D83329 /* TemplateBrowserView.swift */,
 			AC1B6725F9E4B4C25A1884F7 /* RecipeBanner.swift */,
+				PCH10000000000000000PCH1 /* Patch */,
 );
 			path = Views;
 			sourceTree = "<group>";
@@ -384,6 +407,32 @@
 				ENG2000000000000GE000001 /* GraphAudioEngine.swift */,
 			);
 			path = Engine;
+			sourceTree = "<group>";
+		};
+		PCH10000000000000000CRD1 /* Cards */ = {
+			isa = PBXGroup;
+			children = (
+				PCH2000000000000NC000001 /* NodeCardChrome.swift */,
+				PCH2000000000000OC000001 /* OscillatorCard.swift */,
+				PCH2000000000000LC000001 /* LadderFilterCard.swift */,
+				PCH2000000000000DC000001 /* DelayCard.swift */,
+				PCH2000000000000MC000001 /* MixerCard.swift */,
+				PCH2000000000000MO000001 /* MasterOutputCard.swift */,
+				PCH2000000000000GC000001 /* GenericNodeCard.swift */,
+			);
+			path = Cards;
+			sourceTree = "<group>";
+		};
+		PCH10000000000000000PCH1 /* Patch */ = {
+			isa = PBXGroup;
+			children = (
+				PCH2000000000000PT000001 /* PatchTypes.swift */,
+				PCH2000000000000PV000001 /* PatchCanvasView.swift */,
+				PCH2000000000000CL000001 /* CableLayer.swift */,
+				PCH2000000000000NF000001 /* NodeCardFactory.swift */,
+				PCH10000000000000000CRD1 /* Cards */,
+			);
+			path = Patch;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -537,6 +586,17 @@
 				ENG3000000000000DN000001 /* DSPNode.swift in Sources */,
 				ENG3000000000000EP000001 /* ExecutionPlan.swift in Sources */,
 				ENG3000000000000GE000001 /* GraphAudioEngine.swift in Sources */,
+				PCH3000000000000PT000001 /* PatchTypes.swift in Sources */,
+				PCH3000000000000PV000001 /* PatchCanvasView.swift in Sources */,
+				PCH3000000000000CL000001 /* CableLayer.swift in Sources */,
+				PCH3000000000000NF000001 /* NodeCardFactory.swift in Sources */,
+				PCH3000000000000NC000001 /* NodeCardChrome.swift in Sources */,
+				PCH3000000000000OC000001 /* OscillatorCard.swift in Sources */,
+				PCH3000000000000LC000001 /* LadderFilterCard.swift in Sources */,
+				PCH3000000000000DC000001 /* DelayCard.swift in Sources */,
+				PCH3000000000000MC000001 /* MixerCard.swift in Sources */,
+				PCH3000000000000MO000001 /* MasterOutputCard.swift in Sources */,
+				PCH3000000000000GC000001 /* GenericNodeCard.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

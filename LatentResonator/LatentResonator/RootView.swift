@@ -1,26 +1,29 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Root View (Patch vs Performance)
+// MARK: - Root View (Canvas vs Performance)
 //
-// One window, two modes -- Max MSP-style architecture:
-// - PATCH: Node graph editor (v2.0 visual topology) -- DEFAULT, where sound is made
-// - PERFORM: Motherbase (scenes, crossfader, step sequencer) -- for live playing
+// One window. Native Max/Envion-style canvas is the home view: every
+// node renders its own panel, cables draw between port chips, and a
+// LOCK/UNLOCK toggle gates editing without changing what you see.
+// PERFORM mode keeps the Motherbase scene/sequencer board accessible
+// as a secondary surface — eventually it will fold into the canvas as
+// floating panels.
 //
 // The graph is the source of truth. The sound flows through nodes.
-// Global keyboard shortcut system for hands-on-instrument control.
 
 private typealias DS = LRConstants.DS
 
 enum AppMode: String {
-    case patch
+    case canvas
     case perform
 }
 
 struct RootView: View {
 
     @ObservedObject var engine: NeuralEngine
-    @State private var currentMode: AppMode = .patch  // PATCH is now the default -- where sound is made
+    @State private var currentMode: AppMode = .canvas
+    @State private var canvasLockMode: PatchLockMode = .unlocked
     @State private var showModeTransitionAlert: Bool = false
     @AppStorage("LatentResonator.hasSeenOnboarding") private var hasSeenOnboarding = false
     @State private var showOnboarding = false
@@ -29,8 +32,8 @@ struct RootView: View {
         VStack(spacing: 0) {
             modeToggleBar
             switch currentMode {
-            case .patch:
-                patchViewWithTerminal
+            case .canvas:
+                PatchCanvasView(engine: engine, lockMode: $canvasLockMode)
             case .perform:
                 PerformanceMotherbaseView(engine: engine)
             }
@@ -209,18 +212,18 @@ struct RootView: View {
 
     private var modeToggleBar: some View {
         HStack(spacing: 0) {
-            modeTab(label: "PATCH", isActive: currentMode == .patch, activeColor: Color.purple) {
+            modeTab(label: "CANVAS", isActive: currentMode == .canvas, activeColor: DS.neonTurquesa) {
                 if currentMode == .perform && engine.isProcessing {
                     engine.processingStartedInPerformMode = true
                 }
-                currentMode = .patch
+                currentMode = .canvas
             }
-            .help("Node graph editor -- build your sound here (Tab)")
+            .help("Patch canvas -- build and play. Toggle UNLOCK / LOCK in the top-right to switch between editing and live performance (Tab).")
 
             modeTab(label: "PERFORM", isActive: currentMode == .perform, activeColor: DS.neonAmbar) {
                 requestPerformMode()
             }
-            .help("Live performance mode -- scenes, crossfader, step sequencer (Tab)")
+            .help("Motherbase view -- scenes, crossfader, step sequencer (Tab)")
             
             Spacer()
             
@@ -277,14 +280,14 @@ struct RootView: View {
         let noMod = flags.isEmpty
         let key = event.charactersIgnoringModifiers ?? ""
 
-        // Tab -- Cycle through modes: PATCH ↔ PERFORM
+        // Tab -- Cycle through modes: CANVAS ↔ PERFORM
         if noMod && event.keyCode == 48 {
             switch currentMode {
-            case .patch:
+            case .canvas:
                 requestPerformMode()
             case .perform:
                 if engine.isProcessing { engine.processingStartedInPerformMode = true }
-                currentMode = .patch
+                currentMode = .canvas
             }
             return true
         }
