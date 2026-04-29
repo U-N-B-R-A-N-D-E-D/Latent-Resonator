@@ -91,12 +91,15 @@ struct PatchCanvasView: View {
                 lockMode: lockMode,
                 isFocused: focusNodeId == node.id
             )
-            // Snap each card to the position stored on the node itself
-            // (so a saved patch lays itself out exactly as the user left
-            // it). Half-width / half-height offset compensates for
-            // SwiftUI's `.position(...)` centering convention.
-            .position(x: CGFloat(node.x) + 110,
-                      y: CGFloat(node.y) + 60)
+            // Snap each card to the position stored on the node itself.
+            // We use `.offset(...)` instead of `.position(...)` because
+            // `.position` makes the parent ZStack offer its FULL bounds
+            // as available size to the card, which then stretches the
+            // card to window-width. `.offset` only shifts the rendered
+            // origin and leaves the layout frame intact, so the card
+            // keeps its NodeCardMetrics.minWidth (180pt) intrinsic size.
+            .offset(x: CGFloat(node.x), y: CGFloat(node.y))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .onTapGesture {
                 focusNodeId = node.id
             }
