@@ -42,7 +42,8 @@ struct NodeCardChrome<Content: View>: View {
                 footer(text: footerText)
             }
         }
-        .frame(minWidth: NodeCardMetrics.minWidth)
+        .frame(width: NodeCardMetrics.minWidth)
+        .fixedSize(horizontal: false, vertical: true)
         .background(cardBackground)
         .overlay(cardBorder)
         .shadow(color: shadowColor, radius: isFocused ? 14 : 6, y: 2)
