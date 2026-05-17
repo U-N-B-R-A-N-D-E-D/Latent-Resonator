@@ -15,6 +15,7 @@
 		089C166500000036 /* RetroKnob.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000026 /* RetroKnob.swift */; };
 		089C166500000037 /* LatentXYPad.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000027 /* LatentXYPad.swift */; };
 		089C16650000003B /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C16650000002B /* Constants.swift */; };
+		T0P0T3MPL4T35BF00000000001 /* TopologyTemplates.swift in Sources */ = {isa = PBXBuildFile; fileRef = T0P0T3MPL4T35SF00000000001 /* TopologyTemplates.swift */; };
 		089C16650000003C /* SpectralProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000040 /* SpectralProcessor.swift */; };
 		089C16650000003D /* SignalGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000041 /* SignalGenerator.swift */; };
 		089C16650000003E /* ACEStepBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089C166500000042 /* ACEStepBridge.swift */; };
@@ -55,6 +56,7 @@
 		B0683505752A889100000000 /* RoutingNodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8D0DC21B6EC033F00000000 /* RoutingNodes.swift */; };
 		B2C34D7E1234A56700000000 /* MacroBindingsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1B45C8F2345B67800000000 /* MacroBindingsPanel.swift */; };
 		B5D4E8A10000F001 /* PatchEditor in Resources */ = {isa = PBXBuildFile; fileRef = B5D4E8A00000F000 /* PatchEditor */; };
+		T0P0L0G1E5BLD00000000001 /* Topologies in Resources */ = {isa = PBXBuildFile; fileRef = T0P0L0G1E5R3F00000000001 /* Topologies */; };
 		C32CE509F2C27E5200000000 /* ControlNodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D03300FD72A9CEC00000000 /* ControlNodes.swift */; };
 		C4181653397E850000000000 /* GraphHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 129F7F547BE6EDEF00000000 /* GraphHistory.swift */; };
 		C858C0EC25B15F8900000000 /* WebViewBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D15F99D987F573B00000000 /* WebViewBridge.swift */; };
@@ -74,8 +76,6 @@
 		ADCB8E327311C4F6AB92235D /* RecipeBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB627CA29BF1349AD84512E4 /* RecipeBanner.swift */; };
 		AF43B2C6A44914F9DB214932 /* LaneRole.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB7FA51361EFB4908B378FFF /* LaneRole.swift */; };
 		ACB1FEC8ED7DB4B1E86987BB /* PatternChain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A25E2541D797C4F4789EBDEA /* PatternChain.swift */; };
-		AF8E7453558044283BEF73AA /* MultiLaneTemplate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2402AC46DA2415C87AFEDD /* MultiLaneTemplate.swift */; };
-		ADA5A609312AC4D7981F5223 /* TemplateBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADD4C71833C3F453F8D83329 /* TemplateBrowserView.swift */; };
 		ENG3000000000000AB000001 /* AudioBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = ENG2000000000000AB000001 /* AudioBuffer.swift */; };
 		ENG3000000000000BP000001 /* BufferPool.swift in Sources */ = {isa = PBXBuildFile; fileRef = ENG2000000000000BP000001 /* BufferPool.swift */; };
 		ENG3000000000000DN000001 /* DSPNode.swift in Sources */ = {isa = PBXBuildFile; fileRef = ENG2000000000000DN000001 /* DSPNode.swift */; };
@@ -113,6 +113,7 @@
 		089C166500000026 /* RetroKnob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RetroKnob.swift; sourceTree = "<group>"; };
 		089C166500000027 /* LatentXYPad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatentXYPad.swift; sourceTree = "<group>"; };
 		089C16650000002B /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
+		T0P0T3MPL4T35SF00000000001 /* TopologyTemplates.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopologyTemplates.swift; sourceTree = "<group>"; };
 		089C16650000002C /* LatentResonator.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LatentResonator.entitlements; sourceTree = "<group>"; };
 		089C16650000002D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		089C16650000002E /* LatentResonator.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LatentResonator.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -170,6 +171,7 @@
 		FC00000003 /* FiraCode-SemiBold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "FiraCode-SemiBold.ttf"; sourceTree = "<group>"; };
 		FC00000004 /* FiraCode-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "FiraCode-Bold.ttf"; sourceTree = "<group>"; };
 		FC00000030 /* Scripts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Scripts; sourceTree = "<group>"; };
+		T0P0L0G1E5R3F00000000001 /* Topologies */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Topologies; sourceTree = "<group>"; };
 		FDEF985ABBA14A9300000000 /* GraphNode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GraphNode.swift; sourceTree = "<group>"; };
 		B12345678901234567890123 /* SequencerNodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SequencerNodes.swift"; sourceTree = "<group>"; };
 		EXT0000002 /* CGPoint+Codable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CGPoint+Codable.swift"; sourceTree = "<group>"; };
@@ -178,8 +180,7 @@
 		AB627CA29BF1349AD84512E4 /* RecipeBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = RecipeBanner.swift; path = LatentResonator/Views/RecipeBanner.swift; sourceTree = "<group>"; };
 		AB7FA51361EFB4908B378FFF /* LaneRole.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = LaneRole.swift; path = LatentResonator/Config/LaneRole.swift; sourceTree = "<group>"; };
 		A25E2541D797C4F4789EBDEA /* PatternChain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PatternChain.swift; path = LatentResonator/Config/PatternChain.swift; sourceTree = "<group>"; };
-		AA2402AC46DA2415C87AFEDD /* MultiLaneTemplate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MultiLaneTemplate.swift; path = LatentResonator/Config/MultiLaneTemplate.swift; sourceTree = "<group>"; };
-		ADD4C71833C3F453F8D83329 /* TemplateBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TemplateBrowserView.swift; path = LatentResonator/Views/TemplateBrowserView.swift; sourceTree = "<group>"; };		98B898FD671D4FE6A4976C6F /* KickstartTemplate.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "KickstartTemplate.json"; sourceTree = "<group>"; };
+		98B898FD671D4FE6A4976C6F /* KickstartTemplate.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "KickstartTemplate.json"; sourceTree = "<group>"; };
 
 		ENG2000000000000AB000001 /* AudioBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioBuffer.swift; sourceTree = "<group>"; };
 		ENG2000000000000BP000001 /* BufferPool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BufferPool.swift; sourceTree = "<group>"; };
@@ -272,8 +273,7 @@
 				E1B45C8F2345B67800000000 /* MacroBindingsPanel.swift */,
 				E6FDA813FA0B225500000000 /* AudioVisualizerXYPad.swift */,
 				A99B4CB73935D3E600000000 /* TerminalConsoleView.swift */,
-						ADD4C71833C3F453F8D83329 /* TemplateBrowserView.swift */,
-			AC1B6725F9E4B4C25A1884F7 /* RecipeBanner.swift */,
+				AC1B6725F9E4B4C25A1884F7 /* RecipeBanner.swift */,
 				PCH10000000000000000PCH1 /* Patch */,
 );
 			path = Views;
@@ -294,7 +294,7 @@
 				089C16650000005A /* ParameterRouter.swift */,
 						A80405E13EEBD4FFEBB91675 /* LaneRole.swift */,
 			A25E2541D797C4F4789EBDEA /* PatternChain.swift */,
-			AA2402AC46DA2415C87AFEDD /* MultiLaneTemplate.swift */,
+			T0P0T3MPL4T35SF00000000001 /* TopologyTemplates.swift */,
 );
 			path = Config;
 			sourceTree = "<group>";
@@ -303,6 +303,7 @@
 			isa = PBXGroup;
 			children = (
 				98B898FD671D4FE6A4976C6F /* KickstartTemplate.json */,
+				T0P0L0G1E5R3F00000000001 /* Topologies */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -522,6 +523,7 @@
 				FC00000031 /* Scripts in Resources */,
 				B5D4E8A10000F001 /* PatchEditor in Resources */,
 				98B898FD671D4FE6A4976C6E /* KickstartTemplate.json in Resources */,
+				T0P0L0G1E5BLD00000000001 /* Topologies in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -546,6 +548,7 @@
 				089C166500000036 /* RetroKnob.swift in Sources */,
 				089C166500000037 /* LatentXYPad.swift in Sources */,
 				089C16650000003B /* Constants.swift in Sources */,
+				T0P0T3MPL4T35BF00000000001 /* TopologyTemplates.swift in Sources */,
 				089C16650000003C /* SpectralProcessor.swift in Sources */,
 				089C16650000003D /* SignalGenerator.swift in Sources */,
 				089C16650000003E /* ACEStepBridge.swift in Sources */,

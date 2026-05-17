@@ -263,7 +263,12 @@ final class AudioInputNode: BaseGraphNode {
 }
 
 // MARK: - Koenig Seed Node (Whitepaper §4.1)
-
+//
+// Algorithmic composition lineage:
+//   - Koenig: Project One/Two (1960s) — algorithmic composition via stochastic selection
+//   - Xenakis: GENDYN (1971) — dynamic stochastic synthesis
+//   - Roads: Automated granular orchestration (Microsound, 2001)
+//
 /// Dirac impulse generator with Euclidean rhythm distribution E(k,n).
 /// Creates "nucleation sites" for the diffusion model - sparse excitation events
 /// followed by Gaussian noise tails to seed the denoiser.

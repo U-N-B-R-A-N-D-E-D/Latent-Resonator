@@ -145,60 +145,15 @@ class Bridge {
     const now = Date.now();
     const timeSinceLastUpdate = now - this.lastParamUpdateTime;
 
-    // #region agent log - H3 UI throttling trace
-    fetch('http://127.0.0.1:7350/ingest/e5ed72bf-beb2-4b75-a821-f1bb07c7bc0b',{
-      method:'POST',
-      headers:{'Content-Type':'application/json','X-Debug-Session-Id':'54ee48'},
-      body:JSON.stringify({
-        sessionId:'54ee48',
-        location:'bridge.ts:setParameter:entry',
-        message:'setParameter called',
-        data:{nodeId,paramId,valueType:typeof value,timeSinceLastUpdate:String(timeSinceLastUpdate)},
-        timestamp:Date.now(),
-        hypothesisId:'H3'
-      })
-    }).catch(()=>{});
-    // #endregion
-
     // Throttle parameter updates to ~60fps to prevent bridge flooding
     if (timeSinceLastUpdate < this.paramUpdateThrottleMs) {
       // Store pending value and schedule via RAF if not already scheduled
       this.pendingParamUpdate = { nodeId, paramId, value };
 
-      // #region agent log - H3 UI throttled trace
-      fetch('http://127.0.0.1:7350/ingest/e5ed72bf-beb2-4b75-a821-f1bb07c7bc0b',{
-        method:'POST',
-        headers:{'Content-Type':'application/json','X-Debug-Session-Id':'54ee48'},
-        body:JSON.stringify({
-          sessionId:'54ee48',
-          location:'bridge.ts:setParameter:throttled',
-          message:'Update throttled, queued for RAF',
-          data:{nodeId,paramId,throttleMs:String(this.paramUpdateThrottleMs)},
-          timestamp:Date.now(),
-          hypothesisId:'H3'
-        })
-      }).catch(()=>{});
-      // #endregion
-
       if (this.paramUpdateRafId === null) {
         this.paramUpdateRafId = requestAnimationFrame(() => {
           if (this.pendingParamUpdate) {
             const { nodeId, paramId, value } = this.pendingParamUpdate;
-
-            // #region agent log - H3 UI RAF execute trace
-            fetch('http://127.0.0.1:7350/ingest/e5ed72bf-beb2-4b75-a821-f1bb07c7bc0b',{
-              method:'POST',
-              headers:{'Content-Type':'application/json','X-Debug-Session-Id':'54ee48'},
-              body:JSON.stringify({
-                sessionId:'54ee48',
-                location:'bridge.ts:setParameter:rafExecute',
-                message:'RAF executing queued update',
-                data:{nodeId,paramId},
-                timestamp:Date.now(),
-                hypothesisId:'H3'
-              })
-            }).catch(()=>{});
-            // #endregion
 
             this.send({
               action: 'graph.setParameter',

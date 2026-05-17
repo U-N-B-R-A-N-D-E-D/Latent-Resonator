@@ -17,17 +17,14 @@ struct PerformanceMotherbaseView: View {
     @ObservedObject var engine: NeuralEngine
 
     @State private var clipboardStep: PerformanceStep? = nil
-    @State private var xyAxisMode: XYAxisMode = .txtChs
     @State private var showTemplateBrowser = false
 
-    // MARK: - XY Axis Mode
-
-    enum XYAxisMode: String, CaseIterable {
-        case txtChs = "TXT/CHS"
-        case cfgFbk = "CFG/FBK"
-        case cutRes = "CUT/RES"
-        case cntFlat = "CNT/FLAT"
-    }
+    /// B.1.4 — paramId of the macro parameter the user selected for the X axis
+    /// of the XY pad. Falls back to the first exposed control of the focus
+    /// macro when empty.
+    @State private var selectedXParamKey: String = ""
+    /// B.1.4 — paramId of the macro parameter the user selected for the Y axis.
+    @State private var selectedYParamKey: String = ""
 
     var body: some View {
         ZStack {
@@ -40,6 +37,12 @@ struct PerformanceMotherbaseView: View {
 
             VStack(spacing: 0) {
                 topBar
+                LRDivider()
+
+                // B.1.1 — Macro tab row: switch focus across macros, with
+                // inline mute/solo toggles.
+                macroTabRow
+                    .background(DS.surfaceElevated.opacity(0.4))
                 LRDivider()
 
                 ScrollView(.vertical, showsIndicators: false) {
@@ -301,8 +304,101 @@ struct PerformanceMotherbaseView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Macro Control Section
+    // MARK: - Macro Tab Row (B.1.1)
 
+    /// Horizontal scrollable row of macro "tabs". Each tab shows the macro
+    /// name and inline `M` / `S` toggles (mute / solo). Selecting a tab
+    /// writes the macro's id into `engine.focusMacroId`.
+    ///
+    /// This is the v2 replacement for the old lane-tab strip in
+    /// `PerformanceMotherbaseView.swift.backup_v1` — iterates
+    /// `engine.macroNodes` instead of `engine.lanes`.
+    private var macroTabRow: some View {
+        HStack(spacing: DS.spacingSM) {
+            if engine.macroNodes.isEmpty {
+                Text("NO MACROS — add a Macro node in PATCH mode")
+                    .font(DS.font(DS.fontCaption2, weight: .bold))
+                    .foregroundColor(DS.textDisabled)
+                    .padding(.vertical, DS.spacingSM)
+                Spacer()
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: DS.spacingSM) {
+                        ForEach(engine.macroNodes, id: \.id) { macro in
+                            macroTab(macro)
+                        }
+                    }
+                    .padding(.vertical, DS.spacingXS)
+                }
+            }
+        }
+        .padding(.horizontal, DS.spacingXL)
+        .padding(.vertical, DS.spacingXS)
+    }
+
+    /// A single macro tab: name + mute/solo toggles. Tapping the name
+    /// sets `engine.focusMacroId`. Mute/solo toggles flip the macro's
+    /// `isMuted` / `isSoloed` parameters and notify the mixer.
+    @ViewBuilder
+    private func macroTab(_ macro: MacroNode) -> some View {
+        let isFocused = engine.focusMacro?.id == macro.id
+        let isMuted = (macro.parameters["isMuted"] as? Bool) ?? false
+        let isSoloed = (macro.parameters["isSoloed"] as? Bool) ?? false
+
+        HStack(spacing: DS.spacingXS) {
+            Button(action: { engine.focusMacroId = macro.id }) {
+                HStack(spacing: DS.spacingXS) {
+                    Circle()
+                        .fill(isFocused ? DS.neonTurquesa : DS.textTertiary)
+                        .frame(width: DS.dotSM, height: DS.dotSM)
+
+                    Text(macro.name.uppercased())
+                        .font(DS.font(DS.fontCaption, weight: .bold))
+                        .foregroundColor(isFocused ? .white : DS.textSecondary)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, DS.spacingSM)
+                .padding(.vertical, DS.togglePaddingV)
+            }
+            .buttonStyle(.plain)
+            .help("Focus macro '\(macro.name)'")
+
+            LRToggle(
+                label: "M",
+                isActive: isMuted,
+                activeColor: DS.danger,
+                helpText: "Mute macro '\(macro.name)'"
+            ) {
+                macro.setParam("isMuted", value: !isMuted)
+                engine.updateMacroMixerState()
+            }
+
+            LRToggle(
+                label: "S",
+                isActive: isSoloed,
+                activeColor: DS.neonAmbar,
+                helpText: "Solo macro '\(macro.name)'"
+            ) {
+                macro.setParam("isSoloed", value: !isSoloed)
+                engine.updateMacroMixerState()
+            }
+        }
+        .padding(.horizontal, DS.spacingXS)
+        .background(isFocused ? DS.neonTurquesa.opacity(0.18) : DS.surfaceSubtle)
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.radiusSM)
+                .stroke(isFocused ? DS.neonTurquesa : DS.border,
+                        lineWidth: isFocused ? 2 : 1)
+        )
+        .cornerRadius(DS.radiusSM)
+    }
+
+    // MARK: - Macro Control Section (B.1.4)
+
+    /// Macro drift / XY pad section. Hosts the WebView-backed
+    /// `AudioVisualizerXYPad` driven by user-selectable axis parameters
+    /// from `engine.nodeGraph.exposedControls` (filtered to the focus
+    /// macro).
     private var macroControlSection: some View {
         VStack(spacing: DS.spacingSM) {
             HStack {
@@ -312,20 +408,20 @@ struct PerformanceMotherbaseView: View {
                     trailingColor: DS.neonTurquesa.opacity(0.6)
                 )
                 Spacer()
-                xyAxisModePicker
             }
 
+            xyAxisParamPickers
+
             if let focusMacro = engine.focusMacro {
-                MacroXYPadView(
-                    macroNode: focusMacro,
-                    engine: engine,
-                    xyAxisMode: xyAxisMode,
-                    xyBindingX: xyBindingX,
-                    xyBindingY: xyBindingY,
-                    xyRangeX: xyRangeX,
-                    xyRangeY: xyRangeY,
-                    xyLabelX: xyLabelX,
-                    xyLabelY: xyLabelY
+                AudioVisualizerXYPad(
+                    x: xyBindingX(macro: focusMacro),
+                    y: xyBindingY(macro: focusMacro),
+                    xRange: xyRangeX(macro: focusMacro),
+                    yRange: xyRangeY(macro: focusMacro),
+                    xLabel: xyLabelX(macro: focusMacro),
+                    yLabel: xyLabelY(macro: focusMacro),
+                    waveformSource: { (focusMacro.parameters["waveformSnapshot"] as? [Float]) ?? [] },
+                    spectralSource: { (focusMacro.parameters["spectralBins"] as? [Float]) ?? [] }
                 )
                 .frame(height: LRConstants.xyPadHeight)
             } else {
@@ -334,6 +430,15 @@ struct PerformanceMotherbaseView: View {
         }
         .padding(.horizontal, DS.spacingXL)
         .padding(.vertical, DS.spacingSM)
+        .onAppear { ensureAxisDefaults() }
+        .onChange(of: engine.focusMacroId) { _, _ in
+            // Reset axis defaults when the focus macro changes — otherwise
+            // the user gets stuck on a paramId that does not exist on the
+            // new macro.
+            selectedXParamKey = ""
+            selectedYParamKey = ""
+            ensureAxisDefaults()
+        }
     }
 
     private var emptyMacroPlaceholder: some View {
@@ -352,105 +457,102 @@ struct PerformanceMotherbaseView: View {
             )
     }
 
-    private var xyAxisModePicker: some View {
-        LRSegmentPicker(
-            items: XYAxisMode.allCases,
-            selected: xyAxisMode,
-            color: DS.neonTurquesa,
-            labelForItem: { $0.rawValue },
-            onSelect: { xyAxisMode = $0 }
+    /// Per-axis parameter pickers (B.1.4). When the focus macro has any
+    /// exposed controls, this row lets the user pick which parameter goes
+    /// on X and which on Y. The XY pad below reads the current selection
+    /// via `xyBindingX(macro:)` / `xyBindingY(macro:)`.
+    private var xyAxisParamPickers: some View {
+        let controls = currentMacroExposedControls
+        return HStack(spacing: DS.spacingMD) {
+            if controls.isEmpty {
+                Text("No exposed controls — expose parameters in PATCH mode.")
+                    .font(DS.font(DS.fontCaption2))
+                    .foregroundColor(DS.textDisabled)
+                Spacer()
+            } else {
+                axisPicker(label: "X", selection: $selectedXParamKey, controls: controls, color: DS.neonTurquesa)
+                axisPicker(label: "Y", selection: $selectedYParamKey, controls: controls, color: DS.neonAmbar)
+                Spacer()
+            }
+        }
+    }
+
+    /// Build a small picker for one axis. `selection` is the paramId string
+    /// currently chosen for that axis.
+    private func axisPicker(label: String, selection: Binding<String>, controls: [ExposedControl], color: Color) -> some View {
+        HStack(spacing: DS.spacingXS) {
+            Text("\(label):")
+                .font(DS.font(DS.fontCaption2, weight: .bold))
+                .foregroundColor(color)
+            Picker(selection: selection, label: EmptyView()) {
+                ForEach(controls, id: \.paramId) { control in
+                    Text(control.label).tag(control.paramId)
+                }
+            }
+            .pickerStyle(MenuPickerStyle())
+            .labelsHidden()
+            .frame(width: 160)
+            .help("Choose macro parameter for the \(label) axis")
+        }
+    }
+
+    /// All exposed controls of the focus macro, in the order they were
+    /// registered. Empty when no macro is in focus.
+    private var currentMacroExposedControls: [ExposedControl] {
+        guard let macroId = engine.focusMacro?.id else { return [] }
+        return engine.nodeGraph.exposedControls.filter { $0.nodeId == macroId }
+    }
+
+    /// Seed the axis selections with the first / second exposed control if
+    /// the user has not yet made an explicit choice. Called from `onAppear`
+    /// and when the focus macro changes.
+    private func ensureAxisDefaults() {
+        let controls = currentMacroExposedControls
+        guard !controls.isEmpty else { return }
+        if selectedXParamKey.isEmpty || !controls.contains(where: { $0.paramId == selectedXParamKey }) {
+            selectedXParamKey = controls.first?.paramId ?? ""
+        }
+        if selectedYParamKey.isEmpty || !controls.contains(where: { $0.paramId == selectedYParamKey }) {
+            // Prefer a parameter different from X when at least two exist.
+            let yCandidate = controls.first(where: { $0.paramId != selectedXParamKey }) ?? controls.first
+            selectedYParamKey = yCandidate?.paramId ?? ""
+        }
+    }
+
+    // MARK: - XY Pad Bindings (B.1.4 — dynamic, paramId-driven)
+
+    private func xyBindingX(macro: MacroNode) -> Binding<Float> {
+        let key = selectedXParamKey
+        let fallback = currentMacroExposedControls.first(where: { $0.paramId == key })?.defaultValue ?? 0.0
+        return Binding(
+            get: { macro.getParam(key, default: fallback) },
+            set: { macro.setParam(key, value: $0) }
         )
-        .frame(width: 220)
-        .help("Choose which parameters the XY pad controls")
     }
 
-    // MARK: - XY Pad Bindings (Dynamic based on mode)
-
-    private func xyBindingX(macroNode: MacroNode) -> Binding<Float> {
-        // Map XY mode to macro parameters using getParam/setParam
-        switch xyAxisMode {
-        case .txtChs:
-            return Binding(
-                get: { macroNode.getParam("texture", default: 0.5) },
-                set: { macroNode.setParam("texture", value: $0) }
-            )
-        case .cfgFbk:
-            return Binding(
-                get: { macroNode.getParam("guidanceScale", default: 7.5) },
-                set: { macroNode.setParam("guidanceScale", value: $0) }
-            )
-        case .cutRes:
-            return Binding(
-                get: { macroNode.getParam("filterCutoff", default: 1000.0) },
-                set: { macroNode.setParam("filterCutoff", value: $0) }
-            )
-        case .cntFlat:
-            return Binding(
-                get: { macroNode.getParam("spectralCentroidNormalized", default: 0.5) },
-                set: { _ in /* Read-only */ }
-            )
-        }
+    private func xyBindingY(macro: MacroNode) -> Binding<Float> {
+        let key = selectedYParamKey
+        let fallback = currentMacroExposedControls.first(where: { $0.paramId == key })?.defaultValue ?? 0.0
+        return Binding(
+            get: { macro.getParam(key, default: fallback) },
+            set: { macro.setParam(key, value: $0) }
+        )
     }
 
-    private func xyBindingY(macroNode: MacroNode) -> Binding<Float> {
-        switch xyAxisMode {
-        case .txtChs:
-            return Binding(
-                get: { macroNode.getParam("chaos", default: 0.5) },
-                set: { macroNode.setParam("chaos", value: $0) }
-            )
-        case .cfgFbk:
-            return Binding(
-                get: { macroNode.getParam("feedbackAmount", default: 0.3) },
-                set: { macroNode.setParam("feedbackAmount", value: $0) }
-            )
-        case .cutRes:
-            return Binding(
-                get: { macroNode.getParam("filterResonance", default: 0.5) },
-                set: { macroNode.setParam("filterResonance", value: $0) }
-            )
-        case .cntFlat:
-            return Binding(
-                get: { macroNode.getParam("spectralFlatnessNormalized", default: 0.5) },
-                set: { _ in /* Read-only */ }
-            )
-        }
+    private func xyRangeX(macro: MacroNode) -> ClosedRange<Float> {
+        currentMacroExposedControls.first(where: { $0.paramId == selectedXParamKey })?.range ?? 0...1
     }
 
-    private var xyRangeX: ClosedRange<Float> {
-        switch xyAxisMode {
-        case .txtChs: return 0...1
-        case .cfgFbk: return 1...15
-        case .cutRes: return 20...20000
-        case .cntFlat: return 0...1
-        }
+    private func xyRangeY(macro: MacroNode) -> ClosedRange<Float> {
+        currentMacroExposedControls.first(where: { $0.paramId == selectedYParamKey })?.range ?? 0...1
     }
 
-    private var xyRangeY: ClosedRange<Float> {
-        switch xyAxisMode {
-        case .txtChs: return 0...1
-        case .cfgFbk: return 0...1
-        case .cutRes: return 0...1
-        case .cntFlat: return 0...1
-        }
+    private func xyLabelX(macro: MacroNode) -> String {
+        currentMacroExposedControls.first(where: { $0.paramId == selectedXParamKey })?.label ?? "X"
     }
 
-    private var xyLabelX: String {
-        switch xyAxisMode {
-        case .txtChs: return "TXT"
-        case .cfgFbk: return "CFG"
-        case .cutRes: return "CUT"
-        case .cntFlat: return "CNT"
-        }
-    }
-
-    private var xyLabelY: String {
-        switch xyAxisMode {
-        case .txtChs: return "CHS"
-        case .cfgFbk: return "FBK"
-        case .cutRes: return "RES"
-        case .cntFlat: return "FLAT"
-        }
+    private func xyLabelY(macro: MacroNode) -> String {
+        currentMacroExposedControls.first(where: { $0.paramId == selectedYParamKey })?.label ?? "Y"
     }
 
     // MARK: - Step Grid Section
@@ -510,8 +612,111 @@ struct PerformanceMotherbaseView: View {
                         }
                     }
                 }
+
+                // C.1 — Advance-rate / BPM / chain-length controls bound
+                // directly to the focus SequencerNode parameters.
+                sequencerRateControls(stepGrid: stepGrid)
             }
         }
+    }
+
+    /// C.1 — Numeric controls for the SequencerNode's `chainLength`,
+    /// `stepTimeBPM` and `stepAdvanceDivisor`. The controls always reflect
+    /// the focus macro's sequencer; mutations go through the node so the
+    /// engine timer resyncs immediately.
+    @ViewBuilder
+    private func sequencerRateControls(stepGrid: StepGrid) -> some View {
+        HStack(spacing: DS.spacingSM) {
+            stepperReadout(
+                label: "LEN",
+                value: stepGrid.chainLength,
+                range: 1...StepGrid.maxSteps,
+                color: DS.neonTurquesa,
+                help: "Active step count (1...\(StepGrid.maxSteps)). Pattern loops over this many steps."
+            ) { newValue in
+                guard let sequencer = engine.focusSequencerNode else { return }
+                sequencer.stepGrid.chainLength = newValue
+                sequencer.parameters["chainLength"] = newValue
+            }
+
+            if stepGrid.advanceMode == .time {
+                stepperReadout(
+                    label: "BPM",
+                    value: stepGrid.stepTimeBPM,
+                    range: LRConstants.stepTimeBPMRange.lowerBound...LRConstants.stepTimeBPMRange.upperBound,
+                    color: DS.neonAmbar,
+                    help: "Beats per minute for TIME advance mode."
+                ) { newValue in
+                    guard let sequencer = engine.focusSequencerNode else { return }
+                    sequencer.stepGrid.stepTimeBPM = newValue
+                    sequencer.parameters["stepTimeBPM"] = newValue
+                    engine.syncStepTimer()
+                }
+            }
+
+            if stepGrid.advanceMode == .iteration {
+                stepperReadout(
+                    label: "÷",
+                    value: stepGrid.stepAdvanceDivisor,
+                    range: 1...32,
+                    color: DS.neonAmbar,
+                    help: "Advance one step every N feedback iterations."
+                ) { newValue in
+                    guard let sequencer = engine.focusSequencerNode else { return }
+                    sequencer.stepGrid.stepAdvanceDivisor = max(1, newValue)
+                    sequencer.parameters["stepAdvanceDivisor"] = max(1, newValue)
+                }
+            }
+        }
+    }
+
+    /// Compact `-/+` stepper readout used by `sequencerRateControls`.
+    @ViewBuilder
+    private func stepperReadout(
+        label: String,
+        value: Int,
+        range: ClosedRange<Int>,
+        color: Color,
+        help: String,
+        onChange: @escaping (Int) -> Void
+    ) -> some View {
+        HStack(spacing: 2) {
+            Text(label)
+                .font(DS.font(DS.fontCaption2, weight: .bold))
+                .foregroundColor(color.opacity(0.8))
+
+            Button(action: {
+                let next = max(range.lowerBound, value - 1)
+                if next != value { onChange(next) }
+            }) {
+                Text("−")
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(color)
+                    .frame(width: 16, height: 16)
+                    .background(color.opacity(0.12))
+                    .cornerRadius(2)
+            }
+            .buttonStyle(.plain)
+
+            Text("\(value)")
+                .font(DS.font(DS.fontCaption, weight: .bold))
+                .foregroundColor(.white)
+                .frame(minWidth: 28)
+
+            Button(action: {
+                let next = min(range.upperBound, value + 1)
+                if next != value { onChange(next) }
+            }) {
+                Text("+")
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(color)
+                    .frame(width: 16, height: 16)
+                    .background(color.opacity(0.12))
+                    .cornerRadius(2)
+            }
+            .buttonStyle(.plain)
+        }
+        .help(help)
     }
 
     @State private var pressedStepIndex: Int? = nil
@@ -595,6 +800,14 @@ struct PerformanceMotherbaseView: View {
                         #else
                         let shift = false
                         #endif
+                        // C.1 — plain (non-shift) tap toggles the step's
+                        // active flag (.skip <-> .note) directly on the
+                        // SequencerNode, in addition to focusing it for
+                        // p-lock editing. Shift+tap keeps the multi-select
+                        // behaviour for batch editing.
+                        if !shift {
+                            engine.toggleStepActive(at: index)
+                        }
                         engine.handleStepTap(index: index, shiftPressed: shift, chainLength: chainLength)
                     }
                 }
@@ -1003,58 +1216,73 @@ struct PerformanceMotherbaseView: View {
         }
     }
 
-    // MARK: - Status Bar
+    // MARK: - Status Bar (B.1.2)
 
+    /// Bottom status strip showing: bridge process state, current BPM (from
+    /// the focus sequencer when present), the focus macro's name, and
+    /// whether audio processing is on. Updates live via SwiftUI observation
+    /// of `@Published` properties on `engine`.
     private var statusBar: some View {
         HStack(spacing: DS.spacingMD) {
-            Text("[ v2.0 MACRO ]")
+            // Bridge process state (with colored dot)
+            Circle()
+                .fill(bridgeStatusColor)
+                .frame(width: DS.dotSM, height: DS.dotSM)
+            Text("BRIDGE: \(bridgeStatusMessage)")
                 .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(DS.textDisabled)
+                .foregroundColor(DS.textTertiary)
+
+            // BPM, read from the focus sequencer (if any) — otherwise the
+            // global default. Acts as a live readout, not a control.
+            Text("BPM: \(currentBPM)")
+                .font(DS.font(DS.fontCaption2, weight: .bold))
+                .foregroundColor(DS.neonTurquesa.opacity(0.7))
+
+            // Focus macro name (or — if none)
+            Text("MACRO: \(engine.focusMacro?.name.uppercased() ?? "—")")
+                .font(DS.font(DS.fontCaption2, weight: .bold))
+                .foregroundColor(DS.textSecondary)
+                .lineLimit(1)
 
             Spacer()
 
+            // Processing state
+            HStack(spacing: DS.spacingXS) {
+                Circle()
+                    .fill(engine.isProcessing ? DS.success : DS.textTertiary)
+                    .frame(width: DS.dotSM, height: DS.dotSM)
+                Text(engine.isProcessing ? "DSP: ON" : "DSP: OFF")
+                    .font(DS.font(DS.fontCaption2, weight: .bold))
+                    .foregroundColor(engine.isProcessing ? DS.success : DS.textTertiary)
+            }
+
             Text("CYCLES: \(engine.globalCycleCount)")
-                .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(DS.neonTurquesa.opacity(0.6))
+                .font(DS.font(DS.fontCaption2))
+                .foregroundColor(DS.textTertiary.opacity(0.6))
 
             let currentStep = (engine.focusStepGrid?.currentStepIndex ?? 0) + 1
             let totalSteps = engine.focusStepGrid?.chainLength ?? 16
             Text("STEP: \(currentStep)/\(totalSteps)")
                 .font(DS.font(DS.fontCaption2))
-                .foregroundColor(DS.textTertiary)
-
-            let mode = engine.focusStepGrid?.advanceMode.rawValue.uppercased() ?? "--"
-            Text("MODE: \(mode)")
-                .font(DS.font(DS.fontCaption2))
-                .foregroundColor(DS.textTertiary)
+                .foregroundColor(DS.textTertiary.opacity(0.6))
         }
         .padding(.horizontal, DS.spacingXL)
         .padding(.bottom, DS.spacingMD)
     }
-}
 
-// MARK: - Macro XY Pad View
+    /// Color for the bridge status dot, derived from `engine.bridgeProcess.state`.
+    private var bridgeStatusColor: Color {
+        switch engine.bridgeProcess.state {
+        case .running:    return DS.success
+        case .launching, .installing, .settingUp, .stopping: return DS.warning
+        case .error:      return DS.danger
+        case .idle:       return DS.textTertiary
+        }
+    }
 
-private struct MacroXYPadView: View {
-    @ObservedObject var macroNode: MacroNode
-    @ObservedObject var engine: NeuralEngine
-    let xyAxisMode: PerformanceMotherbaseView.XYAxisMode
-    let xyBindingX: (MacroNode) -> Binding<Float>
-    let xyBindingY: (MacroNode) -> Binding<Float>
-    let xyRangeX: ClosedRange<Float>
-    let xyRangeY: ClosedRange<Float>
-    let xyLabelX: String
-    let xyLabelY: String
-
-    var body: some View {
-        LatentXYPad(
-            x: xyBindingX(macroNode),
-            y: xyBindingY(macroNode),
-            xRange: xyRangeX,
-            yRange: xyRangeY,
-            xLabel: xyLabelX,
-            yLabel: xyLabelY,
-            isReadOnly: xyAxisMode == .cntFlat
-        )
+    /// Current BPM as read from the focus sequencer's `stepTimeBPM`, or the
+    /// global default when no sequencer is in focus.
+    private var currentBPM: Int {
+        engine.focusSequencerNode?.stepTimeBPM ?? LRConstants.stepTimeBPMDefault
     }
 }

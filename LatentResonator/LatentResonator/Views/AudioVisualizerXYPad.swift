@@ -4,22 +4,49 @@ import AppKit
 
 // MARK: - Audio Visualizer XY Pad
 //
-// WebView-based audio visualizer that replaces the traditional XY pad.
-// Shows real-time waveform + FFT while allowing touch control for Texture/Chaos.
+// WebView-based audio visualizer XY pad with **generic** value bindings.
+// Owns a Canvas that renders the live waveform + FFT (read from
+// `waveformSource` / `spectralSource` closures) while the user drags
+// the touch cursor.
 //
-// Touch interaction maps to macro parameters:
-// - X axis: Texture (spectral density)
-// - Y axis: Chaos (randomness)
+// X and Y are exposed as `Binding<Float>` so this widget is agnostic
+// of macros, lanes, or any specific node type — the parent view decides
+// which parameter goes on each axis.
 //
-// v2.0 Migration: Replaced ResonatorLane with MacroNode. All parameter access
-// now goes through NodeGraph API. Visualization data comes from analysis nodes
-// or macroNode parameters.
+// v2.0 Migration: removed `ResonatorLane` dependency. v2.1: also
+// removed the hard-coded `MacroNode` / texture+chaos parameter coupling.
+// The widget now reads visualisation data via plain closures and writes
+// X/Y through generic `Binding<Float>`s.
 
 private typealias DS = LRConstants.DS
 
 struct AudioVisualizerXYPad: NSViewRepresentable {
-    @ObservedObject var macroNode: MacroNode
-    let engine: NeuralEngine
+    /// Current X value (e.g. focus macro's X-axis parameter). 2-way bound.
+    @Binding var x: Float
+    /// Current Y value (e.g. focus macro's Y-axis parameter). 2-way bound.
+    @Binding var y: Float
+
+    /// Range for the X axis. Used to map touch position → parameter value.
+    var xRange: ClosedRange<Float> = 0...1
+    /// Range for the Y axis. Used to map touch position → parameter value.
+    var yRange: ClosedRange<Float> = 0...1
+
+    /// Short label for the X axis (rendered in the HTML overlay).
+    var xLabel: String = "X"
+    /// Short label for the Y axis (rendered in the HTML overlay).
+    var yLabel: String = "Y"
+
+    /// Closure providing the latest waveform samples (-1...+1). Optional.
+    /// Called at ~30 Hz on the main queue. Return an empty array to skip.
+    var waveformSource: (() -> [Float])? = nil
+    /// Closure providing the latest spectral magnitudes (0...1). Optional.
+    /// Called at ~30 Hz on the main queue. Return an empty array to skip.
+    var spectralSource: (() -> [Float])? = nil
+
+    /// Optional notification fired after touch X/Y have been written to the
+    /// bindings. Use for triggering downstream macro application, parameter
+    /// smoothing, telemetry, etc.
+    var onTouch: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -29,35 +56,39 @@ struct AudioVisualizerXYPad: NSViewRepresentable {
         webView.loadHTMLString(audioVisualizerHTMLContent, baseURL: nil)
 
         context.coordinator.webView = webView
-        context.coordinator.macroNode = macroNode
+        context.coordinator.parent = self
 
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        // Update coordinator's macroNode reference when focus changes
-        context.coordinator.macroNode = macroNode
-        // Update audio data when macroNode publishes new snapshots
+        // Keep the coordinator pointed at the latest binding snapshot so that
+        // touch events write through to the most recent X/Y bindings.
+        context.coordinator.parent = self
         context.coordinator.updateAudioData()
+        context.coordinator.updateAxisLabels()
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(macroNode: macroNode, engine: engine)
+        Coordinator(parent: self)
     }
 
     class Coordinator: NSObject, WKScriptMessageHandler {
         var webView: WKWebView?
-        var macroNode: MacroNode
-        let engine: NeuralEngine
+        /// Latest parent snapshot. Updated from `updateNSView` so that
+        /// touch handlers always read the most recent bindings.
+        var parent: AudioVisualizerXYPad
         private var updateTimer: Timer?
         private var lastUpdateTime: Date = .distantPast
+        private var lastSentXLabel: String = ""
+        private var lastSentYLabel: String = ""
 
-        init(macroNode: MacroNode, engine: NeuralEngine) {
-            self.macroNode = macroNode
-            self.engine = engine
+        init(parent: AudioVisualizerXYPad) {
+            self.parent = parent
             super.init()
 
-            // Throttle updates to 30fps (33ms) to prevent overwhelming the WebView
+            // Throttle updates to 30 Hz (33 ms) to keep the WebView painting smooth
+            // without flooding the JS bridge.
             updateTimer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { [weak self] _ in
                 self?.updateAudioData()
             }
@@ -70,22 +101,17 @@ struct AudioVisualizerXYPad: NSViewRepresentable {
         func updateAudioData() {
             guard let webView = webView else { return }
 
-            // v2.0: Get visualization data from macroNode parameters
-            // These are updated by the audio graph analysis nodes
-            let waveformData: [Float] = getWaveformData()
-            let spectralData: [Float] = getSpectralData()
+            let waveformData: [Float] = parent.waveformSource?() ?? []
+            let spectralData: [Float] = parent.spectralSource?() ?? []
 
-            // Skip if no data available
             guard !waveformData.isEmpty || !spectralData.isEmpty else { return }
 
-            // Throttle: only update if enough time has passed
             let now = Date()
             guard now.timeIntervalSince(lastUpdateTime) > 0.03 else { return }
             lastUpdateTime = now
 
             let waveformJSON = waveformData.map { String($0) }.joined(separator: ",")
 
-            // Downsample spectral data to 128 for performance
             let downsampledFFT: [Float]
             if spectralData.count > 128 {
                 let strideValue = spectralData.count / 128
@@ -98,57 +124,28 @@ struct AudioVisualizerXYPad: NSViewRepresentable {
 
             let fftJSON = downsampledFFT.map { String($0) }.joined(separator: ",")
 
-            let script = """
-                window.updateAudioData({
-                    waveform: [\(waveformJSON)],
-                    fft: [\(fftJSON)]
-                });
-            """
+            let script = "window.updateAudioData({waveform:[\(waveformJSON)],fft:[\(fftJSON)]});"
 
-            webView.evaluateJavaScript(script) { result, error in
+            webView.evaluateJavaScript(script) { _, error in
                 if let error = error {
                     print("AudioVisualizer: JS error: \(error)")
                 }
             }
         }
 
-        /// v2.0: Get waveform data from macroNode parameters or analysis nodes.
-        /// Analysis nodes store their output in the macroNode's parameters.
-        private func getWaveformData() -> [Float] {
-            // Try to get waveform from macroNode parameters (set by analysis nodes)
-            if let waveformParam = macroNode.parameters["waveformSnapshot"] as? [Float] {
-                return waveformParam
-            }
-
-            // Fallback: look for analysis nodes in the internal graph that might have waveform data
-            for node in macroNode.internalGraph.nodes.values {
-                if node.nodeType == "spectral_analyzer" || node.nodeType == "scope" {
-                    if let waveform = node.parameters["waveformOutput"] as? [Float] {
-                        return waveform
-                    }
-                }
-            }
-
-            return []
-        }
-
-        /// v2.0: Get spectral data from macroNode parameters or analysis nodes.
-        private func getSpectralData() -> [Float] {
-            // Try to get spectral bins from macroNode parameters
-            if let spectralParam = macroNode.parameters["spectralBins"] as? [Float] {
-                return spectralParam
-            }
-
-            // Fallback: look for spectral analyzer nodes
-            for node in macroNode.internalGraph.nodes.values {
-                if node.nodeType == "spectral_analyzer" {
-                    if let bins = node.parameters["magnitudeOutput"] as? [Float] {
-                        return bins
-                    }
-                }
-            }
-
-            return []
+        /// Push the current X/Y axis labels into the HTML overlay if they
+        /// changed since the last invocation. Cheap no-op when stable.
+        func updateAxisLabels() {
+            guard let webView = webView else { return }
+            let xL = parent.xLabel
+            let yL = parent.yLabel
+            guard xL != lastSentXLabel || yL != lastSentYLabel else { return }
+            lastSentXLabel = xL
+            lastSentYLabel = yL
+            let escX = xL.replacingOccurrences(of: "'", with: "\\'")
+            let escY = yL.replacingOccurrences(of: "'", with: "\\'")
+            let script = "window.updateAxisLabels && window.updateAxisLabels('\(escX)', '\(escY)');"
+            webView.evaluateJavaScript(script, completionHandler: nil)
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -157,53 +154,28 @@ struct AudioVisualizerXYPad: NSViewRepresentable {
 
             switch action {
             case "touchMove":
-                if let x = body["x"] as? Double, let y = body["y"] as? Double {
-                    // Map X/Y to Texture/Chaos macros
-                    let texture = Float(x) * (LRConstants.macroRange.upperBound - LRConstants.macroRange.lowerBound) + LRConstants.macroRange.lowerBound
-                    let chaos = Float(1.0 - y) * (LRConstants.macroRange.upperBound - LRConstants.macroRange.lowerBound) + LRConstants.macroRange.lowerBound
+                if let nx = body["x"] as? Double, let ny = body["y"] as? Double {
+                    // Map normalized touch coords [0, 1] into the parent's X/Y
+                    // ranges. Y is inverted so that moving the cursor "up" raises
+                    // the bound value (HTML pointer y grows downward).
+                    let xRange = parent.xRange
+                    let yRange = parent.yRange
+                    let xValue = Float(nx) * (xRange.upperBound - xRange.lowerBound) + xRange.lowerBound
+                    let yValue = Float(1.0 - ny) * (yRange.upperBound - yRange.lowerBound) + yRange.lowerBound
+
+                    let clampedX = min(max(xValue, xRange.lowerBound), xRange.upperBound)
+                    let clampedY = min(max(yValue, yRange.lowerBound), yRange.upperBound)
 
                     DispatchQueue.main.async { [weak self] in
                         guard let self = self else { return }
-
-                        // v2.0: Update NodeGraph parameters (source of truth)
-                        self.engine.nodeGraph.setParameter(
-                            nodeId: self.macroNode.id,
-                            key: "texture",
-                            value: texture
-                        )
-                        self.engine.nodeGraph.setParameter(
-                            nodeId: self.macroNode.id,
-                            key: "chaos",
-                            value: chaos
-                        )
-
-                        // Trigger macro application
-                        self.engine.nodeGraph.setParameter(
-                            nodeId: self.macroNode.id,
-                            key: "applyMacroTexture",
-                            value: 1.0
-                        )
-                        self.engine.nodeGraph.setParameter(
-                            nodeId: self.macroNode.id,
-                            key: "applyMacroChaos",
-                            value: 1.0
-                        )
+                        self.parent.x = clampedX
+                        self.parent.y = clampedY
+                        self.parent.onTouch?()
                     }
                 }
             case "touchEnd":
-                // Trigger final macro application
                 DispatchQueue.main.async { [weak self] in
-                    guard let self = self else { return }
-                    self.engine.nodeGraph.setParameter(
-                        nodeId: self.macroNode.id,
-                        key: "applyMacroTexture",
-                        value: 1.0
-                    )
-                    self.engine.nodeGraph.setParameter(
-                        nodeId: self.macroNode.id,
-                        key: "applyMacroChaos",
-                        value: 1.0
-                    )
+                    self?.parent.onTouch?()
                 }
             default:
                 break
@@ -254,10 +226,10 @@ body {
 <body>
 <canvas id="canvas"></canvas>
 <div class="overlay">DRIFT FIELD</div>
-<div class="axis-labels">
-    <div>X: TEXTURE</div>
-    <div>Y: CHAOS</div>
-</div>
+        <div id="axis-labels" class="axis-labels">
+            <div>X: TEXTURE</div>
+            <div>Y: CHAOS</div>
+        </div>
 <script>
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -273,6 +245,14 @@ resizeCanvas();
 
 let waveformData = [];
 let fftData = [];
+
+// Update the floating axis labels. Called from Swift via WKWebView.
+window.updateAxisLabels = function(xLabel, yLabel) {
+    const el = document.getElementById('axis-labels');
+    if (el) {
+        el.innerHTML = '<div>X: ' + xLabel + '</div><div>Y: ' + yLabel + '</div>';
+    }
+};
 
 function drawWaveform(samples) {
     const width = canvas.width / (window.devicePixelRatio || 1);
@@ -403,10 +383,20 @@ function handleTouch(e) {
 // MARK: - Preview
 
 #Preview {
-    // Preview requires a macroNode - create a simple one for preview purposes
-    let previewEngine = NeuralEngine.preview
-    let previewMacro = MacroNode.fromPreset(preset: .moogBass)
-
-    AudioVisualizerXYPad(macroNode: previewMacro, engine: previewEngine)
-        .frame(width: 400, height: 200)
+    struct PreviewHost: View {
+        @State private var x: Float = 0.5
+        @State private var y: Float = 0.5
+        var body: some View {
+            AudioVisualizerXYPad(
+                x: $x,
+                y: $y,
+                xRange: 0...1,
+                yRange: 0...1,
+                xLabel: "TEXTURE",
+                yLabel: "CHAOS"
+            )
+            .frame(width: 400, height: 200)
+        }
+    }
+    return PreviewHost()
 }
