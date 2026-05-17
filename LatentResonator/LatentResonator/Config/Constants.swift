@@ -8,6 +8,12 @@ import SwiftUI
 // Defaults are aligned with the white paper:
 // "Recursive Latent Trajectories in Neural Audio Synthesis"
 // --  CFG 15.0-18.0, inputStrength 0.60 -> 0.45, E(5,13) Koenig Seed.
+//
+// Whitepaper References:
+//   §1.1 — Lucier: Recursive audio processes (I Am Sitting in a Room)
+//   §1.2 — Xenakis: Stochastic synthesis and Markov chains (Formalized Music)
+//   §2.1 — Schaeffer: Musique concrète and sound object (objet sonore)
+//   §2.3 — Roads: Microsound and granular time domains (Microsound, 2001)
 
 enum LRConstants {
 

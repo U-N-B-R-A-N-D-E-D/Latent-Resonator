@@ -1077,6 +1077,23 @@ final class NeuralEngine: ObservableObject {
         sequencer.stepGrid.steps[index].trigType = type
     }
 
+    /// C.1 — Toggle a step's "active" flag.
+    ///
+    /// In Elektron-style step sequencers a step is "active" when it triggers
+    /// the voice and "inactive" when it is skipped. Internally that maps to
+    /// `TrigType.note` (active) and `TrigType.skip` (inactive). All other
+    /// trig types (`.lock`, `.oneShot`) are treated as active for the
+    /// purposes of this toggle — tapping them flips to `.skip`, tapping
+    /// `.skip` brings the step back to `.note`.
+    func toggleStepActive(at index: Int) {
+        guard let macro = focusMacro else { return }
+        guard let sequencer = macro.internalGraph.nodes.values
+            .compactMap({ $0 as? SequencerNode }).first else { return }
+        guard index >= 0, index < sequencer.stepGrid.steps.count else { return }
+        let current = sequencer.stepGrid.steps[index].trigType
+        sequencer.stepGrid.steps[index].trigType = (current == .skip) ? .note : .skip
+    }
+
     /// Set prompt phase lock for a step (Int?, not Float).
     func setStepPromptPhase(at index: Int, phase: Int?) {
         guard let macro = focusMacro else { return }
@@ -1639,33 +1656,4 @@ final class NeuralEngine: ObservableObject {
         return engine
     }
 
-    // MARK: - Debug Logging (Agent Instrumentation)
-
-    /// Writes structured debug logs to the agent's log file for hypothesis testing.
-    private func debugLog(location: String, message: String, data: [String: String], hypothesisId: String) {
-        let timestamp = Int(Date().timeIntervalSince1970 * 1000)
-        let logEntry: [String: Any] = [
-            "sessionId": "54ee48",
-            "id": "log_\(timestamp)_\(UUID().uuidString.prefix(8))",
-            "timestamp": timestamp,
-            "location": location,
-            "message": message,
-            "data": data,
-            "hypothesisId": hypothesisId
-        ]
-
-        if let jsonData = try? JSONSerialization.data(withJSONObject: logEntry),
-           let jsonString = String(data: jsonData, encoding: .utf8) {
-            let logPath = "/Users/leolambertini/RLTNAS/.cursor/debug-54ee48.log"
-            if FileManager.default.fileExists(atPath: logPath) {
-                if let handle = FileHandle(forWritingAtPath: logPath) {
-                    handle.seekToEndOfFile()
-                    handle.write((jsonString + "\n").data(using: .utf8)!)
-                    handle.closeFile()
-                }
-            } else {
-                try? jsonString.write(toFile: logPath, atomically: false, encoding: .utf8)
-            }
-        }
-    }
 }

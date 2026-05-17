@@ -734,6 +734,10 @@ final class IFFTSynthesisNode: BaseGraphNode {
 ///
 /// Whitepaper Alignment: Implements the recursive spectral formula S(i+1) = ACE(...)
 /// where the spectral chain processes the signal before neural inference.
+///
+/// References:
+///   - Roads: Microsound (2001) — spectral domain time-stretch and frequency-domain filtering
+///   - Schaeffer: Traité des objets musicaux (1966) — sound object morphology
 final class SpectralChainNode: BaseGraphNode {
 
     // MARK: - Parameters (Exposed from all 8 stages)

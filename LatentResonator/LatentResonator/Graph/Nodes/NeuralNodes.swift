@@ -680,6 +680,10 @@ final class FeedbackLoopNode: BaseGraphNode {
     /// Run one iteration of the recursive formula: S(i+1) = ACE(S(i) + F(S(i)), T(i))
     ///
     /// This implements the whitepaper §3.3 formula in the graph context.
+    ///
+    /// Recursive audio lineage:
+    ///   - Lucier: I Am Sitting in a Room (1969) — recursive room acoustics
+    ///   - Roads: Computer Music Tutorial (1996) — Chapter 10 on analysis/resynthesis
     private func runInferenceCycle() async {
         let needed = inferenceBufferSize
         let available = captureBuffer.availableToRead

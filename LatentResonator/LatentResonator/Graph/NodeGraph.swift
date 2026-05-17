@@ -1296,6 +1296,8 @@ enum NodeFactory {
             return SequencerNode(id: id, params: params)
         case "spectral_analyzer":
             return SpectralAnalyzerNode(id: id, params: params)
+        case "spectral_chain":
+            return SpectralChainNode(id: id, params: params)
         default:
             return nil
         }
