@@ -11,6 +11,7 @@ import SwiftUI
 
 struct NodeCardFactory: View {
 
+    @ObservedObject var engine: NeuralEngine
     let node: any GraphNode
     let lockMode: PatchLockMode
     let isFocused: Bool
@@ -32,8 +33,47 @@ struct NodeCardFactory: View {
         case let master as MasterOutputNode:
             MasterOutputCard(node: master, lockMode: lockMode, isFocused: isFocused)
 
+        // The two neural "soul" nodes — the recursive core (§3.3) and the
+        // inference surface that drives it. These MUST be editable from the
+        // canvas; falling through to GenericNodeCard read-only would leave
+        // the performer unable to touch the instrument's identity.
+        case let feedback as FeedbackLoopNode:
+            FeedbackLoopCard(node: feedback, lockMode: lockMode, isFocused: isFocused)
+
+        case let infer as ACEStepInferenceNode:
+            ACEStepInferenceCard(node: infer, engine: engine, lockMode: lockMode, isFocused: isFocused)
+
+        // Collapsible macro node: dedicated card with the expand/collapse
+        // gesture wrapped in an `ExpandMacroCommand` so it participates in
+        // the structural undo history. The command captures the macro's
+        // pre-expansion state, executes `expand`, and can undo the promotion.
+        case let macro as MacroNode:
+            MacroCard(
+                node: macro,
+                lockMode: lockMode,
+                isFocused: isFocused
+            ) {
+                guard let command = ExpandMacroCommand(
+                    macroId: macro.id,
+                    graph: engine.nodeGraph
+                ) else {
+                    print("MacroCard: could not create expand command for \(macro.id)")
+                    return
+                }
+                if !NodeGraphStore.history.execute(command) {
+                    print("MacroCard: expand command failed for \(macro.id)")
+                }
+            }
+
+        // Cross-worker contract: Worker ALPHA owns GestureRecorderCard.swift.
+        // Class name must be exactly `GestureRecorderCard` and must accept
+        // the same `(node:lockMode:isFocused:)` initializer as the other
+        // dedicated cards.
+        case let gesture as GestureRecorderNode:
+            GestureRecorderCard(node: gesture, lockMode: lockMode, isFocused: isFocused)
+
         case let base as BaseGraphNode:
-            GenericNodeCard(node: base, lockMode: lockMode, isFocused: isFocused)
+            GenericNodeCard(node: base, engine: engine, lockMode: lockMode, isFocused: isFocused)
 
         default:
             // GraphNode is a protocol; anything not deriving from

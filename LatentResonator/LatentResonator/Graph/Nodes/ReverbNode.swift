@@ -1,5 +1,4 @@
 import Foundation
-import AVFoundation
 import Accelerate
 
 // MARK: - Reverb Insert Position
@@ -19,89 +18,70 @@ enum ReverbInsertPosition: String, CaseIterable, Identifiable, Codable {
 }
 
 // MARK: - Reverb Node
-/// Schroeder-Moorer style reverberator with per-lane pre/post feedback toggle.
-/// Implements a classic digital reverb using a series of comb filters
-/// followed by all-pass filters.
-///
-/// v2.0: Stub implementation - core DSP logic preserved but exposedControls
-/// API needs updating to match current NodeGraph architecture.
+/// Schroeder-style feedback-delay-network reverb (comb + all-pass).
+/// Whitepaper §1.2 — Lucier-style spatial smear as an insert, not a generic preset.
 final class ReverbNode: BaseGraphNode {
 
-    // MARK: - Parameters
-
-    /// Room size (0-1), affects comb filter delay lengths.
     var roomSize: Float {
         get { getParam("roomSize", default: 0.5) }
         set { setParam("roomSize", value: newValue) }
     }
 
-    /// Decay time in seconds (0.1-10.0).
     var decay: Float {
         get { getParam("decay", default: 2.0) }
         set { setParam("decay", value: newValue) }
     }
 
-    /// High-frequency damping (0-1), higher = darker reverb.
     var damping: Float {
         get { getParam("damping", default: 0.5) }
         set { setParam("damping", value: newValue) }
     }
 
-    /// Wet/dry mix (0-1), balance between dry and reverb signal.
     var wetDryMix: Float {
         get { getParam("wetDryMix", default: 0.3) }
         set { setParam("wetDryMix", value: newValue) }
     }
 
-    /// Insert position: pre or post feedback loop.
     var insertPosition: ReverbInsertPosition {
         get {
             let raw = getParam("insertPosition", default: ReverbInsertPosition.postFeedback.rawValue)
-            if let pos = ReverbInsertPosition(rawValue: raw) {
-                return pos
-            }
-            return .postFeedback
+            return ReverbInsertPosition(rawValue: raw) ?? .postFeedback
         }
         set { setParam("insertPosition", value: newValue.rawValue) }
     }
 
-    // MARK: - State
-
-    private var sourceNode: AVAudioSourceNode?
     private let sampleRate: Double
 
-    // Schroeder reverb: 6 parallel comb filters + 3 series all-pass
-    private var combDelays: [[Float]] = []
+    private var combDelaysL: [[Float]] = []
+    private var combDelaysR: [[Float]] = []
     private var combWritePos: [Int] = []
     private var combFeedback: [Float] = [0.805, 0.827, 0.783, 0.807, 0.795, 0.789]
     private let combDelayLengths: [Int] = [1557, 1617, 1491, 1422, 1277, 1116]
 
-    private var allpassDelays: [[Float]] = []
+    private var allpassDelaysL: [[Float]] = []
+    private var allpassDelaysR: [[Float]] = []
     private var allpassWritePos: [Int] = []
     private let allpassDelayLengths: [Int] = [225, 556, 441]
     private let allpassFeedback: Float = 0.7
 
-    // Low-pass filter state for damping
-    private var filterState: Float = 0.0
+    private var dampStateL: Float = 0
+    private var dampStateR: Float = 0
 
-    // Parameter smoothing
     private var smoothedWetDryMix: Float = 0.3
     private var smoothedDamping: Float = 0.5
-
-    // MARK: - Init
+    private var smoothedFeedback: Float = 0.75
 
     init(id: UUID = UUID(), params: [String: Any] = [:], sampleRate: Double = LRConstants.sampleRate) {
         self.sampleRate = sampleRate
 
-        // Initialize comb filter delay lines
         for length in combDelayLengths {
-            combDelays.append([Float](repeating: 0, count: length))
+            combDelaysL.append([Float](repeating: 0, count: length))
+            combDelaysR.append([Float](repeating: 0, count: length + 23))
             combWritePos.append(0)
         }
-
-        // Initialize all-pass filter delay lines
         for length in allpassDelayLengths {
-            allpassDelays.append([Float](repeating: 0, count: length))
+            allpassDelaysL.append([Float](repeating: 0, count: length))
+            allpassDelaysR.append([Float](repeating: 0, count: length + 11))
             allpassWritePos.append(0)
         }
 
@@ -115,32 +95,26 @@ final class ReverbNode: BaseGraphNode {
         for (key, value) in params {
             self.parameters[key] = value
         }
-
-        createSourceNode()
+        smoothedWetDryMix = wetDryMix
+        smoothedDamping = damping
     }
-
-    // MARK: - Codable
 
     required init(from decoder: Decoder) throws {
         self.sampleRate = LRConstants.sampleRate
-
-        // Initialize comb filter delay lines
         for length in combDelayLengths {
-            combDelays.append([Float](repeating: 0, count: length))
+            combDelaysL.append([Float](repeating: 0, count: length))
+            combDelaysR.append([Float](repeating: 0, count: length + 23))
             combWritePos.append(0)
         }
-
-        // Initialize all-pass filter delay lines
         for length in allpassDelayLengths {
-            allpassDelays.append([Float](repeating: 0, count: length))
+            allpassDelaysL.append([Float](repeating: 0, count: length))
+            allpassDelaysR.append([Float](repeating: 0, count: length + 11))
             allpassWritePos.append(0)
         }
-
         try super.init(from: decoder)
-        createSourceNode()
+        smoothedWetDryMix = wetDryMix
+        smoothedDamping = damping
     }
-
-    // MARK: - Ports
 
     override var ports: [NodePort] {
         [
@@ -153,50 +127,145 @@ final class ReverbNode: BaseGraphNode {
         ]
     }
 
-    // MARK: - Audio Unit
-
-    override func audioUnit() -> AVAudioNode? {
-        return sourceNode
+    @inline(__always)
+    private func combSample(
+        input: Float,
+        index: Int,
+        feedback: Float,
+        bufferL: inout [Float],
+        bufferR: inout [Float],
+        writePos: inout Int
+    ) -> (Float, Float) {
+        let lenL = bufferL.count
+        let lenR = bufferR.count
+        let readL = (writePos - combDelayLengths[index] + lenL) % lenL
+        let readR = (writePos - combDelayLengths[index] + lenR) % lenR
+        let delayedL = bufferL[readL]
+        let delayedR = bufferR[readR]
+        let nextL = input + delayedL * feedback
+        let nextR = input + delayedR * feedback
+        bufferL[writePos] = nextL.isNaN || nextL.isInfinite ? 0 : nextL
+        bufferR[writePos % lenR] = nextR.isNaN || nextR.isInfinite ? 0 : nextR
+        writePos = (writePos + 1) % lenL
+        return (delayedL, delayedR)
     }
 
-    private func createSourceNode() {
-        let format = AVAudioFormat(
-            standardFormatWithSampleRate: sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
-
-        sourceNode = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
-            guard self != nil else { return noErr }
-
-            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            guard let buffer = ablPointer.first else { return noErr }
-
-            let data = UnsafeMutableBufferPointer<Float>(
-                start: buffer.mData?.assumingMemoryBound(to: Float.self),
-                count: Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-            )
-
-            // For now, output silence - tap implementation needed for actual reverb
-            for i in 0..<Int(frameCount) {
-                data[i] = 0.0
-            }
-
-            return noErr
-        }
+    @inline(__always)
+    private func allpassSample(
+        inputL: Float,
+        inputR: Float,
+        index: Int,
+        bufferL: inout [Float],
+        bufferR: inout [Float],
+        writePos: inout Int
+    ) -> (Float, Float) {
+        let lenL = bufferL.count
+        let lenR = bufferR.count
+        let readL = (writePos - allpassDelayLengths[index] + lenL) % lenL
+        let readR = (writePos - allpassDelayLengths[index] + lenR) % lenR
+        let delayedL = bufferL[readL]
+        let delayedR = bufferR[readR]
+        let outL = -inputL + delayedL
+        let outR = -inputR + delayedR
+        bufferL[writePos] = inputL + delayedL * allpassFeedback
+        bufferR[writePos % lenR] = inputR + delayedR * allpassFeedback
+        writePos = (writePos + 1) % lenL
+        return (outL, outR)
     }
-
-    // MARK: - Reset
 
     func reset() {
-        // Clear all delay lines
-        for i in 0..<combDelays.count {
-            combDelays[i] = [Float](repeating: 0, count: combDelayLengths[i])
+        for i in 0..<combDelaysL.count {
+            combDelaysL[i] = [Float](repeating: 0, count: combDelayLengths[i])
+            combDelaysR[i] = [Float](repeating: 0, count: combDelayLengths[i] + 23)
             combWritePos[i] = 0
         }
-        for i in 0..<allpassDelays.count {
-            allpassDelays[i] = [Float](repeating: 0, count: allpassDelayLengths[i])
+        for i in 0..<allpassDelaysL.count {
+            allpassDelaysL[i] = [Float](repeating: 0, count: allpassDelayLengths[i])
+            allpassDelaysR[i] = [Float](repeating: 0, count: allpassDelayLengths[i] + 11)
             allpassWritePos[i] = 0
         }
-        filterState = 0.0
+        dampStateL = 0
+        dampStateR = 0
+    }
+}
+
+// MARK: - ReverbNode + DSPNode
+
+extension ReverbNode: GraphNodeDSPProvider, DSPNode {
+    var nodeId: UUID { id }
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double
+    ) {
+        // P1.5 — snapshot user-facing params before the smoothing lines.
+        let wdm = wetDryMix
+        let damp = damping
+        let rs = roomSize
+        let dec = decay
+
+        guard let inBuf = inputs.first else {
+            for i in 0..<frameCount {
+                output.left[i] = 0
+                output.right[i] = 0
+            }
+            return
+        }
+
+        let alpha: Float = 0.05
+        smoothedWetDryMix += alpha * (wdm - smoothedWetDryMix)
+        smoothedDamping += alpha * (damp - smoothedDamping)
+        let targetFeedback = min(0.92, 0.55 + rs * 0.35 + dec * 0.02)
+        smoothedFeedback += alpha * (targetFeedback - smoothedFeedback)
+
+        let wet = min(max(smoothedWetDryMix, 0), 1)
+        let dry = 1 - wet
+        let dampCoeff = min(max(smoothedDamping, 0), 0.99)
+
+        for i in 0..<frameCount {
+            let inL = inBuf.left[i]
+            let inR = inBuf.right[i]
+            var combL: Float = 0
+            var combR: Float = 0
+
+            for c in 0..<combDelaysL.count {
+                let (dl, dr) = combSample(
+                    input: (inL + inR) * 0.5,
+                    index: c,
+                    feedback: smoothedFeedback * combFeedback[c],
+                    bufferL: &combDelaysL[c],
+                    bufferR: &combDelaysR[c],
+                    writePos: &combWritePos[c]
+                )
+                combL += dl
+                combR += dr
+            }
+            combL *= 0.16
+            combR *= 0.16
+
+            dampStateL = dampStateL * dampCoeff + combL * (1 - dampCoeff)
+            dampStateR = dampStateR * dampCoeff + combR * (1 - dampCoeff)
+
+            var apL = dampStateL
+            var apR = dampStateR
+            for a in 0..<allpassDelaysL.count {
+                let (ol, or_) = allpassSample(
+                    inputL: apL,
+                    inputR: apR,
+                    index: a,
+                    bufferL: &allpassDelaysL[a],
+                    bufferR: &allpassDelaysR[a],
+                    writePos: &allpassWritePos[a]
+                )
+                apL = ol
+                apR = or_
+            }
+
+            output.left[i] = inL * dry + apL * wet
+            output.right[i] = inR * dry + apR * wet
+        }
     }
 }

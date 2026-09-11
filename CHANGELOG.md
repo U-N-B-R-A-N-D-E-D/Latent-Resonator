@@ -2,6 +2,46 @@
 
 All notable changes to Latent Resonator are documented here.
 
+## [Unreleased] — 2026-07-27
+
+Working-tree summary ahead of owner commit. Shipped v2 pull-render architecture (`GraphAudioEngine` → `ExecutionPlan` → `DSPNode`, native `PatchCanvasView`); this entry closes the perimeter roadmap (`docs/ROADMAP_PERIMETER_2026-07-21.md`) and documents concurrent canvas/PERFORM work.
+
+### Perimeter engine wiring
+
+- **`SpectralAnalyzerNode`** — Conforms `DSPNode`; participates in `ExecutionPlan` (live centroid/flatness/flux for cybernetic feedback).
+- **`AudioInputNode`**, **`MarkovSequencerNode`**, **`GestureRecorderNode`** — Wired into execution + UI; control-node category override fix in graph validation/factory.
+- **`MacroNode.render`** — Honors external `portMappings` (macro chaining / external-audio input slots).
+- **`ExecutionPlan.Step.controls`** — Removed; single control contract via `ControlGraphEvaluator` + `setParam`.
+- **`CoreMLInference.swift`** — Header marked **ARCHIVED / ROADMAP**; canonical inference remains `ACEStepBridge` + Python server.
+- **`presetFallbackProfiles`** — Removed from `Config/Constants.swift` (dead configuration).
+
+### Canvas (PATCH)
+
+- Pan/zoom/drag architecture aligned with a Max-style editing model: undo/redo (`GraphHistory`), multi-select and marquee, subgraph clipboard, cable re-route, snap/fit on `PatchCanvasView`.
+- Macro expand/collapse via **`MacroCard`** double-click gesture.
+
+### PERFORM
+
+- Curated exposure pipeline for perform controls; fixed-dense pagination in **`PerformLayoutEngine`**.
+- Generic parameter lock (p-lock) with scene-morph gating; macro VU metering and envelope curve views where exposed.
+
+### Fixed
+
+- **`SpectralPipeline`** — FFT overlap buffer overflow (SIGSEGV) under extreme frame sizes.
+- Control-node misclassification in graph validation (Markov/Gesture routing).
+- Macro external-input routing order relative to internal plan steps.
+
+### Tests
+
+~12 new or registered suites in `LatentResonatorTests`, including: `SpectralAnalyzerNodeTests`, `AudioInputNodeTests`, `MarkovSequencerNodeTests`, `GestureRecorderNodeTests`, `MacroNodeRoutingTests`, `MacroCardGestureTests`, `AudioPipelineValidatorTests`, `GraphHistoryIntegrationTests`, `SubgraphClipboardTests`, `ExposureCurationTests`, `SpectralPipelineOverlapAddTests`, `SceneManagerCrossfadeTests` (plus `GraphNodeParamTests`, `ParameterRouterTests`, `MacroMixerControllerTests`, `InferenceParamsTests`, `NodeGraphExpandTests`, `MaterialityTests`, `ApplyMacroStepLocksTests`).
+
+### Notes
+
+- Agent docs: `.cursor/AGENTS.md` v1.x file references updated to live v2 graph paths (2026-07-27 pass).
+- Superseded RFC docs unchanged; code under `LatentResonator/LatentResonator/Graph/` remains source of truth.
+
+---
+
 ## [2.0.0] — 2026-04-03
 
 ### Added — Major Architecture Evolution
@@ -56,8 +96,9 @@ All notable changes to Latent Resonator are documented here.
 
 - v2.0 Node Graph is **foundational work** — PATCH mode visual canvas in early implementation
 - Macro-node migration (Phase 6) will replace hardcoded LanePresets with expandable graph blocks
-- Full v2.0 feature set documented in `docs/ARCHITECTURE_v2_NODAL.md`
+- Full v2.0 feature set documented in `docs/ARCHITECTURE_v2_NODAL.md` *(superseded RFC — not the shipped pull-render architecture; see 2026-07 note below)*
 - Gap analysis between code and docs: `docs/GAP_ANALYSIS_2026-04-03.md`
+- **2026-07 note:** the WKWebView/React Flow PATCH mode and `AudioGraphMapper` described above were abandoned before shipping. The v2.0 that actually shipped (commit `2c2d62a`, 2026-05-17, "Complete migration to lane-free node-graph architecture") is pull-render + native canvas (`GraphAudioEngine` → `ExecutionPlan` → `DSPNode`, `PatchCanvasView`, CANVAS \| PERFORM modes) and never got its own changelog entry. Superseded docs: `docs/ARCHITECTURE_v2_NODAL.md`, `docs/E2E_COHESION_ANALYSIS.md`, `docs/IMPLEMENTATION_VERIFICATION.md` — **source of truth:** `LatentResonator/LatentResonator/Graph/NodeGraph.swift`, plus `README.md` and `.cursor/skills/v2-node-graph/SKILL.md`.
 
 ---
 

@@ -1,5 +1,7 @@
 # v2.0 Nodal Architecture - Status & Testing Plan
 
+> **Superseded.** References React Flow, `WebViewBridge`, and `AudioGraphMapper`. Shipped: native `PatchCanvasView`, `GraphAudioEngine` + `ExecutionPlan`, factory topologies in `Resources/Topologies/`. See `.cursor/skills/v2-node-graph/SKILL.md`; code is truth.
+
 ## Status Actual (13 Apr 2026)
 
 ### ✅ FUNCIONANDO

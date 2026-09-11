@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import AVFoundation
+import os.log
 
 // MARK: - Node Category
 
@@ -182,13 +183,18 @@ class BaseGraphNode: GraphNode, ObservableObject {
     let id: UUID
     let nodeType: String
     var name: String
-    
-    /// Override this in subclasses to set the category.
-    var category: NodeCategory { .source }
-    
+
+    /// Stored backing for the node's category. The public getter is read-only
+    /// so subclasses can override it with a computed property if they wish.
+    private var _category: NodeCategory
+    var category: NodeCategory { _category }
+
     var x: Double = 0
     var y: Double = 0
-    
+
+    /// Conceptual stage role (Seed, Resonator, Spectra, …). Persisted via `SerializedNode`.
+    var stageKind: StageKind?
+
     /// Node parameters - observable so UI updates when parameters change.
     @Published var parameters: [String: Any] = [:]
     
@@ -203,7 +209,7 @@ class BaseGraphNode: GraphNode, ObservableObject {
         id: UUID = UUID(),
         nodeType: String = "base",
         name: String? = nil,
-        category: NodeCategory? = nil,
+        category: NodeCategory = .source,
         displayName: String? = nil,
         x: Double = 0,
         y: Double = 0,
@@ -212,9 +218,11 @@ class BaseGraphNode: GraphNode, ObservableObject {
         self.id = id
         self.nodeType = nodeType
         self.name = displayName ?? name ?? "Node"
+        self._category = category
         self.x = x
         self.y = y
         self.parameters = parameters
+        self.stageKind = nil
     }
     
     required init(from decoder: Decoder) throws {
@@ -222,9 +230,12 @@ class BaseGraphNode: GraphNode, ObservableObject {
         id = try container.decode(UUID.self, forKey: .id)
         nodeType = try container.decode(String.self, forKey: .nodeType)
         name = try container.decode(String.self, forKey: .name)
+        let categoryRaw = try container.decodeIfPresent(String.self, forKey: .category) ?? NodeCategory.source.rawValue
+        _category = NodeCategory(rawValue: categoryRaw) ?? .source
         x = try container.decode(Double.self, forKey: .x)
         y = try container.decode(Double.self, forKey: .y)
-        
+        stageKind = try container.decodeIfPresent(StageKind.self, forKey: .stageKind)
+
         // Decode parameters using NodeGraph's CodableValue
         let paramContainer = try container.decode([String: CodableValue].self, forKey: .parameters)
         parameters = paramContainer.mapValues { $0.anyValue }
@@ -235,9 +246,11 @@ class BaseGraphNode: GraphNode, ObservableObject {
         try container.encode(id, forKey: .id)
         try container.encode(nodeType, forKey: .nodeType)
         try container.encode(name, forKey: .name)
+        try container.encode(category.rawValue, forKey: .category)
         try container.encode(x, forKey: .x)
         try container.encode(y, forKey: .y)
-        
+        try container.encodeIfPresent(stageKind, forKey: .stageKind)
+
         // Encode parameters using CodableValue
         let paramContainer = parameters.compactMapValues { param -> CodableValue? in
             if let f = param as? Float { return .float(f) }
@@ -250,7 +263,7 @@ class BaseGraphNode: GraphNode, ObservableObject {
     }
     
     private enum CodingKeys: String, CodingKey {
-        case id, nodeType, name, x, y, parameters, category
+        case id, nodeType, name, x, y, parameters, category, stageKind
     }
     
     // MARK: - Parameter Access
@@ -278,8 +291,60 @@ class BaseGraphNode: GraphNode, ObservableObject {
         if T.self == Int.self, let floatValue = value as? Float {
             return Int(floatValue) as! T
         }
-        
+
+        // Type-mismatch fallthrough: surface the silent failure.
+        // `value` exists for `key` but no coercion path applied. Without this
+        // diagnostic getParam would silently return `defaultValue`, hiding
+        // real bugs (e.g. a String stored where a Float was expected).
+        Self.logParamTypeMismatch(
+            key: key,
+            actual: String(describing: type(of: value)),
+            expected: String(describing: T.self)
+        )
+
         return defaultValue
+    }
+
+    /// Constrained overload: when `T` is a `String`-rawvalue enum, restore
+    /// it transparently from the serialized rawValue. Topologies (JSON) and
+    /// cross-node parameter writes (e.g. `ControlNodes.swift`) store enums
+    /// as their String rawValue; without this path, `getParam` would fall
+    /// through to the type-mismatch diagnostic and crash DEBUG builds.
+    func getParam<T: RawRepresentable>(_ key: String, default defaultValue: T) -> T where T.RawValue == String {
+        guard let value = parameters[key] else { return defaultValue }
+        if let typed = value as? T { return typed }
+        if let raw = value as? String, let converted = T(rawValue: raw) { return converted }
+        return defaultValue
+    }
+
+    // MARK: - Parameter Type-Mismatch Diagnostics
+
+    /// Rate-limits release-mode `os_log` warnings to one per (key, actualType, expectedType)
+    /// triple. The miss path is cold (a real bug, not a hot loop), so the set stays tiny.
+    /// In DEBUG, every mismatch is logged via `os_log` without terminating the process;
+    /// tests intentionally exercise the fallback-return path.
+    private static let _warnedMismatchesLock = NSLock()
+    private static var _warnedMismatches = Set<String>()
+
+    private static func logParamTypeMismatch(key: String, actual: String, expected: String) {
+        #if DEBUG
+        // Log every mismatch in DEBUG without crashing the process. Tests exercise
+        // the fallback-return path intentionally; a fatal assert would prevent that
+        // verification while adding no runtime value beyond the log itself.
+        os_log(.error,
+               "getParam type mismatch: %{public}@ has %{public}@, expected %{public}@",
+               key, actual, expected)
+        #else
+        let token = "\(key)::\(actual)::\(expected)"
+        _warnedMismatchesLock.lock()
+        let inserted = _warnedMismatches.insert(token).inserted
+        _warnedMismatchesLock.unlock()
+        if inserted {
+            os_log(.error,
+                   "getParam type mismatch: %{public}@ has %{public}@, expected %{public}@",
+                   key, actual, expected)
+        }
+        #endif
     }
     
     func setParam<T>(_ key: String, value: T) {
@@ -293,6 +358,28 @@ class BaseGraphNode: GraphNode, ObservableObject {
     
     func onParameterChanged(key: String, value: Any) {
         // Default: no-op. Subclasses override to update AudioUnits.
+    }
+}
+
+// MARK: - Stage Identity (Envion-style canvas headers)
+
+extension GraphNode {
+    /// Explicit `stageKind` from topology JSON, else inferred from `nodeType`.
+    var effectiveStageKind: StageKind? {
+        if let base = self as? BaseGraphNode, let kind = base.stageKind {
+            return kind
+        }
+        if let macro = self as? MacroNode,
+           let raw = macro.internalGraph.metadata["stageKind"],
+           let kind = StageKind.resolve(raw) {
+            return kind
+        }
+        return StageKind.inferred(for: self)
+    }
+
+    /// Resonator / feedback-loop cards get hero emphasis on the canvas.
+    var isResonatorHero: Bool {
+        effectiveStageKind == .resonator || nodeType == "feedback_loop"
     }
 }
 

@@ -38,7 +38,71 @@ struct LayoutItem: Identifiable {
     }
 }
 
+/// Envion-style stage bucket for PERFORM — controls grouped by signal stage,
+/// not by source node or macro tab.
+struct StageControlGroup: Identifiable {
+    let id: String
+    let headerLabel: String
+    let accentColor: Color
+    let controls: [ExposedControl]
+    let layout: PerformLayout
+}
+
 struct PerformLayoutEngine {
+
+    /// Stage order for flat PERFORM readout (whitepaper signal flow).
+    static let performStageOrder: [StageKind] = [
+        .seed, .resonator, .neural, .spectra, .ladder, .echo, .flat
+    ]
+
+    /// Group exposed controls by their source node's `effectiveStageKind`.
+    /// Ungrouped controls land in an `OTHER` bucket at the end.
+    static func computeStageGroups(
+        for controls: [ExposedControl],
+        nodeLookup: (UUID) -> (any GraphNode)?
+    ) -> [StageControlGroup] {
+        guard !controls.isEmpty else { return [] }
+
+        var grouped: [StageKind: [ExposedControl]] = [:]
+        var ungrouped: [ExposedControl] = []
+
+        for control in controls {
+            if let node = nodeLookup(control.nodeId),
+               let kind = node.effectiveStageKind {
+                grouped[kind, default: []].append(control)
+            } else {
+                ungrouped.append(control)
+            }
+        }
+
+        var result: [StageControlGroup] = []
+        for stage in performStageOrder {
+            guard let stageControls = grouped[stage], !stageControls.isEmpty else { continue }
+            result.append(
+                StageControlGroup(
+                    id: stage.rawValue,
+                    headerLabel: stage.headerLabel,
+                    accentColor: stage.accentColor,
+                    controls: stageControls,
+                    layout: compute(for: stageControls)
+                )
+            )
+        }
+
+        if !ungrouped.isEmpty {
+            result.append(
+                StageControlGroup(
+                    id: "other",
+                    headerLabel: "OTHER",
+                    accentColor: LRConstants.DS.textTertiary,
+                    controls: ungrouped,
+                    layout: compute(for: ungrouped)
+                )
+            )
+        }
+
+        return result
+    }
     
     /// Compute adaptive layout from exposed controls.
     /// Returns layout specification with rows and sizing.
@@ -61,6 +125,19 @@ struct PerformLayoutEngine {
             // Scrollable grid with section headers (grouped by source node)
             return layoutScrollableGrid(controls, columns: 4, knobSize: 56)
         }
+    }
+
+    /// Page size for the fixed-dense PERFORM surface (Wave C C3).
+    /// One page always fits the 1-4 / 5-8 / 9-16 adaptive layout.
+    static let pageSize = 16
+
+    /// Split controls into pages of `pageSize` and compute a layout per page.
+    /// The default curated surface never exceeds one page; overflow from manual
+    /// opt-in is handled by pagination instead of whole-surface scrolling.
+    static func computePages(for controls: [ExposedControl]) -> [PerformLayout] {
+        guard !controls.isEmpty else { return [] }
+        let chunks = controls.chunked(into: pageSize)
+        return chunks.map { compute(for: $0) }
     }
     
     // MARK: - Layout Strategies
@@ -172,24 +249,25 @@ struct PerformLayoutEngine {
     // MARK: - Helper Functions
     
     /// Determine if two consecutive controls form an XY pair.
-    /// Heuristic: labels contain "X" and "Y", or range/type similarity suggests 2D control.
+    /// Heuristic: labels explicitly say so ("X"/"Y" or "Horizontal"/"Vertical").
+    ///
+    /// A former second heuristic -- "ranges match, so pair them" -- is gone.
+    /// It false-positived constantly: [0,1] is the single most common
+    /// exposed-control range in this codebase (feedback, damping, gain1-4,
+    /// masterGain, pitchDrift, granularity, entropy, inputStrength all use
+    /// it), so any two of them landing adjacent in the 9-16-control grid
+    /// layout got silently fused into one 2D XY pad -- e.g. the real saved
+    /// seed-feedback-flat session (15 exposed controls after auto-exposure)
+    /// merged Feedback+Damping, Gain1+Gain2, Gain3+DriftRate, Gain4+
+    /// MasterGain, and PitchDrift+Granularity into five bogus XY pads,
+    /// coupling knobs the user never asked to couple and making each one
+    /// impossible to operate independently.
     private static func isXYPair(_ control1: ExposedControl, _ control2: ExposedControl) -> Bool {
         let label1 = control1.label.lowercased()
         let label2 = control2.label.lowercased()
-        
-        // Check for explicit X/Y labels
-        if (label1.contains("x") && label2.contains("y")) ||
-           (label1.contains("horizontal") && label2.contains("vertical")) {
-            return true
-        }
-        
-        // Check if ranges match (suggesting 2D control)
-        if control1.range == control2.range &&
-           control1.controlType == control2.controlType {
-            return true
-        }
-        
-        return false
+
+        return (label1.contains("x") && label2.contains("y")) ||
+            (label1.contains("horizontal") && label2.contains("vertical"))
     }
     
     /// Map ExposedControl to widget type.
@@ -205,6 +283,16 @@ struct PerformLayoutEngine {
             return .toggle
         case .dropdown:
             return .dropdown
+        }
+    }
+}
+
+// MARK: - Array Chunking
+
+private extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        stride(from: 0, to: count, by: size).map {
+            Array(self[$0..<Swift.min($0 + size, count)])
         }
     }
 }

@@ -1,166 +1,30 @@
 import SwiftUI
 import Combine
 
-// MARK: - Performance Feed Entry
-/// A curated performance metric entry for the terminal feed.
-struct PerformanceFeedEntry: Identifiable, Equatable {
-    let id = UUID()
-    let timestamp: Date
-    let category: FeedCategory
-    let message: String
-    let value: Double?
-    let unit: String?
-    
-    enum FeedCategory: String, CaseIterable {
-        case audio = "AUDIO"
-        case latency = "LATENCY"
-        case neural = "NEURAL"
-        case system = "SYSTEM"
-        case scene = "SCENE"
-        
-        var color: Color {
-            switch self {
-            case .audio: return .green
-            case .latency: return .yellow
-            case .neural: return .cyan
-            case .system: return .gray
-            case .scene: return .purple
-            }
-        }
-    }
-    
-    var formattedValue: String? {
-        guard let v = value, let u = unit else { return nil }
-        return String(format: "%.2f %@", v, u)
-    }
-}
-
-// MARK: - Performance Feed Manager
-/// Curates and manages performance metrics for terminal display.
-/// Captures audio levels, latencies, and system metrics at ~5Hz.
-@MainActor
-final class PerformanceFeedManager: ObservableObject {
-    // MARK: - Published State
-    @Published var entries: [PerformanceFeedEntry] = []
-    @Published var isEnabled: Bool = true
-    
-    // MARK: - Configuration
-    let maxEntries: Int = 100
-    let updateInterval: TimeInterval = 0.2  // 5Hz update rate
-    
-    // MARK: - Private State
-    private var updateTimer: Timer?
-    private var cancellables = Set<AnyCancellable>()
-    
-    // Feed categories toggle
-    var enabledCategories: Set<PerformanceFeedEntry.FeedCategory> = [.audio, .latency, .neural]
-    
-    // MARK: - Init
-    init() {
-        // Start feed when enabled
-        $isEnabled
-            .sink { [weak self] enabled in
-                if enabled {
-                    self?.startFeed()
-                } else {
-                    self?.stopFeed()
-                }
-            }
-            .store(in: &cancellables)
-    }
-    
-    // MARK: - Control
-    func startFeed() {
-        stopFeed()
-        updateTimer = Timer.scheduledTimer(withTimeInterval: updateInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.captureFrame()
-            }
-        }
-    }
-    
-    func stopFeed() {
-        updateTimer?.invalidate()
-        updateTimer = nil
-    }
-    
-    func clear() {
-        entries.removeAll()
-    }
-    
-    // MARK: - Capture Methods
-    
-    /// Capture one frame of performance metrics.
-    /// Called automatically at updateInterval when feed is enabled.
-    func captureFrame() {
-        guard isEnabled else { return }
-        
-        // Audio metrics from NeuralEngine (if available)
-        if enabledCategories.contains(.audio) {
-            captureAudioMetrics()
-        }
-        
-        // Latency metrics
-        if enabledCategories.contains(.latency) {
-            captureLatencyMetrics()
-        }
-        
-        // System resource metrics
-        if enabledCategories.contains(.system) {
-            captureSystemMetrics()
-        }
-    }
-    
-    /// Add a manual entry (for scene changes, neural inference, etc.)
-    func addEntry(_ entry: PerformanceFeedEntry) {
-        guard isEnabled else { return }
-        entries.append(entry)
-        trimEntries()
-    }
-    
-    // MARK: - Private Capture Methods
-    
-    private func captureAudioMetrics() {
-        // Placeholder: These would be populated from MacroNode telemetry
-        // Actual implementation would query macro nodes for RMS, spectral data
-    }
-    
-    private func captureLatencyMetrics() {
-        // Placeholder: WebViewBridge latency measurements
-    }
-    
-    private func captureSystemMetrics() {
-        // Placeholder: CPU/memory usage
-    }
-    
-    private func trimEntries() {
-        if entries.count > maxEntries {
-            entries.removeFirst(entries.count - maxEntries)
-        }
-    }
-}
-
 // MARK: - Terminal Console View
 //
-// Mecha Metal terminal UI for displaying Python bridge server logs AND
-// curated performance feed (D8 - Week 7).
+// Mecha Metal terminal UI for displaying the Python bridge server log.
+// High-contrast monospaced font on black background with phosphor green
+// text, inspired by military/engineering terminal aesthetics.
 //
-// Design: High-contrast monospaced font on black background with phosphor
-// green text, inspired by military/engineering terminal aesthetics.
-// Features tabbed interface for Logs vs. Performance metrics.
+// The log is fed live from `BridgeProcessManager.realtimeLog`, which is
+// populated by the `Pipe` readability handler attached to the Python
+// process stdout/stderr. Auto-scroll keeps the tail visible; text is
+// selectable for error reporting. The performance-profile toggle (D6)
+// lives in the header bar.
+//
+// Note: a "PERFORMANCE" tab with telemetry feed was stubbed here in an
+// earlier iteration but never wired to real metrics — it has been removed
+// rather than shipped as a fake feature. When real telemetry (bridge
+// latency, macro RMS/spectral centroid, DSP state) is available, a new
+// panel can be added that actually populates from `NeuralEngine` and
+// `ACEStepBridge` published state.
 
 private typealias DS = LRConstants.DS
 
 struct TerminalConsoleView: View {
     @ObservedObject var bridgeProcess: BridgeProcessManager
-    @StateObject private var feedManager = PerformanceFeedManager()
     @State private var autoScroll = true
-    @State private var selectedTab: Tab = .logs
-    
-    enum Tab: String, CaseIterable {
-        case logs = "LOGS"
-        case performance = "PERFORMANCE"
-    }
     
     var body: some View {
         VStack(spacing: 0) {
@@ -193,6 +57,12 @@ struct TerminalConsoleView: View {
                         .stroke(Color.green.opacity(0.3), lineWidth: 1)
                 )
                 .help("Performance Profile: \(bridgeProcess.currentProfile.description). Switching disabled during playback (D6).")
+
+                if !bridgeProcess.canSwitchProfile {
+                    Text("Profile locked while DSP ON")
+                        .font(DS.font(DS.fontCaption2, weight: .bold))
+                        .foregroundColor(DS.warning)
+                }
 
                 Spacer()
 

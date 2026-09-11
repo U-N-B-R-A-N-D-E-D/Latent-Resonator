@@ -2,7 +2,22 @@ import Foundation
 import CoreML
 import Accelerate
 
-// MARK: - Core ML Inference Pipeline
+// MARK: - Core ML Inference Pipeline (ARCHIVED / ROADMAP — not part of the shipped runtime)
+//
+// **Status:** ARCHIVED. This file is intentionally kept on disk as a reference
+// implementation for a future on-device Core ML inference lane, but nothing in
+// the shipped app imports or constructs `CoreMLInference`. Do not instantiate
+// it in the current runtime.
+//
+// **Canonical inference path (shipped):** out-of-process ACE-Step 1.5 over
+// HTTP — `ACEStepBridge.swift` + `Scripts/ace_bridge_server.py`, triggered
+// asynchronously from `FeedbackLoopNode` without blocking the audio thread.
+//
+// The ~30 s round-trip latency is the instrument's identity ("progresión
+// tectónica"). Instantiated on-device Core ML inference would break that
+// identity, so this file remains reference-only until a future on-device lane
+// is explicitly designed and approved.
+//
 // Three-model architecture matching the ACE-Step conversion script output:
 //
 //   [PCM Audio] --> VAE Encoder --> [Latent] --> DiT (x N steps) --> [Latent] --> VAE Decoder --> [PCM Audio]

@@ -118,8 +118,8 @@ To prevent all lanes from converging to a single "reverberant frequency landscap
 
 | Preset | Slot | Filter | Polarization |
 |--------|------|--------|--------------|
-| MOOG BASS | 20–120 Hz | LP 120 Hz | Sub only, "NO high frequencies" |
-| TB-303 ACID | 120–350 Hz | LP 350 Hz | Low-mid squelch, "NO air" |
+| FERROFLUID DRONE (formerly MOOG BASS) | 20–120 Hz | LP 120 Hz | Sub only, "NO high frequencies" |
+| SPECTRAL TIDE (formerly TB-303 ACID) | 120–350 Hz | LP 350 Hz | Low-mid squelch, "NO air" |
 | DRUM LANE | 350–500 Hz | LP 500 Hz | Percussive body, "NO long reverb" |
 | BUCHLA PERC | 500–2.5 kHz | BP 1.4 kHz | Mid pluck, "NO sub" |
 | ARP LEAD | 800–5 kHz | BP 2.5 kHz | Vocal mids, "NO sub NO air" |

@@ -17,11 +17,13 @@ Grounded in the avant-garde traditions of Musique Concrète (Schaeffer), Stochas
 
 ## Screenshots
 
-| Setup | Perform |
-|-------|---------|
-| [![Setup](docs/screenshots/setup.png)](docs/screenshots/setup.png) | [![Perform](docs/screenshots/perform.png)](docs/screenshots/perform.png) |
+| STAGES (canvas) | PERFORM |
+|-----------------|---------|
+| [![STAGES](docs/screenshots/setup.png)](docs/screenshots/setup.png) | [![Perform](docs/screenshots/perform.png)](docs/screenshots/perform.png) |
 
-*Setup: multi-lane configuration, Drift Field, channel mixer. Perform: Motherbase, step grid, P-locks, XY pad, lane headers.*
+*STAGES: native node+cable canvas (`PatchCanvasView`), UNLOCK to drag nodes and patch cords, RESERVOIR for topology load/save. PERFORM: Motherbase, step grid, P-locks, exposed controls, envelope editor.*
+
+Two modes — **STAGES** (patch + play on one canvas) and **PERFORM** (Motherbase performance surface). There is no separate SETUP tab or `LaneStripView`; the node graph is the architecture.
 
 ---
 
@@ -49,64 +51,59 @@ xattr -cr /path/to/LatentResonator.app
 
 ## Architecture
 
-The system runs on two independent clocks. The **real-time DSP path** (solid lines) processes audio at buffer rate (<5 ms latency). The **async inference path** (dotted lines) sends captured audio to ACE-Step or Core ML in the background (2-30 s per cycle) and feeds the hallucinated result back into the mix. When no neural engine is connected, the DSP path operates standalone as the "Black Box Resonator."
+The system runs on two independent clocks. The **real-time DSP path** renders through a pull-render node graph at buffer rate (<5 ms latency): a single `AVAudioSourceNode`, owned by `GraphAudioEngine`, walks a pre-built `ExecutionPlan` and calls `DSPNode.render(...)` on every participating node in the patch (same model as Reaktor/Max/VCV Rack -- AVAudioEngine itself is only used for I/O). The **async inference path** sends captured audio to ACE-Step in the background (seconds per cycle, triggered from inside `FeedbackLoopNode`, never blocking render) and feeds the result back into the mix. When no neural bridge is connected, the DSP path degrades gracefully to passthrough -- the "Black Box Resonator."
 
 ```mermaid
 graph TD
-    subgraph realtime ["Real-Time Path -- less than 5 ms"]
-        Excitation["Excitation Sources\nKoenig Seed / Mic / Noise / Sine"]
-        FeedbackMix["Feedback Mix\nexcitation + feedback * gain"]
-        DSP["SpectralProcessor\n13-stage FFT chain"]
-        Delay["Delay Line\nLucier Chamber"]
-        LaneMixer["Lane Mixer"]
-        MasterMixer["Master Mixer"]
+    subgraph graph ["NodeGraph -- source of truth"]
+        Nodes["Source / Filter / Effect / Neural / Routing nodes\nGraph/Nodes/*.swift"]
+    end
+
+    subgraph realtime ["Real-Time Pull-Render Path -- less than 5 ms"]
+        Plan["ExecutionPlan\ntopological sort + buffer slots"]
+        Engine["GraphAudioEngine\nsingle AVAudioSourceNode, os_unfair_lock plan-swap"]
         Output["Speaker / Recording"]
     end
 
-    subgraph inference ["Async Inference Path -- 2-30 s"]
+    subgraph inference ["Async Inference Path -- FeedbackLoopNode only"]
         CaptureBuffer["CircularAudioBuffer\nlock-free SPSC ring"]
         Bridge["ACE-Step Bridge\nPyTorch + MPS"]
-        CoreML["Core ML Pipeline\nVAE - DiT - VAE"]
         FeedbackBuffer["Feedback Buffer"]
     end
 
-    Excitation --> FeedbackMix
-    FeedbackMix --> DSP
-    DSP --> Delay
-    Delay --> LaneMixer
-    LaneMixer --> MasterMixer
-    MasterMixer --> Output
+    Nodes --> Plan
+    Plan --> Engine
+    Engine --> Output
 
-    LaneMixer -.->|"capture tap"| CaptureBuffer
-    CaptureBuffer -.-> Bridge
-    CaptureBuffer -.-> CoreML
+    Nodes -.->|"FeedbackLoopNode.render()"| CaptureBuffer
+    CaptureBuffer -.->|"triggered Task"| Bridge
     Bridge -.->|"hallucinated audio"| FeedbackBuffer
-    CoreML -.->|"hallucinated audio"| FeedbackBuffer
-    FeedbackBuffer -.->|"recursive loop"| FeedbackMix
+    FeedbackBuffer -.->|"recursive loop, read by render()"| Nodes
 ```
 
 ### Core Components
 
 | Component | File | Purpose |
 |---|---|---|
-| **Neural Engine** | `NeuralEngine.swift` | Orchestrates the feedback loop, AVAudioEngine, and parameter control |
+| **Neural Engine** | `NeuralEngine.swift` | Owns the NodeGraph, GraphAudioEngine, ACE-Step bridge, scenes, and parameter routing |
+| **Node Graph** | `Graph/NodeGraph.swift` | Source of truth: nodes, edges, exposed controls, validation, serialization |
+| **Graph Audio Engine** | `Graph/Engine/GraphAudioEngine.swift` | Pull-render engine: single AVAudioSourceNode, atomic ExecutionPlan swap |
+| **Execution Plan** | `Graph/Engine/ExecutionPlan.swift` | Topological sort of the graph into a render order + buffer-slot assignment |
+| **DSP Node Protocol** | `Graph/Engine/DSPNode.swift` | The real-time interface every render-participating node implements |
+| **Graph Nodes** | `Graph/Nodes/*.swift` | Source, filter/effect, neural, control, routing, sequencer, analysis node implementations |
 | **Sequencer Engine** | `SequencerEngine.swift` | Step grid state, advance logic, BPM, chain length |
 | **Scene Manager** | `SceneManager.swift` | Scene bank, apply/capture, crossfade blending |
-| **Core ML Inference** | `CoreMLInference.swift` | VAE Encoder -> DiT -> VAE Decoder pipeline with latent state management |
 | **ACE-Step Bridge** | `ACEStepBridge.swift` | Swift async HTTP client for the Python bridge server |
 | **WAV Codec** | `WAVCodec.swift` | WAV encoding/decoding for audio-to-HTTP transport |
-| **Spectral Processor** | `SpectralProcessor.swift` | FFT-based Non-Linear Spectral Processor / Black Box Resonator (DSP fallback) |
 | **Signal Generator** | `SignalGenerator.swift` | Multi-source excitation signals (noise, sine, impulses, mic input) |
 | **Koenig Seed** | `KoenigSeedGenerator.swift` | Generates Euclidean rhythm E(5,13) Dirac impulses with Gaussian noise tails |
 | **Circular Buffer** | `CircularAudioBuffer.swift` | Lock-free SPSC ring buffer for audio-to-inference thread communication |
-| **Resonator Lane** | `ResonatorLane.swift` | Self-contained recursive feedback loop per lane -- implements S(i+1) = ACE(S(i) + N, P, gamma) |
 | **Bridge Process Mgr** | `BridgeProcessManager.swift` | Manages Python bridge lifecycle: venv creation, deps, server launch, model auto-discovery |
 | **Audio Recorder** | `AudioRecorder.swift` | Master recording to WAV in Documents |
-| **Vectorscope** | _(TBI)_ | Metal-rendered Lissajous display -- deferred until a lower-memory implementation is available |
 | **Bridge Server** | `ace_bridge_server.py` | Python HTTP server wrapping ACE-Step 1.5 inference |
 | **Design System** | `Config/Constants.swift` (`DS` enum) | Centralized design tokens: typography scale, semantic colors, spacing, radii |
 | **UI Components** | `Views/LRComponents.swift` | Reusable SwiftUI primitives: LRToggle, LRSegmentPicker, LRStatusRow, LRActionButton, LRParamSlider, LRSectionHeader, LRDivider |
-| **UI Views** | `Views/` | SwiftUI views: LatentResonatorView (Setup), PerformanceMotherbaseView (Perform), LaneStripView, RetroKnob, LatentXYPad, SceneCrossfaderView |
+| **UI Views** | `Views/` | SwiftUI views: `Views/Patch/PatchCanvasView` (Canvas), `PerformanceMotherbaseView` (Perform), RetroKnob, LatentXYPad, SceneCrossfaderView |
 
 ### The Neural Feedback Loop
 
@@ -218,13 +215,13 @@ When switching to **PERFORM** mode, the app automatically restarts the Python br
 - **Faster iteration cycles** for real-time performance
 - **Lower quality but higher responsiveness** — trade visual polish for speed
 
-This happens transparently via `BridgeProcessManager.launchServer(performanceMode: true)`. The terminal console in PATCH mode will show:
+This happens transparently via `BridgeProcessManager.launchServer(performanceMode: true)`. The terminal console in Canvas mode will show:
 
 ```
 Low-latency mode enabled: capping steps to 6
 ```
 
-Switching back to SETUP mode restarts the bridge without the flag, restoring full-quality inference.
+Switching back to Canvas mode restarts the bridge without the flag, restoring full-quality inference.
 
 The bridge server has three operating modes:
 | Mode | When | Behavior |
@@ -253,21 +250,20 @@ xcodebuild -project LatentResonator.xcodeproj \
 
 1. **Grant microphone access** when prompted.
 2. Wait for the ACE-Step bridge to initialize (loading model weights).
-3. Press **START** to begin the feedback loop.
-4. The Koenig Seed (Euclidean rhythm of Dirac impulses) will be injected automatically.
+3. Press **START** to begin the feedback loop. The loop runs silent (or passthrough) — *listen before you adjust*.
+4. Press **K** (or the SEED button) to manually inject the Koenig Seed (Euclidean rhythm of Dirac impulses). The performer arms the seed deliberately, not automatically.
 5. Adjust parameters in real-time to steer the generative degradation.
 
-### Three Interaction Modes
+### Two Interaction Modes
 
-The app has three modes (top bar: **SETUP** | **PATCH** | **PERFORM**). Cycle with `Tab`.
+The app has two modes (top bar: **CANVAS** | **PERFORM**). Cycle with `Tab`.
 
-- **SETUP** -- Full mixer, lane strips, DETAIL popovers, audio visualizer. Use for sound design and prep.
-- **PATCH** -- Visual node graph editor (React Flow in WKWebView) + real-time terminal console showing Python bridge logs. Dataflow programming environment for v2.0 architecture.
+- **CANVAS** -- Native SwiftUI node-graph canvas (`PatchCanvasView`, no WebView). Build and play in the same surface: a LOCK/UNLOCK toggle gates structural editing without switching views. Right-click to add nodes, drag cables between port chips, real-time terminal console for Python bridge logs.
 - **PERFORM** -- Fixed Motherbase surface: scenes (A/B crossfader), Elektron-style step sequencer, focus lane, auto-generated control surface. Same controls in the same place for muscle memory.
 
-### Terminal Console (PATCH Mode)
+### Terminal Console (Canvas Mode)
 
-The PATCH view includes a collapsible terminal console at the bottom showing live output from the Python bridge server:
+The Canvas view includes a collapsible terminal console at the bottom showing live output from the Python bridge server:
 
 - **Real-time logs** — stdout/stderr from `ace_bridge_server.py`
 - **Status indicator** — RUNNING / LAUNCHING / ERROR
@@ -277,16 +273,14 @@ The PATCH view includes a collapsible terminal console at the bottom showing liv
 
 Use the terminal to debug bridge issues, monitor inference cycles, and verify model loading.
 
-### Audio Visualizer (SETUP Mode)
+### Audio Visualizer (Perform Mode)
 
-The DRIFT FIELD section in SETUP mode now features a real-time audio visualizer replacing the traditional XY pad:
+`AudioVisualizerXYPad` provides a real-time audio visualizer alongside the Perform surface:
 
 - **Waveform + FFT display** — Canvas 2D rendering of audio signal and spectrum
 - **Touch-reactive** — Still controls Texture and Chaos macros via drag
 - **Lightweight** — ~20KB memory footprint, 30fps throttled updates
 - **Fade trails** — Visual feedback of parameter changes
-
-The visualizer reads directly from `ResonatorLane.waveformSnapshot` (256-sample downsampled buffer) and `spectralBins` for FFT data.
 
 ### Step Sequencer (Perform View)
 
@@ -310,7 +304,7 @@ The step grid is an Elektron-inspired pattern sequencer with **parameter locks (
 | Additional | Prompt Phase, Denoise Strength, Filter Resonance, Excitation Mode, Entropy |
 | Drum Lane | **DrumVoice** (kick, snare, hat, cymbal, mixed) — per-step prompt override for percussion character |
 
-**Drum Lane**: Add a lane with the "DRUM LANE" preset. Use the DRUM row in the P-Lock header to lock kick/snare/hat/cymbal/mixed per step. The AI steers toward that percussion type for the next inference cycle. One lane, no extra synthesis. See whitepaper §2.10.
+**Drum Lane**: Add a lane with the "DRUM LANE" preset. Use the DRUM row in the P-Lock header to lock kick/snare/hat/cymbal/mixed per step. The prompt steers the next inference cycle toward that percussion character. One lane, no extra synthesis. See whitepaper §2.10.
 
 **Multi-Select (Shift+Click)**: Hold Shift and tap steps to select multiple. When 2+ steps are selected, a batch bar appears: apply trig type, DrumVoice, or Clear All to the selection. Clears when you switch lanes.
 
@@ -332,7 +326,7 @@ ACE-Step produces timbral *suggestions*, not literal 808 samples. The DrumVoice 
 - **Rhythm vs timbre**: The Koenig seed provides the pulse; the DrumVoice affects the *character* of the next inference. Timbral change lags ~20s (inference time). Expect texture to evolve slowly, not hit-per-hit.
 - **BUCHLA PERC** preset: Also Koenig-based, sometimes more percussive. Try it, add DrumVoice P-Locks on top.
 
-**Layer Carving (§2.11)**: Each preset occupies a distinct frequency slot so lanes don't blend into one "reverberant landscape." MOOG BASS stays sub (LP 120 Hz), NOISE SCAPE is air-only (HP 2.5 kHz), etc. Polarized prompts ("NO bass", "NO air") push the model toward opposite latent regions. Combine lanes for a layered mix with clear separation.
+**Layer Carving (§2.11)**: Each preset occupies a distinct frequency slot so lanes don't blend into one "reverberant landscape." FERROFLUID DRONE stays sub (LP 120 Hz), NOISE SCAPE is air-only (HP 2.5 kHz), etc. Polarized prompts ("NO bass", "NO air") push the model toward opposite latent regions. Combine lanes for a layered mix with clear separation.
 
 Scenes and the step grid are aligned with the whitepaper recursive formula (§3.3, §4.2.2).
 
@@ -377,7 +371,7 @@ All major actions are reachable without a mouse. Also documented in Settings > S
 
 | Key | Action |
 |---|---|
-| `Tab` | Cycle modes: SETUP → PATCH → PERFORM → SETUP |
+| `Tab` | Cycle modes: CANVAS ↔ PERFORM |
 | `Cmd + ,` | Open Settings |
 | `[` / `]` | Focus previous / next lane |
 
@@ -531,7 +525,7 @@ All components include hover states (`.onHover`) for macOS affordance and state 
 
 ### Accent Color System
 
-Each lane preset defines an `accentColor` string (e.g., "blue", "cyan", "red"). This string is stored on `ResonatorLane.accentColorName` at initialization and resolved to a SwiftUI `Color` via the shared helper `LRConstants.DS.accentColor(for:)`. This replaces the fragile switch-on-lane-name pattern that was previously duplicated across view files.
+Each lane preset defines an `accentColor` string (e.g., "blue", "cyan", "red"), stored on the owning `MacroNode` at initialization and resolved to a SwiftUI `Color` via the shared helper `LRConstants.DS.accentColor(for:)`. This replaces the fragile switch-on-lane-name pattern that was previously duplicated across view files.
 
 ---
 
@@ -603,23 +597,21 @@ RLTNAS/
 ├── .gitignore
 ├── docs/
 │   ├── whitepaper.md                # Full research paper
-│   ├── ARCHITECTURE_v2_NODAL.md     # v2.0 dataflow architecture spec
-│   ├── GAP_ANALYSIS_2026-04-03.md   # Code vs docs gap analysis
+│   ├── ARCHITECTURE_v2_NODAL.md     # Superseded RFC (WKWebView/AudioGraphMapper) — truth: Graph/NodeGraph.swift + v2-node-graph skill; also superseded: E2E_COHESION_ANALYSIS.md, IMPLEMENTATION_VERIFICATION.md
 │   └── audio/
 │       └── latent_resonator_texture_improv.mp3  # Full session (14m 47s)
 └── LatentResonator/
     ├── LatentResonator.xcodeproj/
     └── LatentResonator/
         ├── LatentResonatorApp.swift    # App entry point
-        ├── RootView.swift              # SETUP | PATCH | PERFORM mode switch + Settings
-        ├── NeuralEngine.swift          # Multi-lane audio engine + step grid + scenes
+        ├── RootView.swift              # CANVAS | PERFORM mode switch + Settings
+        ├── NeuralEngine.swift          # Owns NodeGraph + GraphAudioEngine + step grid + scenes
         ├── SequencerEngine.swift       # Step grid state, advance modes, BPM
         ├── SceneManager.swift          # Scene bank, apply/capture, crossfade
-        ├── ResonatorLane.swift         # Per-lane recursive feedback loop (the core formula)
         ├── BridgeProcessManager.swift  # Python bridge lifecycle + model auto-discovery + terminal logs
         ├── AudioRecorder.swift         # Master recording to WAV
-        ├── CoreMLInference.swift       # Core ML pipeline (on-device fallback)
-        ├── SpectralProcessor.swift     # FFT-based DSP processor (DSP fallback)
+        ├── CoreMLInference.swift       # Core ML pipeline; on disk, not currently instantiated
+        ├── SpectralProcessor.swift     # FFT-based DSP processor, used internally by SpectralChainNode
         ├── KoenigSeedGenerator.swift   # Euclidean rhythm seed E(5,13)
         ├── SignalGenerator.swift       # Multi-source signal generator
         ├── CircularAudioBuffer.swift   # Lock-free ring buffer
@@ -630,27 +622,28 @@ RLTNAS/
         │   ├── Constants.swift         # All tuning parameters, lane presets, design system (DS)
         │   ├── PerformanceState.swift  # Scenes, step grid, parameter locks (Motherbase)
         │   └── ParameterRouter.swift   # MIDI CC mapping (ControlParameter, scaleCCToValue)
-        ├── Graph/                      # v2.0 Node Graph architecture
-        │   ├── NodeGraph.swift         # Graph model, validation, serialization
-        │   ├── GraphNode.swift         # Protocol for all nodes
+        ├── Graph/                      # Node Graph architecture (the audio engine)
+        │   ├── NodeGraph.swift         # Graph model, validation, serialization -- source of truth
+        │   ├── GraphNode.swift         # Protocol + BaseGraphNode for all nodes
         │   ├── MacroNode.swift         # Subgraph encapsulation
-        │   ├── ControlGraphEvaluator.swift  # 60Hz control-rate evaluation
-        │   └── Nodes/                  # Node implementations (TBD in Phase 2-3)
+        │   ├── ControlGraphEvaluator.swift  # 60Hz control-rate evaluation (defined, not yet wired up)
+        │   ├── Engine/                 # Pull-render engine
+        │   │   ├── DSPNode.swift            # Real-time render interface
+        │   │   ├── GraphAudioEngine.swift    # Single AVAudioSourceNode, atomic plan swap
+        │   │   ├── ExecutionPlan.swift        # Topological sort + buffer-slot assignment
+        │   │   └── BufferPool.swift / AudioBuffer.swift  # Pre-allocated stereo buffer pool
+        │   └── Nodes/                  # Node implementations: Source/Filter/Effect/Neural/
+        │                                 Control/Routing/Sequencer/Analysis
         ├── Views/
         │   ├── LRComponents.swift          # Reusable UI components (design system primitives)
-        │   ├── LatentResonatorView.swift   # Setup: full mixer + bridge status + DETAIL + audio visualizer
+        │   ├── Patch/                       # PatchCanvasView (native canvas) + CableLayer + NodeCardFactory
         │   ├── PerformanceMotherbaseView.swift  # Perform: scenes, crossfader, step grid, auto-gen controls
         │   ├── SceneCrossfaderView.swift        # Scene A/B crossfader + load buttons
-        │   ├── LaneStripView.swift     # Per-lane mixer strip + DisclosureGroup detail popover
         │   ├── RetroKnob.swift         # Precision dial with 270-degree sweep and tick marks
         │   ├── LatentXYPad.swift       # CRT-style 2D XY pad with coordinate readout
         │   ├── TerminalConsoleView.swift   # Mecha Metal terminal for Python bridge logs
-        │   ├── AudioVisualizerXYPad.swift  # WKWebView wrapper for audio visualizer
+        │   ├── AudioVisualizerXYPad.swift  # WKWebView wrapper for the Perform-mode audio visualizer
         │   └── PerformLayoutEngine.swift   # Auto-generates PERFORM control surface layout
-        ├── WebView/
-        │   ├── PatchViewCoordinator.swift   # WKWebView coordinator for PATCH mode (React Flow)
-        │   ├── WebViewBridge.swift          # Bidirectional Swift ↔ JavaScript bridge
-        │   └── AudioVisualizerHTML.swift    # Canvas 2D + WebAudio visualizer HTML/JS
         ├── Scripts/
         │   ├── requirements.txt      # Python conversion deps
         │   ├── requirements_bridge.txt # ACE-Step bridge deps
@@ -678,6 +671,8 @@ Key concepts:
 - **ACE-Step 1.5** -- hybrid LLM + Diffusion Transformer architecture for audio
 
 The Neural Feedback Loop is a digital resurrection of analog recursive techniques, operating within the high-dimensional latent space of a diffusion model rather than physical acoustic space.
+
+Each inference cycle runs ACE-Step locally for several seconds at peak GPU draw. The instrument does not hide this.
 
 ---
 

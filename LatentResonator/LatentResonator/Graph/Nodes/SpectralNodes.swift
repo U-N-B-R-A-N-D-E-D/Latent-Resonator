@@ -3,724 +3,24 @@ import AVFoundation
 import Accelerate
 import Combine
 
-// MARK: - FFT Analysis Node
-
-/// Forward FFT with Hann windowing.
-/// Converts time-domain audio → frequency-domain spectrum.
-final class FFTAnalysisNode: BaseGraphNode {
-    
-    // MARK: - Parameters
-    
-    var fftSize: Int {
-        get { getParam("fftSize", default: LRConstants.fftSize) }
-        set { setParam("fftSize", value: newValue) }
-    }
-    
-    // MARK: - Internal State
-    
-    private var halfN: Int
-    private var fftLog2n: vDSP_Length
-    private var fftSetup: FFTSetup?
-    private var realPart: [Float]
-    private var imagPart: [Float]
-    private var hannWindow: [Float]
-    private var chunkBuffer: [Float]
-    
-    // MARK: - Init
-    
-    init(id: UUID = UUID(), params: [String: Any] = [:]) {
-        let size = (params["fftSize"] as? Int) ?? LRConstants.fftSize
-        self.halfN = size / 2
-        let log2 = Int(log2f(Float(size)))
-        self.fftLog2n = vDSP_Length(log2)
-        
-        if let setup = vDSP_create_fftsetup(self.fftLog2n, FFTRadix(kFFTRadix2)) {
-            self.fftSetup = setup
-        }
-        
-        self.realPart = [Float](repeating: 0, count: halfN)
-        self.imagPart = [Float](repeating: 0, count: halfN)
-        self.chunkBuffer = [Float](repeating: 0, count: size)
-        
-        var window = [Float](repeating: 0, count: size)
-        vDSP_hann_window(&window, vDSP_Length(size), Int32(vDSP_HANN_NORM))
-        self.hannWindow = window
-        
-        super.init(
-            id: id,
-            nodeType: "fft_analysis",
-            category: .analysis,
-            displayName: "FFT"
-        )
-        
-        for (key, value) in params {
-            parameters[key] = value
-        }
-    }
-    
-    required init(from decoder: Decoder) throws {
-        let size = LRConstants.fftSize
-        self.halfN = size / 2
-        let log2 = Int(log2f(Float(size)))
-        self.fftLog2n = vDSP_Length(log2)
-        
-        if let setup = vDSP_create_fftsetup(self.fftLog2n, FFTRadix(kFFTRadix2)) {
-            self.fftSetup = setup
-        } else {
-            self.fftSetup = nil
-        }
-        
-        self.realPart = [Float](repeating: 0, count: halfN)
-        self.imagPart = [Float](repeating: 0, count: halfN)
-        self.chunkBuffer = [Float](repeating: 0, count: size)
-        
-        var window = [Float](repeating: 0, count: size)
-        vDSP_hann_window(&window, vDSP_Length(size), Int32(vDSP_HANN_NORM))
-        self.hannWindow = window
-        
-        try super.init(from: decoder)
-    }
-    
-    deinit {
-        if let setup = fftSetup {
-            vDSP_destroy_fftsetup(setup)
-        }
-    }
-    
-    // MARK: - Ports
-    
-    override var ports: [NodePort] {
-        [
-            NodePort(id: "in", label: "IN", signalType: .audio, direction: .input),
-            NodePort(id: "out_real", label: "REAL", signalType: .control, direction: .output),
-            NodePort(id: "out_imag", label: "IMAG", signalType: .control, direction: .output)
-        ]
-    }
-    
-    // MARK: - Processing
-    
-    /// Process audio through FFT.
-    /// Returns (real, imag) split-complex representation.
-    func processSpectrum(samples: [Float]) -> (real: [Float], imag: [Float]) {
-        guard let setup = fftSetup else {
-            return (Array(repeating: 0, count: halfN), Array(repeating: 0, count: halfN))
-        }
-        
-        let size = fftSize
-        
-        // Copy input to chunk buffer with zero-padding if needed
-        for i in 0..<size {
-            chunkBuffer[i] = i < samples.count ? samples[i] : 0
-        }
-        
-        // Apply Hann window
-        vDSP_vmul(chunkBuffer, 1, hannWindow, 1, &chunkBuffer, 1, vDSP_Length(size))
-        
-        // Pack and transform
-        packForFFT(chunkBuffer)
-        realPart.withUnsafeMutableBufferPointer { realBuf in
-            imagPart.withUnsafeMutableBufferPointer { imagBuf in
-                guard let realBase = realBuf.baseAddress, let imagBase = imagBuf.baseAddress else { return }
-                var splitComplex = DSPSplitComplex(realp: realBase, imagp: imagBase)
-                vDSP_fft_zrip(setup, &splitComplex, 1, fftLog2n, FFTDirection(kFFTDirection_Forward))
-            }
-        }
-        
-        return (realPart, imagPart)
-    }
-    
-    private func packForFFT(_ data: [Float]) {
-        for i in 0..<halfN {
-            realPart[i] = data[2 * i]
-            imagPart[i] = data[2 * i + 1]
-        }
-    }
-}
-
-// MARK: - Semantic EQ Node
-
-/// 4-band spectral profile derived from prompt keywords.
-/// The "Semantic Filter" from white paper §6.1.
-final class SemanticEQNode: BaseGraphNode {
-    
-    // MARK: - Parameters
-    
-    var prompt: String {
-        get { getParam("prompt", default: "") }
-        set {
-            setParam("prompt", value: newValue)
-            updateProfile(from: newValue)
-        }
-    }
-    
-    var fallbackProfile: [Float] {
-        get { getParam("fallbackProfile", default: [1.0, 1.0, 1.0, 1.0]) }
-        set { setParam("fallbackProfile", value: newValue) }
-    }
-    
-    // MARK: - State
-    
-    private var spectralProfile: [Float] = [1.0, 1.0, 1.0, 1.0]
-    
-    // MARK: - Init
-    
-    init(id: UUID = UUID(), params: [String: Any] = [:]) {
-        super.init(
-            id: id,
-            nodeType: "semantic_eq",
-            category: .analysis,
-            displayName: "SEMANTIC EQ"
-        )
-        
-        for (key, value) in params {
-            parameters[key] = value
-        }
-        
-        if let promptParam = params["prompt"] as? String {
-            updateProfile(from: promptParam)
-        }
-    }
-    
-    required init(from decoder: Decoder) throws {
-        try super.init(from: decoder)
-        // spectralProfile initialized to default in declaration
-        if let promptParam = parameters["prompt"] as? String {
-            updateProfile(from: promptParam)
-        }
-    }
-    
-    // MARK: - Ports
-    
-    override var ports: [NodePort] {
-        [
-            NodePort(id: "in_real", label: "REAL IN", signalType: .control, direction: .input),
-            NodePort(id: "in_imag", label: "IMAG IN", signalType: .control, direction: .input),
-            NodePort(id: "out_real", label: "REAL OUT", signalType: .control, direction: .output),
-            NodePort(id: "out_imag", label: "IMAG OUT", signalType: .control, direction: .output)
-        ]
-    }
-    
-    // MARK: - Processing
-    
-    /// Apply 4-band spectral profile to split-complex spectrum.
-    func processSpectrum(real: inout [Float], imag: inout [Float]) {
-        let halfN = real.count
-        let bandSize = halfN / 4
-        
-        for band in 0..<4 {
-            let gain = spectralProfile[band]
-            let start = band * bandSize
-            let end = (band == 3) ? halfN : (band + 1) * bandSize
-            
-            for i in start..<end {
-                real[i] *= gain
-                imag[i] *= gain
-            }
-        }
-    }
-    
-    private func updateProfile(from prompt: String) {
-        var accum: [Float] = [0, 0, 0, 0]
-        var matches = 0
-        
-        let lowered = prompt.lowercased()
-        for (keyword, gains) in LRConstants.semanticProfiles where lowered.contains(keyword) {
-            for i in 0..<4 { accum[i] += gains[i] }
-            matches += 1
-        }
-        
-        if matches > 0 {
-            for i in 0..<4 { accum[i] /= Float(matches) }
-            spectralProfile = accum
-        } else {
-            spectralProfile = fallbackProfile
-        }
-    }
-}
-
-// MARK: - Spectral Saturation Node
-
-/// Per-band harmonic enrichment (spectral distortion).
-/// Higher CFG → more spectral nonlinearity.
-final class SpectralSaturationNode: BaseGraphNode {
-    
-    // MARK: - Parameters
-    
-    var guidanceScale: Float {
-        get { getParam("guidanceScale", default: 10.0) }
-        set { setParam("guidanceScale", value: newValue) }
-    }
-    
-    // MARK: - Init
-    
-    init(id: UUID = UUID(), params: [String: Any] = [:]) {
-        super.init(
-            id: id,
-            nodeType: "spectral_saturation",
-            category: .analysis,
-            displayName: "SPECTRAL SAT"
-        )
-        
-        for (key, value) in params {
-            parameters[key] = value
-        }
-    }
-    
-    required init(from decoder: Decoder) throws {
-        try super.init(from: decoder)
-    }
-    
-    // MARK: - Ports
-    
-    override var ports: [NodePort] {
-        [
-            NodePort(id: "in_real", label: "REAL IN", signalType: .control, direction: .input),
-            NodePort(id: "in_imag", label: "IMAG IN", signalType: .control, direction: .input),
-            NodePort(id: "cfg_cv", label: "CFG CV", signalType: .control, direction: .input),
-            NodePort(id: "out_real", label: "REAL OUT", signalType: .control, direction: .output),
-            NodePort(id: "out_imag", label: "IMAG OUT", signalType: .control, direction: .output)
-        ]
-    }
-    
-    // MARK: - Processing
-    
-    func processSpectrum(real: inout [Float], imag: inout [Float]) {
-        guard guidanceScale > 5.0 else { return }
-        
-        let halfN = real.count
-        let bandSize = halfN / 4
-        let satFactor = (guidanceScale - 5.0) / 15.0
-        
-        for band in 0..<4 {
-            let start = band * bandSize
-            let end = (band == 3) ? halfN : (band + 1) * bandSize
-            
-            for i in start..<end {
-                let mag = sqrtf(real[i] * real[i] + imag[i] * imag[i])
-                let phase = atan2f(imag[i], real[i])
-                
-                let saturated = tanhf(mag * (1.0 + satFactor))
-                real[i] = saturated * cosf(phase)
-                imag[i] = saturated * sinf(phase)
-            }
-        }
-    }
-}
-
-// MARK: - Spectral Noise Node
-
-/// Inject colored Gaussian noise in frequency domain.
-/// Creates nucleation sites for timbral structures (§4.1.3).
-final class SpectralNoiseNode: BaseGraphNode {
-    
-    // MARK: - Parameters
-    
-    var entropyLevel: Float {
-        get { getParam("entropyLevel", default: 0.0) }
-        set { setParam("entropyLevel", value: newValue) }
-    }
-    
-    // MARK: - State
-    
-    private var rng = Xoshiro256StarStar()
-    
-    // MARK: - Init
-    
-    init(id: UUID = UUID(), params: [String: Any] = [:]) {
-        super.init(
-            id: id,
-            nodeType: "spectral_noise",
-            category: .analysis,
-            displayName: "SPECTRAL NOISE"
-        )
-        
-        for (key, value) in params {
-            parameters[key] = value
-        }
-    }
-    
-    required init(from decoder: Decoder) throws {
-        try super.init(from: decoder)
-        // rng initialized with default value
-    }
-    
-    // MARK: - Ports
-    
-    override var ports: [NodePort] {
-        [
-            NodePort(id: "in_real", label: "REAL IN", signalType: .control, direction: .input),
-            NodePort(id: "in_imag", label: "IMAG IN", signalType: .control, direction: .input),
-            NodePort(id: "entropy_cv", label: "ENTROPY CV", signalType: .control, direction: .input),
-            NodePort(id: "out_real", label: "REAL OUT", signalType: .control, direction: .output),
-            NodePort(id: "out_imag", label: "IMAG OUT", signalType: .control, direction: .output)
-        ]
-    }
-    
-    // MARK: - Processing
-    
-    func processSpectrum(real: inout [Float], imag: inout [Float]) {
-        guard entropyLevel > 0.001 else { return }
-        
-        let level = entropyLevel * 0.01
-        
-        for i in 0..<real.count {
-            let noiseReal = rng.nextGaussian() * level
-            let noiseImag = rng.nextGaussian() * level
-            real[i] += noiseReal
-            imag[i] += noiseImag
-        }
-    }
-}
-
-// MARK: - Spectral Memory Node
-
-/// Recursive spectral blending (drift accumulation).
-/// The DSP analogue of latent state persistence.
-final class SpectralMemoryNode: BaseGraphNode {
-    
-    // MARK: - Parameters
-    
-    var feedbackAmount: Float {
-        get { getParam("feedbackAmount", default: 0.5) }
-        set { setParam("feedbackAmount", value: newValue) }
-    }
-    
-    var memoryCoeff: Float {
-        get { getParam("memoryCoeff", default: 0.85) }
-        set { setParam("memoryCoeff", value: newValue) }
-    }
-    
-    // MARK: - State
-    
-    private var spectralMemory: [Float] = []
-    
-    // MARK: - Init
-    
-    init(id: UUID = UUID(), params: [String: Any] = [:]) {
-        super.init(
-            id: id,
-            nodeType: "spectral_memory",
-            category: .analysis,
-            displayName: "SPECTRAL MEMORY"
-        )
-        
-        for (key, value) in params {
-            parameters[key] = value
-        }
-    }
-    
-    required init(from decoder: Decoder) throws {
-        try super.init(from: decoder)
-        // spectralMemory initialized as empty array
-    }
-    
-    // MARK: - Ports
-    
-    override var ports: [NodePort] {
-        [
-            NodePort(id: "in_real", label: "REAL IN", signalType: .control, direction: .input),
-            NodePort(id: "in_imag", label: "IMAG IN", signalType: .control, direction: .input),
-            NodePort(id: "feedback_cv", label: "FEEDBACK CV", signalType: .control, direction: .input),
-            NodePort(id: "out_real", label: "REAL OUT", signalType: .control, direction: .output),
-            NodePort(id: "out_imag", label: "IMAG OUT", signalType: .control, direction: .output)
-        ]
-    }
-    
-    // MARK: - Processing
-    
-    func processSpectrum(real: inout [Float], imag: inout [Float]) {
-        let halfN = real.count
-        
-        // Initialize memory if needed
-        if spectralMemory.count != halfN {
-            spectralMemory = [Float](repeating: 0, count: halfN)
-        }
-        
-        // Compute magnitude
-        var magnitude = [Float](repeating: 0, count: halfN)
-        for i in 0..<halfN {
-            magnitude[i] = sqrtf(real[i] * real[i] + imag[i] * imag[i])
-        }
-        
-        // Blend with memory
-        let blend = feedbackAmount
-        for i in 0..<halfN {
-            spectralMemory[i] = memoryCoeff * spectralMemory[i] + (1.0 - memoryCoeff) * magnitude[i]
-            let blended = (1.0 - blend) * magnitude[i] + blend * spectralMemory[i]
-            
-            let phase = atan2f(imag[i], real[i])
-            real[i] = blended * cosf(phase)
-            imag[i] = blended * sinf(phase)
-        }
-    }
-}
-
-// MARK: - Spectral Granularity Node
-
-/// Stochastic spectral bin masking (microsound sparsification).
-final class SpectralGranularityNode: BaseGraphNode {
-    
-    // MARK: - Parameters
-    
-    var granularity: Float {
-        get { getParam("granularity", default: 0.0) }
-        set { setParam("granularity", value: newValue) }
-    }
-    
-    // MARK: - State
-    
-    private var rng = Xoshiro256StarStar()
-    
-    // MARK: - Init
-    
-    init(id: UUID = UUID(), params: [String: Any] = [:]) {
-        super.init(
-            id: id,
-            nodeType: "spectral_granularity",
-            category: .analysis,
-            displayName: "GRANULARITY"
-        )
-        
-        for (key, value) in params {
-            parameters[key] = value
-        }
-    }
-    
-    required init(from decoder: Decoder) throws {
-        try super.init(from: decoder)
-        // rng initialized with default value
-    }
-    
-    // MARK: - Ports
-    
-    override var ports: [NodePort] {
-        [
-            NodePort(id: "in_real", label: "REAL IN", signalType: .control, direction: .input),
-            NodePort(id: "in_imag", label: "IMAG IN", signalType: .control, direction: .input),
-            NodePort(id: "grain_cv", label: "GRAIN CV", signalType: .control, direction: .input),
-            NodePort(id: "out_real", label: "REAL OUT", signalType: .control, direction: .output),
-            NodePort(id: "out_imag", label: "IMAG OUT", signalType: .control, direction: .output)
-        ]
-    }
-    
-    // MARK: - Processing
-    
-    func processSpectrum(real: inout [Float], imag: inout [Float]) {
-        guard granularity > 0.01 else { return }
-        
-        let prob = granularity * 0.01
-        
-        for i in 0..<real.count {
-            if rng.nextFloat() > prob {
-                real[i] = 0
-                imag[i] = 0
-            }
-        }
-    }
-}
-
-// MARK: - Spectral Freeze Node
-
-/// Captures and sustains a spectral snapshot (§5.2 Saturation).
-final class SpectralFreezeNode: BaseGraphNode {
-    
-    // MARK: - Parameters
-    
-    var freezeActive: Bool {
-        get { getParam("freezeActive", default: false) }
-        set { setParam("freezeActive", value: newValue) }
-    }
-    
-    var blendAmount: Float {
-        get { getParam("blendAmount", default: 0.5) }
-        set { setParam("blendAmount", value: newValue) }
-    }
-    
-    // MARK: - State
-    
-    private var frozenReal: [Float]?
-    private var frozenImag: [Float]?
-    
-    // MARK: - Init
-    
-    init(id: UUID = UUID(), params: [String: Any] = [:]) {
-        super.init(
-            id: id,
-            nodeType: "spectral_freeze",
-            category: .analysis,
-            displayName: "SPECTRAL FREEZE"
-        )
-        
-        for (key, value) in params {
-            parameters[key] = value
-        }
-    }
-    
-    required init(from decoder: Decoder) throws {
-        try super.init(from: decoder)
-        // frozenReal and frozenImag are nil by default
-    }
-    
-    // MARK: - Ports
-    
-    override var ports: [NodePort] {
-        [
-            NodePort(id: "in_real", label: "REAL IN", signalType: .control, direction: .input),
-            NodePort(id: "in_imag", label: "IMAG IN", signalType: .control, direction: .input),
-            NodePort(id: "freeze_gate", label: "FREEZE", signalType: .gate, direction: .input),
-            NodePort(id: "out_real", label: "REAL OUT", signalType: .control, direction: .output),
-            NodePort(id: "out_imag", label: "IMAG OUT", signalType: .control, direction: .output)
-        ]
-    }
-    
-    // MARK: - Processing
-    
-    func processSpectrum(real: inout [Float], imag: inout [Float]) {
-        if freezeActive {
-            if frozenReal == nil {
-                frozenReal = real
-                frozenImag = imag
-            }
-            
-            if let frozen_r = frozenReal, let frozen_i = frozenImag, frozen_r.count == real.count {
-                let blend = blendAmount
-                for i in 0..<real.count {
-                    real[i] = (1.0 - blend) * real[i] + blend * frozen_r[i]
-                    imag[i] = (1.0 - blend) * imag[i] + blend * frozen_i[i]
-                }
-            }
-        } else {
-            frozenReal = nil
-            frozenImag = nil
-        }
-    }
-}
-
-// MARK: - IFFT Synthesis Node
-
-/// Inverse FFT converting frequency-domain spectrum back to audio.
-final class IFFTSynthesisNode: BaseGraphNode {
-    
-    // MARK: - Parameters
-    
-    var fftSize: Int {
-        get { getParam("fftSize", default: LRConstants.fftSize) }
-        set { setParam("fftSize", value: newValue) }
-    }
-    
-    // MARK: - Internal State
-    
-    private var halfN: Int
-    private var fftLog2n: vDSP_Length
-    private var fftSetup: FFTSetup?
-    private var realPart: [Float]
-    private var imagPart: [Float]
-    private var outputBuffer: [Float]
-    
-    // MARK: - Init
-    
-    init(id: UUID = UUID(), params: [String: Any] = [:]) {
-        let size = (params["fftSize"] as? Int) ?? LRConstants.fftSize
-        self.halfN = size / 2
-        let log2 = Int(log2f(Float(size)))
-        self.fftLog2n = vDSP_Length(log2)
-        
-        if let setup = vDSP_create_fftsetup(self.fftLog2n, FFTRadix(kFFTRadix2)) {
-            self.fftSetup = setup
-        }
-        
-        self.realPart = [Float](repeating: 0, count: halfN)
-        self.imagPart = [Float](repeating: 0, count: halfN)
-        self.outputBuffer = [Float](repeating: 0, count: size)
-        
-        super.init(
-            id: id,
-            nodeType: "ifft_synthesis",
-            category: .analysis,
-            displayName: "IFFT"
-        )
-        
-        for (key, value) in params {
-            parameters[key] = value
-        }
-    }
-    
-    required init(from decoder: Decoder) throws {
-        let size = LRConstants.fftSize
-        self.halfN = size / 2
-        let log2 = Int(log2f(Float(size)))
-        self.fftLog2n = vDSP_Length(log2)
-        
-        if let setup = vDSP_create_fftsetup(self.fftLog2n, FFTRadix(kFFTRadix2)) {
-            self.fftSetup = setup
-        } else {
-            self.fftSetup = nil
-        }
-        
-        self.realPart = [Float](repeating: 0, count: halfN)
-        self.imagPart = [Float](repeating: 0, count: halfN)
-        self.outputBuffer = [Float](repeating: 0, count: size)
-        
-        try super.init(from: decoder)
-    }
-    
-    deinit {
-        if let setup = fftSetup {
-            vDSP_destroy_fftsetup(setup)
-        }
-    }
-    
-    // MARK: - Ports
-    
-    override var ports: [NodePort] {
-        [
-            NodePort(id: "in_real", label: "REAL IN", signalType: .control, direction: .input),
-            NodePort(id: "in_imag", label: "IMAG IN", signalType: .control, direction: .input),
-            NodePort(id: "out", label: "OUT", signalType: .audio, direction: .output)
-        ]
-    }
-    
-    // MARK: - Processing
-    
-    func processSpectrum(real: [Float], imag: [Float]) -> [Float] {
-        guard let setup = fftSetup else {
-            return Array(repeating: 0, count: fftSize)
-        }
-        
-        // Copy input to working buffers
-        for i in 0..<min(halfN, real.count) {
-            realPart[i] = real[i]
-            imagPart[i] = imag[i]
-        }
-        
-        // Inverse FFT
-        realPart.withUnsafeMutableBufferPointer { realBuf in
-            imagPart.withUnsafeMutableBufferPointer { imagBuf in
-                guard let realBase = realBuf.baseAddress, let imagBase = imagBuf.baseAddress else { return }
-                var splitComplex = DSPSplitComplex(realp: realBase, imagp: imagBase)
-                vDSP_fft_zrip(setup, &splitComplex, 1, fftLog2n, FFTDirection(kFFTDirection_Inverse))
-            }
-        }
-        
-        // Unpack
-        unpackFromFFT(&outputBuffer)
-        
-        // Normalize (vDSP requires 1/(2N) scaling)
-        var scale = 1.0 / Float(fftSize * 2)
-        vDSP_vsmul(outputBuffer, 1, &scale, &outputBuffer, 1, vDSP_Length(fftSize))
-        
-        return outputBuffer
-    }
-    
-    private func unpackFromFFT(_ data: inout [Float]) {
-        for i in 0..<halfN {
-            data[2 * i] = realPart[i]
-            data[2 * i + 1] = imagPart[i]
-        }
-    }
-}
-
 // MARK: - Spectral Chain Node
+//
+// The Spectra stage of Latent Resonator (ROAD_TO_V2_UX §3.1). This is the
+// single coarse, named stage that encapsulates the full 8-stage spectral
+// pipeline (FFT → SemanticEQ → Saturation → Noise → Memory → Granularity
+// → Freeze → IFFT). It is the only spectral node registered in `NodeFactory`
+// and the only one that conforms to `DSPNode` — the audio engine pulls
+// render through it.
+//
+// The 8 per-stage spectral operations live INSIDE `SpectralPipeline` as
+// private stage methods (`stage1_fft`, `stage2_semanticEQ`, ...). They are
+// intentionally NOT exposed as independent canvas nodes: fragmenting the
+// Spectra stage into 8 sub-nodes would violate the Envion-aligned coarse-
+// stage philosophy and produce silence (the individual stage classes of
+// the v1.x API did not conform to `DSPNode` and were silently skipped by
+// `ExecutionPlan.build`). The v1.x classes were removed when the
+// `SpectralChainNode` + `SpectralPipeline` composite became the single
+// thing that works.
 
 /// Composite node encapsulating the complete spectral processing pipeline.
 ///
@@ -738,6 +38,26 @@ final class IFFTSynthesisNode: BaseGraphNode {
 /// References:
 ///   - Roads: Microsound (2001) — spectral domain time-stretch and frequency-domain filtering
 ///   - Schaeffer: Traité des objets musicaux (1966) — sound object morphology
+///
+/// ─── Migration Status (T5 assessment) ───
+///
+/// SpectralChainNode is already functional on the v2 pull-render path: it
+/// conforms to `GraphNodeDSPProvider` / `DSPNode` and `render()` is the live
+/// audio callback. The `audioUnit()` override returns nil and is vestigial
+/// protocol boilerplate. The `processor: SpectralProcessor` property is also
+/// unused — the live path uses `analysisPipeline: SpectralPipeline`.
+///
+/// Remaining migration work is cleanup, not behavior change:
+///   1. Remove `audioUnit()` override (`BaseGraphNode` already returns nil).
+///   2. Remove `processor` and the `SpectralProcessor` initialization.
+///   3. Decide the fate of `SpectralProcessor.swift` (dead code; only referenced
+///      by comments in the bridge/scripts).
+///   4. Verify no `AudioInputNode` coupling: there is none; both are ordinary
+///      graph nodes that connect via audio edges.
+///
+/// RT-path risk: low — the live DSP work is inside `SpectralPipeline`; any
+/// cleanup must avoid touching that code path. Out of scope for unrelated
+/// changes per the v2-node-graph skill.
 final class SpectralChainNode: BaseGraphNode {
 
     // MARK: - Parameters (Exposed from all 8 stages)
@@ -793,26 +113,17 @@ final class SpectralChainNode: BaseGraphNode {
     private var processor: SpectralProcessor
     private var analysisPipeline: SpectralPipeline?
     
-    // MARK: - v2.0 Real Audio Input (Ring Buffer)
-    
-    /// Circular buffer for receiving audio from upstream nodes.
-    /// Written by AudioGraphMapper.installUpstreamTap(), read by sourceNode render callback.
-    /// Lock-free SPSC design for audio-thread safety.
-    private let inputRingBuffer: CircularAudioBuffer
+    /// Pre-allocated mono scratch for pull-render `DSPNode.render` (no per-block heap).
+    private var scratchMono: [Float]
     
     /// Capacity: 2 seconds of audio at 48kHz = 96000 samples.
-    /// Actual latency depends on tap callback timing (typically < 100ms).
-    private static let inputBufferCapacity = 96000
+    /// Capacity reserved for overlap-add state inside `SpectralPipeline`.
     
     // MARK: - v2.0 Spectral Pipeline (8-Stage)
     
     /// Semantic profile cache (4-band EQ: [low, lowMid, highMid, high])
     /// Updated when prompt parameter changes
     private var cachedSemanticProfile: [Float] = [0, 0, 0, 0]
-    
-    // Audio unit
-    private var sourceNode: AVAudioSourceNode?
-    private let format: AVAudioFormat
 
     // MARK: - Init
 
@@ -828,17 +139,10 @@ final class SpectralChainNode: BaseGraphNode {
         )
         processor.reconfigure(fftSize: size)
 
-        // Initialize v2.0 ring buffer BEFORE super.init (required for Swift init rules)
-        self.inputRingBuffer = CircularAudioBuffer(capacity: Self.inputBufferCapacity)
+        self.scratchMono = [Float](repeating: 0, count: LRConstants.bufferSize * 2)
         
         // Initialize v2.0 spectral pipeline
         self.analysisPipeline = SpectralPipeline(fftSize: size, sampleRate: sampleRate)
-
-        let fmt = AVAudioFormat(
-            standardFormatWithSampleRate: sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
-        self.format = fmt
 
         super.init(
             id: id,
@@ -853,8 +157,6 @@ final class SpectralChainNode: BaseGraphNode {
         
         // Initialize semantic profile cache from prompt
         cachedSemanticProfile = buildSemanticProfile(from: semanticProfile)
-
-        createSourceNode()
     }
     
     required init(from decoder: Decoder) throws {
@@ -870,21 +172,12 @@ final class SpectralChainNode: BaseGraphNode {
         )
         processor.reconfigure(fftSize: size)
         
-        self.inputRingBuffer = CircularAudioBuffer(capacity: Self.inputBufferCapacity)
+        self.scratchMono = [Float](repeating: 0, count: LRConstants.bufferSize * 2)
         self.analysisPipeline = SpectralPipeline(fftSize: size, sampleRate: sr)
-        
-        let fmt = AVAudioFormat(
-            standardFormatWithSampleRate: sr,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
-        self.format = fmt
         
         try super.init(from: decoder)
         
-        // Initialize semantic profile cache from decoded parameters
         cachedSemanticProfile = buildSemanticProfile(from: semanticProfile)
-        
-        createSourceNode()
     }
     
     // MARK: - Ports
@@ -898,10 +191,10 @@ final class SpectralChainNode: BaseGraphNode {
         ]
     }
 
-    // MARK: - Audio Unit
+    // MARK: - Audio Unit (legacy — pull-render uses `DSPNode` below)
 
     override func audioUnit() -> AVAudioNode? {
-        return sourceNode
+        nil
     }
 
     // MARK: - Parameter Changes
@@ -914,78 +207,50 @@ final class SpectralChainNode: BaseGraphNode {
         }
     }
 
-    /// Reset all processing state.
-    /// Called when the audio engine is restarted or the node is reconfigured.
-    func reset() {
-        analysisPipeline?.reset()
-        cachedSemanticProfile = buildSemanticProfile(from: semanticProfile)
-    }
-
-    // MARK: - Source Node Creation
-
-    private func createSourceNode() {
-        sourceNode = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
-            guard let self = self else { return noErr }
-
-            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            guard ablPointer.count >= 2 else { return OSStatus(kAudio_ParamError) }
-
-            let leftPtr = ablPointer[0].mData!.assumingMemoryBound(to: Float.self)
-            let rightPtr = ablPointer[1].mData!.assumingMemoryBound(to: Float.self)
-
-            // v2.0: Read from input ring buffer (fed by upstream nodes via tap)
-            // Audio-thread safe: lock-free SPSC ring buffer
-            var inputSamples = [Float](repeating: 0, count: Int(frameCount))
-            let readCount = self.inputRingBuffer.read(into: &inputSamples, count: Int(frameCount))
-
-            // If buffer underruns (not enough audio from upstream), pad with zeros
-            // This provides graceful degradation rather than crash/glitch
-            if readCount < Int(frameCount) {
-                for i in readCount..<Int(frameCount) {
-                    inputSamples[i] = 0.0
-                }
-            }
-
-            // v2.0: Process through 8-stage spectral pipeline
-            // Whitepaper alignment: FFT→SemanticEQ→Saturation→Noise→Memory→Granularity→Freeze→IFFT
-            let processed = self.processSpectralPipeline(input: inputSamples)
-
-            // Copy to stereo output
-            for i in 0..<min(processed.count, Int(frameCount)) {
-                leftPtr[i] = processed[i]
-                rightPtr[i] = processed[i]
-            }
-
-            return noErr
-        }
-    }
-
     // MARK: - v2.0 Spectral Pipeline Processing
 
-    /// Process audio through the complete 8-stage spectral pipeline.
-    ///
-    /// - Parameter input: Input audio buffer
-    /// - Returns: Processed audio buffer (same length as input)
-    private func processSpectralPipeline(input: [Float]) -> [Float] {
-        // Build semantic profile from prompt parameter (C.3: Map semantic profile)
-        let profile = cachedSemanticProfile.isEmpty
-            ? buildSemanticProfile(from: semanticProfile)
-            : cachedSemanticProfile
+    /// Run the 8-stage spectral pipeline in-place (no heap traffic on audio thread).
+    /// P1.5 — scalar user-facing params are passed in as arguments so the
+    /// caller can snapshot them once at the top of `render`; the
+    /// `cachedSemanticProfile` array stays read via the pre-existing
+    /// stored-property pattern (pre-allocated, mutated only on the main
+    /// thread in `onParameterChanged`).
+    private func processSpectralPipelineInPlace(
+        input: UnsafePointer<Float>,
+        frameCount: Int,
+        output: UnsafeMutablePointer<Float>,
+        saturationAmount: Float,
+        noiseAmount: Float,
+        memoryCoeff: Float,
+        granularity: Float,
+        freezeActive: Bool,
+        freezeBlend: Float
+    ) {
+        guard let pipeline = analysisPipeline else {
+            for i in 0..<frameCount { output[i] = input[i] }
+            return
+        }
 
-        // Call extracted pipeline with whitepaper-aligned parameters
-        // C.1: §5.2 Saturation parameters → saturationAmount
-        // C.2: §5.4 Metallic Sheen is handled by comb filter (separate node)
-        guard let pipeline = analysisPipeline else { return input }
-        return pipeline.process(
-            input: input,
-            semanticProfile: profile,
-            saturationAmount: saturationAmount,
-            noiseAmount: noiseAmount,
-            memoryCoefficient: memoryCoeff,
-            granularity: granularity,
-            freezeActive: freezeActive,
-            freezeBlend: freezeBlend
-        )
+        if cachedSemanticProfile.isEmpty {
+            cachedSemanticProfile = buildSemanticProfile(from: semanticProfile)
+        }
+
+        cachedSemanticProfile.withUnsafeBufferPointer { profilePtr in
+            guard let profileBase = profilePtr.baseAddress else { return }
+            pipeline.process(
+                input: input,
+                frameCount: frameCount,
+                output: output,
+                semanticProfile: profileBase,
+                profileCount: profilePtr.count,
+                saturationAmount: saturationAmount,
+                noiseAmount: noiseAmount,
+                memoryCoefficient: memoryCoeff,
+                granularity: granularity,
+                freezeActive: freezeActive,
+                freezeBlend: freezeBlend
+            )
+        }
     }
 
     /// Build 4-band semantic EQ profile from prompt text.
@@ -1067,45 +332,293 @@ final class SpectralChainNode: BaseGraphNode {
 
         return profile
     }
+}
 
-    // MARK: - v2.0 Audio Input Interface
+// MARK: - SpectralChainNode + DSPNode (pull-render)
 
-    /// Called by AudioGraphMapper to feed audio from upstream connections.
-    /// This is how audio actually enters the spectral chain.
-    ///
-    /// - Parameter samples: Audio buffer from upstream node (via tap)
-    func feedAudio(_ samples: [Float]) {
-        // Write to circular buffer (lock-free, audio-thread safe)
-        // SPSC: tap callback (producer) writes, render callback (consumer) reads
-        inputRingBuffer.write(samples)
+extension SpectralChainNode: GraphNodeDSPProvider, DSPNode {
+    var nodeId: UUID { id }
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double
+    ) {
+        // P1.5 — snapshot scalar user-facing params into locals before any
+        // DSP work. The `cachedSemanticProfile` array is read via the
+        // pre-existing stored-property pattern (pre-allocated, main-thread
+        // mutation only) — preserved as-is to avoid breaking RT-safety.
+        let sat = saturationAmount
+        let noise = noiseAmount
+        let mem = memoryCoeff
+        let grain = granularity
+        let freeze = freezeActive
+        let freezeBlnd = freezeBlend
+
+        guard let inBuf = inputs.first else {
+            for i in 0..<frameCount {
+                output.left[i] = 0
+                output.right[i] = 0
+            }
+            return
+        }
+
+        guard frameCount <= scratchMono.count else {
+            for i in 0..<frameCount {
+                output.left[i] = inBuf.left[i]
+                output.right[i] = inBuf.right[i]
+            }
+            return
+        }
+
+        for i in 0..<frameCount {
+            scratchMono[i] = (inBuf.left[i] + inBuf.right[i]) * 0.5
+        }
+
+        scratchMono.withUnsafeBufferPointer { inputPtr in
+            guard let inputBase = inputPtr.baseAddress else { return }
+            processSpectralPipelineInPlace(
+                input: inputBase,
+                frameCount: frameCount,
+                output: output.left,
+                saturationAmount: sat,
+                noiseAmount: noise,
+                memoryCoeff: mem,
+                granularity: grain,
+                freezeActive: freeze,
+                freezeBlend: freezeBlnd
+            )
+        }
+        for i in 0..<frameCount {
+            output.right[i] = output.left[i]
+        }
     }
 
-    /// Called by AudioGraphMapper when this node is connected to an upstream source.
-    /// Installs a tap on the upstream node's output to feed our input buffer.
-    ///
-    /// - Parameters:
-    ///   - upstreamNode: The upstream AVAudioNode to tap
-    ///   - engine: The AVAudioEngine for tap installation
-    func installUpstreamTap(from upstreamNode: AVAudioNode, in engine: AVAudioEngine) {
-        // Remove existing tap if any (defensive, should not exist for fresh connections)
-        upstreamNode.removeTap(onBus: 0)
+    func reset() {
+        analysisPipeline?.reset()
+        cachedSemanticProfile = buildSemanticProfile(from: semanticProfile)
+    }
+}
 
-        // Install tap to feed our input buffer
-        // Buffer size 4096 is a good balance between latency and CPU efficiency
-        upstreamNode.installTap(
-            onBus: 0,
-            bufferSize: 4096,
-            format: format
-        ) { [weak self] buffer, _ in
-            guard let self = self else { return }
+// MARK: - Spectral Feedback Node (Emergence — Round 2 audit, Booth)
 
-            // Extract mono samples from buffer
-            guard let channelData = buffer.floatChannelData else { return }
-            let frameLength = Int(buffer.frameLength)
-            let samples = Array(UnsafeBufferPointer(start: channelData[0], count: frameLength))
+/// Spectral attractor: wraps its own private `SpectralPipeline` and closes
+/// a feedback loop through a hop-quantized delay buffer, entirely inside
+/// Latent Resonator's own DSP — no ACE-Step dependency.
+///
+/// Round 2 finding (Booth): the only place in the spectral chain with
+/// genuine emergence potential is Stage 3 (polar saturation) + Stage 5
+/// (leaky memory) of `SpectralPipeline`. Coupling the pipeline's own
+/// output back into its input — with a delay (so it's a real feedback
+/// path, not instantaneous self-reference) and gain < 1.0 (so it's stable,
+/// not explosive) — turns that coupling into a real nonlinear dynamical
+/// system with state. This is a spectral-domain sibling of `DelayLineNode`
+/// (`FilterEffectNodes.swift`): same delay-buffer-plus-feedback-gain shape,
+/// just with a whole `SpectralPipeline.process(...)` call standing in for
+/// the single-sample tap, and mono throughout (mirrors `SpectralChainNode`'s
+/// downmix/duplicate shape, since the pipeline itself is single-channel).
+///
+/// There is no graph-level cycle here — `feedbackBuffer` is private state
+/// closed over by this one node, exactly like `DelayLineNode`'s own delay
+/// line. From the graph's perspective this is an ordinary one-in/one-out
+/// node; the recursion is temporal (across render calls), not topological.
+final class SpectralFeedbackNode: BaseGraphNode {
 
-            // Feed to our input ring buffer
-            self.feedAudio(samples)
+    // MARK: - Parameters
+
+    var feedback: Float {
+        get { getParam("feedback", default: LRConstants.spectralFeedbackDefault) }
+        set { setParam("feedback", value: newValue) }
+    }
+
+    var memoryCoeff: Float {
+        get { getParam("memoryCoeff", default: LRConstants.spectralFeedbackMemoryDefault) }
+        set { setParam("memoryCoeff", value: newValue) }
+    }
+
+    var saturationAmount: Float {
+        get { getParam("saturationAmount", default: LRConstants.spectralFeedbackSaturationDefault) }
+        set { setParam("saturationAmount", value: newValue) }
+    }
+
+    var delayHopCount: Int {
+        get { getParam("delayHopCount", default: LRConstants.spectralFeedbackHopDelayDefault) }
+        set { setParam("delayHopCount", value: newValue) }
+    }
+
+    // MARK: - Internal State
+
+    /// Private pipeline instance — this node owns its own spectral chain,
+    /// independent of any `SpectralChainNode` elsewhere in the graph.
+    private let pipeline: SpectralPipeline
+    private let hopSize: Int
+
+    /// Circular buffer holding the pipeline's own past output, read back
+    /// `delayHopCount * hopSize` samples later and summed with fresh input
+    /// — the closed spectral loop. Sized for the maximum hop count (see
+    /// `LRConstants.spectralFeedbackHopDelayRange`) plus one hop of
+    /// headroom, so `delaySamples < maxDelayLength` always holds and the
+    /// circular-buffer modulo arithmetic never indexes negative.
+    private var feedbackBuffer: [Float]
+    private var writePos: Int = 0
+    private let maxDelayLength: Int
+
+    /// Pre-allocated mono scratch: downmix + feedback-sum in one pass,
+    /// then fed straight into `pipeline.process(...)`. No per-block heap
+    /// traffic — sized once at init like `SpectralChainNode.scratchMono`.
+    private var mixedInput: [Float]
+
+    /// Flat (no-op) 4-band profile — this node has no semantic/prompt
+    /// coloration of its own, unlike `SpectralChainNode`. Passing all
+    /// zeros makes `stage2_semanticEQ`'s per-band gain `1.0 + 0 == 1.0`,
+    /// i.e. transparent.
+    private let neutralProfile: [Float] = [0, 0, 0, 0]
+
+    // MARK: - Init
+
+    init(id: UUID = UUID(), params: [String: Any] = [:], sampleRate: Double = LRConstants.sampleRate) {
+        let fftSize = LRConstants.fftSize
+        let hop = fftSize / 2
+        self.hopSize = hop
+        self.maxDelayLength = (LRConstants.spectralFeedbackHopDelayRange.upperBound + 1) * hop
+
+        self.pipeline = SpectralPipeline(fftSize: fftSize, sampleRate: sampleRate)
+        self.feedbackBuffer = [Float](repeating: 0, count: maxDelayLength)
+        self.mixedInput = [Float](repeating: 0, count: LRConstants.bufferSize * 2)
+
+        super.init(
+            id: id,
+            nodeType: "spectral_feedback",
+            category: .effect,
+            displayName: "SPECTRAL FEEDBACK"
+        )
+
+        for (key, value) in params {
+            parameters[key] = value
         }
+    }
+
+    required init(from decoder: Decoder) throws {
+        let fftSize = LRConstants.fftSize
+        let hop = fftSize / 2
+        self.hopSize = hop
+        self.maxDelayLength = (LRConstants.spectralFeedbackHopDelayRange.upperBound + 1) * hop
+
+        self.pipeline = SpectralPipeline(fftSize: fftSize, sampleRate: LRConstants.sampleRate)
+        self.feedbackBuffer = [Float](repeating: 0, count: maxDelayLength)
+        self.mixedInput = [Float](repeating: 0, count: LRConstants.bufferSize * 2)
+
+        try super.init(from: decoder)
+    }
+
+    // MARK: - Ports
+
+    override var ports: [NodePort] {
+        [
+            NodePort(id: "in", label: "IN", signalType: .audio, direction: .input),
+            NodePort(id: "out", label: "OUT", signalType: .audio, direction: .output)
+        ]
+    }
+}
+
+// MARK: - SpectralFeedbackNode + DSPNode
+
+extension SpectralFeedbackNode: GraphNodeDSPProvider, DSPNode {
+
+    var nodeId: UUID { id }
+
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double
+    ) {
+        guard let inBuf = inputs.first else {
+            for i in 0..<frameCount {
+                output.left[i] = 0
+                output.right[i] = 0
+            }
+            return
+        }
+
+        guard frameCount <= mixedInput.count else {
+            for i in 0..<frameCount {
+                output.left[i] = inBuf.left[i]
+                output.right[i] = inBuf.right[i]
+            }
+            return
+        }
+
+        // P1.5 — snapshot user-facing params once before any DSP work.
+        // `fb` mirrors DelayLineNode's `min(feedback, LRConstants.feedbackCap)`
+        // defense-in-depth clamp (the 0...0.95 range above is the exposed
+        // control's range; this is the render-path safety net against an
+        // unclamped CV push, same class of bug as Fix 1/LadderFilterNode).
+        let fb = min(feedback, LRConstants.feedbackCap)
+        let mem = memoryCoeff
+        let sat = saturationAmount
+        let hops = min(max(delayHopCount, LRConstants.spectralFeedbackHopDelayRange.lowerBound),
+                        LRConstants.spectralFeedbackHopDelayRange.upperBound)
+        let delaySamples = hops * hopSize
+        let wp = writePos
+
+        // Close the loop: downmix to mono, read the pipeline's own past
+        // output from `delaySamples` ago, scale by feedback, sum with the
+        // fresh input. Per-sample equivalent of DelayLineNode's
+        // `input[i] + delayed*fb`, just with a whole SpectralPipeline
+        // standing between write and read instead of a single tap.
+        // NaN/Inf guard mirrors CombFilterNode's feedback-tap guard
+        // (~line 303 in FilterEffectNodes.swift) — this is the value that
+        // both drives the pipeline AND (after processing) re-enters
+        // `feedbackBuffer`, so a guard here protects the loop's state,
+        // not just one sample.
+        for i in 0..<frameCount {
+            let mono = (inBuf.left[i] + inBuf.right[i]) * 0.5
+            let readPos = (wp + i - delaySamples + maxDelayLength) % maxDelayLength
+            let delayed = feedbackBuffer[readPos]
+            let mixed = mono + delayed * fb
+            mixedInput[i] = mixed.isNaN || mixed.isInfinite ? 0 : mixed
+        }
+
+        mixedInput.withUnsafeBufferPointer { inPtr in
+            neutralProfile.withUnsafeBufferPointer { profPtr in
+                guard let inBase = inPtr.baseAddress, let profBase = profPtr.baseAddress else { return }
+                pipeline.process(
+                    input: inBase,
+                    frameCount: frameCount,
+                    output: output.left,
+                    semanticProfile: profBase,
+                    profileCount: profPtr.count,
+                    saturationAmount: sat,
+                    noiseAmount: 0,
+                    memoryCoefficient: mem,
+                    granularity: 0,
+                    freezeActive: false,
+                    freezeBlend: 0
+                )
+            }
+        }
+
+        // Write this block's (guarded) output back into the delay buffer —
+        // the state that closes the loop for a future block — and
+        // duplicate mono → stereo, mirroring SpectralChainNode.
+        for i in 0..<frameCount {
+            let sample = output.left[i]
+            let safe = sample.isNaN || sample.isInfinite ? 0 : sample
+            output.left[i] = safe
+            output.right[i] = safe
+            feedbackBuffer[(wp + i) % maxDelayLength] = safe
+        }
+        writePos = (wp + frameCount) % maxDelayLength
+    }
+
+    func reset() {
+        for i in 0..<feedbackBuffer.count { feedbackBuffer[i] = 0 }
+        writePos = 0
+        pipeline.reset()
     }
 }

@@ -169,7 +169,8 @@ enum TrigType: String, Codable, CaseIterable {
 // MARK: - Performance Step (Parameter Lock)
 
 /// One step in the grid. Holds a trig type, optional probability gate,
-/// and up to 13 lockable parameters applied when the step is active.
+/// legacy lockable parameters, and a generic lock table keyed by
+/// ExposedControl.id so any manually-exposed parameter can be p-locked.
 ///
 /// Backward compatibility: decodes the legacy `dspOnly: Bool` field
 /// (mapping `true` -> `.lock`) so old `performance_state.json` files
@@ -180,7 +181,7 @@ struct PerformanceStep: Equatable {
     var trigType: TrigType
     var probability: Float?       // 0..1; nil = always fire (100%)
 
-    // -- Inference locks --
+    // -- Legacy locks (kept for compatibility) --
     var cfg: Float?               // locked guidance scale (γ)
     var feedback: Float?          // locked feedback amount
     var promptPhase: Int?         // 1, 2, or 3
@@ -204,6 +205,9 @@ struct PerformanceStep: Equatable {
     /// Negative = early (push), positive = late (drag).
     var microtiming: Double = 0.0
 
+    /// Generic per-control locks keyed by ExposedControl.id (Wave C C2).
+    var genericLocks: [UUID: Float]
+
     init(
         trigType: TrigType = .note,
         probability: Float? = nil,
@@ -220,7 +224,8 @@ struct PerformanceStep: Equatable {
         delayMix: Float? = nil,
         bitCrushDepth: Float? = nil,
         drumVoice: DrumVoice? = nil,
-        microtiming: Double = 0.0
+        microtiming: Double = 0.0,
+        genericLocks: [UUID: Float] = [:]
     ) {
         self.trigType = trigType
         self.probability = probability
@@ -238,6 +243,7 @@ struct PerformanceStep: Equatable {
         self.bitCrushDepth = bitCrushDepth
         self.drumVoice = drumVoice
         self.microtiming = microtiming
+        self.genericLocks = genericLocks
     }
 
     /// Backward-compat computed getter (used by engine for .lock trig behavior).
@@ -249,6 +255,7 @@ struct PerformanceStep: Equatable {
         || warmth != nil || filterCutoff != nil || filterResonance != nil
         || excitationMode != nil || delayMix != nil || bitCrushDepth != nil
         || drumVoice != nil || trigType == .lock
+        || !genericLocks.isEmpty
     }
 
     /// Number of non-nil parameter locks (for compact UI display).
@@ -258,7 +265,7 @@ struct PerformanceStep: Equatable {
             texture, chaos, warmth, filterCutoff, filterResonance,
             excitationMode, delayMix, bitCrushDepth, drumVoice
         ]
-        return optionals.compactMap({ $0 }).count
+        return optionals.compactMap({ $0 }).count + genericLocks.count
     }
 }
 
@@ -273,6 +280,7 @@ extension PerformanceStep: Codable {
         case excitationMode, delayMix, bitCrushDepth
         case drumVoice
         case microtiming
+        case genericLocks
         // Legacy key read during decode only
         case dspOnly
     }
@@ -304,6 +312,7 @@ extension PerformanceStep: Codable {
         bitCrushDepth    = try c.decodeIfPresent(Float.self,  forKey: .bitCrushDepth)
         drumVoice        = try c.decodeIfPresent(DrumVoice.self, forKey: .drumVoice)
         microtiming      = try c.decodeIfPresent(Double.self, forKey: .microtiming) ?? 0.0
+        genericLocks     = try c.decodeIfPresent([UUID: Float].self, forKey: .genericLocks) ?? [:]
     }
 
     func encode(to encoder: Encoder) throws {
@@ -326,6 +335,9 @@ extension PerformanceStep: Codable {
         try c.encodeIfPresent(drumVoice,      forKey: .drumVoice)
         if microtiming != 0.0 {
             try c.encode(microtiming, forKey: .microtiming)
+        }
+        if !genericLocks.isEmpty {
+            try c.encode(genericLocks, forKey: .genericLocks)
         }
         // NOTE: dspOnly is NOT encoded -- trigType replaces it
     }

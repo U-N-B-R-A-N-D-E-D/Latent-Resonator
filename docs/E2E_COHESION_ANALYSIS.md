@@ -1,4 +1,7 @@
 # E2E Cohesion Analysis: Graph-First Migration
+
+> **Superseded.** Written during the abandoned `AudioGraphMapper` / WKWebView migration. Many "CRITICAL" items (AudioGraphMapper dormant, SpectralChainNode stub, multi-lane) are obsolete or resolved under pull-render + native canvas. **Source of truth:** `LatentResonator/LatentResonator/Graph/` (start at `NodeGraph.swift`). See also `.cursor/skills/latent-resonator-architecture/SKILL.md` and `.cursor/skills/v2-node-graph/SKILL.md`.
+
 **Date**: 2026-04-03  
 **Review Type**: End-to-End Software ↔ Documentation ↔ Research Alignment  
 **Status**: 🟡 CRITICAL DISCREPANCIES FOUND

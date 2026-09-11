@@ -17,10 +17,18 @@ import QuartzCore
 final class ControlGraphEvaluator {
     
     // MARK: - State
-    
+
     private var lastEvaluationTime: TimeInterval = 0
     private let evaluationInterval: TimeInterval = 1.0 / 60.0  // 60Hz
-    
+
+    /// Last `clock_in` value seen for each `MarkovSequencerNode` — used for
+    /// rising-edge clock detection. Pre-allocated on the main thread; no
+    /// audio-thread access.
+    private var lastMarkovClock: [UUID: Float] = [:]
+
+    /// Last trigger values seen for each `GestureRecorderNode` gate input.
+    private var lastGestureTrigger: [UUID: [String: Float]] = [:]
+
     // MARK: - Timer Management
     
     private var evaluationTimer: Timer?
@@ -71,45 +79,83 @@ final class ControlGraphEvaluator {
     
     // MARK: - Evaluation
     
-    /// Evaluate all control nodes in the graph and return their output values.
+    /// Evaluate all control/analysis nodes in the graph and return their
+    /// output values. Also routes text signals (`prompt_out` → `prompt_in`)
+    /// into the target `ACEStepInferenceNode` on the main thread.
+    ///
     /// Returns a map: nodeId → portId → Float value
     ///
     /// Thread safety: Must be called on main thread (accesses NodeGraph @Published properties).
     func evaluate(graph: NodeGraph, at time: TimeInterval) -> [UUID: [String: Float]] {
         let dt = time - lastEvaluationTime
         lastEvaluationTime = time
-        
-        // 1. Filter to control nodes only
+
+        // 1. Filter to control + analysis nodes. Analysis nodes (e.g.
+        // SpectralAnalyzerNode) expose control-rate outputs that must be
+        // topologically sorted alongside other control nodes.
         let controlNodes = graph.nodes.values.filter { node in
-            node.category == .control
+            node.category == .control || node.category == .analysis
         }
-        
+
         // 2. Topologically sort control nodes (evaluate dependencies first)
         let sortedNodeIds = topologicalSort(controlNodes: controlNodes, graph: graph)
-        
+
         // 3. Evaluate each control node and collect outputs
         var outputs: [UUID: [String: Float]] = [:]
-        
+
         for nodeId in sortedNodeIds {
             guard let node = graph.nodes[nodeId] else { continue }
-            
+
             // Evaluate node's control outputs
             // Different node types have different evaluation logic
             if let agitationNode = node as? AgitationNode {
                 let value = agitationNode.evaluate(at: time, dt: dt)
                 outputs[nodeId] = ["out": value]
-                
+
             } else if let peakNode = node as? PeakNode {
                 let value = peakNode.evaluate(at: time, dt: dt)
                 outputs[nodeId] = ["out": value]
-                
+
             } else if let manualNode = node as? ManualControlNode {
                 let value = manualNode.evaluate(at: time, dt: dt)
                 outputs[nodeId] = ["out": value]
+
+            } else if let metaNode = node as? MetaParameterNode {
+                let value = metaNode.evaluate(dt: dt)
+                outputs[nodeId] = ["out": value]
+
+            } else if let markovNode = node as? MarkovSequencerNode {
+                evaluateMarkov(markovNode, at: time, outputs: outputs, graph: graph)
+                outputs[nodeId] = [
+                    "value_out": markovNode.evaluateControl(portId: "value_out", at: time),
+                    "gate_out": markovNode.evaluateControl(portId: "gate_out", at: time),
+                    "prompt_out": 0.0
+                ]
+
+            } else if let gestureNode = node as? GestureRecorderNode {
+                evaluateGesture(gestureNode, outputs: outputs, graph: graph, at: time)
+                outputs[nodeId] = [
+                    "x_out": gestureNode.evaluateControl(portId: "x_out", at: time),
+                    "y_out": gestureNode.evaluateControl(portId: "y_out", at: time),
+                    "pressure_out": gestureNode.evaluateControl(portId: "pressure_out", at: time),
+                    "gate_out": gestureNode.evaluateControl(portId: "gate_out", at: time)
+                ]
+
+            } else if let analyzerNode = node as? SpectralAnalyzerNode {
+                outputs[nodeId] = [
+                    "centroid": analyzerNode.evaluateControl(portId: "centroid", at: time),
+                    "flatness": analyzerNode.evaluateControl(portId: "flatness", at: time),
+                    "flux": analyzerNode.evaluateControl(portId: "flux", at: time)
+                ]
             }
         }
-        
-        // 4. Add MacroNode CV outputs (telemetry from audio analysis)
+
+        // 4. Route text signals: prompt_out / text_out → prompt_in on
+        // ACEStepInferenceNode. Kept on the main/evaluator thread — never the
+        // audio thread.
+        routeTextSignals(graph: graph)
+
+        // 5. Add MacroNode CV outputs (telemetry from audio analysis)
         // MacroNodes expose spectral analysis and level as CV for cross-modulation
         // v2.0: Telemetry is now sourced from analysis nodes in the internal graph
         for node in graph.nodes.values {
@@ -127,8 +173,107 @@ final class ControlGraphEvaluator {
                 ]
             }
         }
-        
+
         return outputs
+    }
+
+    // MARK: - Per-Node Control Evaluation
+
+    /// Rising-edge clock evaluation for `MarkovSequencerNode`.
+    /// Reads `clock_in`, `reset_in`, and `temp_cv` from `outputs`/`graph` and
+    /// drives the node's state machine on the main thread.
+    private func evaluateMarkov(
+        _ markov: MarkovSequencerNode,
+        at time: TimeInterval,
+        outputs: [UUID: [String: Float]],
+        graph: NodeGraph
+    ) {
+        let nodeId = markov.id
+        let clockValue = valueForInput(into: nodeId, portId: "clock_in", outputs: outputs, graph: graph)
+        let lastClock = lastMarkovClock[nodeId] ?? 0.0
+
+        if clockValue > 0.5 && lastClock <= 0.5 {
+            let tempCV = valueForInput(into: nodeId, portId: "temp_cv", outputs: outputs, graph: graph)
+            markov.onClockTrigger(currentTime: time, tempCV: max(tempCV, 0.0))
+        }
+
+        let resetValue = valueForInput(into: nodeId, portId: "reset_in", outputs: outputs, graph: graph)
+        if resetValue > 0.5 {
+            markov.onResetTrigger()
+        }
+
+        lastMarkovClock[nodeId] = clockValue
+    }
+
+    /// Rising-edge trigger evaluation for `GestureRecorderNode`.
+    /// Maps `record_trig`, `play_trig`, and `stop_trig` to the node's
+    /// transport methods and captures the current input point while recording
+    /// at the 60 Hz control rate.
+    private func evaluateGesture(
+        _ gesture: GestureRecorderNode,
+        outputs: [UUID: [String: Float]],
+        graph: NodeGraph,
+        at time: TimeInterval
+    ) {
+        let nodeId = gesture.id
+        var last = lastGestureTrigger[nodeId] ?? [:]
+
+        for portId in ["record_trig", "play_trig", "stop_trig"] {
+            let value = valueForInput(into: nodeId, portId: portId, outputs: outputs, graph: graph)
+            let lastValue = last[portId] ?? 0.0
+            if value > 0.5 && lastValue <= 0.5 {
+                gesture.onGate(portId: portId, trigger: true)
+            }
+            last[portId] = value
+        }
+
+        lastGestureTrigger[nodeId] = last
+
+        // Capture the current gesture point at control rate while recording.
+        if gesture.state == .recording {
+            gesture.capturePoint(at: time)
+        }
+    }
+
+    /// Read the current value of a control/gate/trigger input port, if any.
+    /// Returns `0.0` when the port is unconnected or the source has no output.
+    private func valueForInput(
+        into nodeId: UUID,
+        portId: String,
+        outputs: [UUID: [String: Float]],
+        graph: NodeGraph
+    ) -> Float {
+        guard let edge = graph.edge(into: nodeId, portId: portId),
+              edge.signalType == .control || edge.signalType == .gate || edge.signalType == .trigger else {
+            return 0.0
+        }
+        return outputs[edge.sourceNodeId]?[edge.sourcePortId] ?? 0.0
+    }
+
+    // MARK: - Text Signal Routing
+
+    /// Route `prompt_out` / `text_out` control edges into `prompt_in` inputs on
+    /// `ACEStepInferenceNode`. Runs on the evaluator thread, never the audio thread.
+    private func routeTextSignals(graph: NodeGraph) {
+        for edge in graph.edges.values where edge.targetPortId == "prompt_in" {
+            guard let target = graph.nodes[edge.targetNodeId] as? ACEStepInferenceNode else { continue }
+            guard let source = graph.nodes[edge.sourceNodeId] else { continue }
+
+            let text: String? = {
+                if let markov = source as? MarkovSequencerNode {
+                    return markov.evaluateText(portId: edge.sourcePortId)
+                } else if let bank = source as? PromptBankNode {
+                    return bank.evaluateText(portId: edge.sourcePortId)
+                } else if let engine = source as? PromptEngineNode {
+                    return engine.evaluateText()
+                }
+                return nil
+            }()
+
+            if let text = text, !text.isEmpty {
+                target.prompt = text
+            }
+        }
     }
     
     // MARK: - Topological Sort
@@ -206,25 +351,33 @@ final class ControlGraphEvaluator {
         // For each control edge, apply the source node's output to the target parameter
         for edge in graph.edges.values {
             guard edge.signalType == .control else { continue }
-            
-            // Get source node's output value
+
             guard let sourceOutputs = outputs[edge.sourceNodeId],
                   let sourceValue = sourceOutputs[edge.sourcePortId] else {
                 continue
             }
-            
-            // Get target parameter key from port ID (strip _cv suffix if present)
+
             let paramKey = edge.targetPortId.replacingOccurrences(of: "_cv", with: "")
-            
-            // Apply modulation additively to existing parameter value via NodeGraph
-            // This ensures parameter change notifications are emitted and RT snapshot will pick up new value
-            if let currentValue = graph.getParameter(nodeId: edge.targetNodeId, key: paramKey) {
-                let modulatedValue = currentValue + sourceValue
-                graph.setParameter(nodeId: edge.targetNodeId, key: paramKey, value: modulatedValue)
-            } else {
-                // Parameter doesn't exist yet, set directly
-                graph.setParameter(nodeId: edge.targetNodeId, key: paramKey, value: sourceValue)
+            let baseKey = "cvBase_\(paramKey)"
+
+            if graph.getParameterValue(nodeId: edge.targetNodeId, key: baseKey) == nil {
+                let current = graph.getParameter(nodeId: edge.targetNodeId, key: paramKey) ?? 0
+                graph.setParameter(nodeId: edge.targetNodeId, key: baseKey, value: current)
             }
+
+            let base = graph.getParameter(nodeId: edge.targetNodeId, key: baseKey)
+                ?? graph.getParameter(nodeId: edge.targetNodeId, key: paramKey)
+                ?? 0
+            
+            let depth: Float
+            if paramKey == "frequency" {
+                depth = LRConstants.controlFrequencyCVDepth
+            } else {
+                depth = LRConstants.controlCVDepth
+            }
+            
+            let modulated = base + sourceValue * depth
+            graph.setParameter(nodeId: edge.targetNodeId, key: paramKey, value: modulated)
         }
     }
 }

@@ -108,6 +108,17 @@ final class LadderFilterNode: BaseGraphNode {
             let t3 = v3 + s3
             s3 = t3 + v3
 
+            // P0 fix (Round 2 audit, James) — LadderFilterNode was the only
+            // feedback-loop filter in this file without a NaN/Inf guard.
+            // Mirrors CombFilterNode's feedback-tap guard (~line 303): if
+            // the cascade ever overflows (e.g. a transient before
+            // `safeResonance` above catches an unclamped res_cv spike), it
+            // self-heals on the next sample instead of latching NaN into
+            // `ladderStageL`/`ladderStageR` forever.
+            if !s0.isFinite || !s1.isFinite || !s2.isFinite || !s3.isFinite {
+                s0 = 0; s1 = 0; s2 = 0; s3 = 0
+            }
+
             switch mode {
             case .lowpass:
                 data[i] = t3
@@ -134,13 +145,19 @@ extension LadderFilterNode: GraphNodeDSPProvider, DSPNode {
         inputs: UnsafeBufferPointer<AudioBuffer>,
         output: AudioBuffer,
         frameCount: Int,
-        sampleRate: Double,
-        controls: [String: Float]
+        sampleRate: Double
     ) {
+        // P1.5 — snapshot user-facing params before the smoothing lines,
+        // which would otherwise re-read the COW `parameters` dict on the
+        // audio thread mid-block.
+        let cut = cutoff
+        let res = resonance
+        let m = mode
+
         // 1-pole parameter smoothing (slide~ equivalent)
         let alpha: Float = 0.05
-        smoothedCutoff += alpha * (cutoff - smoothedCutoff)
-        smoothedResonance += alpha * (resonance - smoothedResonance)
+        smoothedCutoff += alpha * (cut - smoothedCutoff)
+        smoothedResonance += alpha * (res - smoothedResonance)
 
         // No input → emit silence. (Would happen if the user disconnects
         // the input cable; we don't want to filter the previous buffer
@@ -169,8 +186,15 @@ extension LadderFilterNode: GraphNodeDSPProvider, DSPNode {
         let sr = Float(sampleRate)
         let g = tanf(.pi * min(smoothedCutoff, sr * 0.49) / sr)
         let gComp = g / (1.0 + g)
-        let k = 4.0 * smoothedResonance
-        let m = mode
+
+        // P0 fix (Round 2 audit, James) — ControlGraphEvaluator.applyModulation
+        // writes `base + sourceValue * depth` straight into node.parameters
+        // with no clamp (NodeGraph.setParameter). The 0...0.95 range only
+        // constrains the knob itself; an LFO patched into res_cv can push
+        // `resonance` past 1.0 without the dial ever showing it. Clamp here
+        // so k can't cross the self-oscillation boundary into runaway growth.
+        let safeResonance = min(smoothedResonance, LRConstants.filterResonanceRange.upperBound)
+        let k = 4.0 * safeResonance
 
         processChannel(
             output.left,
@@ -319,8 +343,7 @@ extension CombFilterNode: GraphNodeDSPProvider, DSPNode {
         inputs: UnsafeBufferPointer<AudioBuffer>,
         output: AudioBuffer,
         frameCount: Int,
-        sampleRate: Double,
-        controls: [String: Float]
+        sampleRate: Double
     ) {
         guard let inBuf = inputs.first else {
             for i in 0..<frameCount {
@@ -476,8 +499,7 @@ extension TunableResonatorNode: GraphNodeDSPProvider, DSPNode {
         inputs: UnsafeBufferPointer<AudioBuffer>,
         output: AudioBuffer,
         frameCount: Int,
-        sampleRate: Double,
-        controls: [String: Float]
+        sampleRate: Double
     ) {
         guard let inBuf = inputs.first else {
             for i in 0..<frameCount {
@@ -507,7 +529,7 @@ extension TunableResonatorNode: GraphNodeDSPProvider, DSPNode {
             return
         }
 
-        let fb = min(decay, 0.99)
+        let fb = min(decay, LRConstants.feedbackCap)
         let wet = wetDryMix
         let dry = 1.0 - wet
 
@@ -586,8 +608,7 @@ extension BitCrusherNode: GraphNodeDSPProvider, DSPNode {
         inputs: UnsafeBufferPointer<AudioBuffer>,
         output: AudioBuffer,
         frameCount: Int,
-        sampleRate: Double,
-        controls: [String: Float]
+        sampleRate: Double
     ) {
         guard let inBuf = inputs.first else {
             for i in 0..<frameCount {
@@ -708,8 +729,7 @@ extension WaveshaperNode: GraphNodeDSPProvider, DSPNode {
         inputs: UnsafeBufferPointer<AudioBuffer>,
         output: AudioBuffer,
         frameCount: Int,
-        sampleRate: Double,
-        controls: [String: Float]
+        sampleRate: Double
     ) {
         guard let inBuf = inputs.first else {
             for i in 0..<frameCount {
@@ -866,8 +886,7 @@ extension DelayLineNode: GraphNodeDSPProvider, DSPNode {
         inputs: UnsafeBufferPointer<AudioBuffer>,
         output: AudioBuffer,
         frameCount: Int,
-        sampleRate: Double,
-        controls: [String: Float]
+        sampleRate: Double
     ) {
         guard let inBuf = inputs.first else {
             // No input — emit silence (and stop chasing the tail of an
@@ -889,7 +908,7 @@ extension DelayLineNode: GraphNodeDSPProvider, DSPNode {
             return
         }
 
-        let fb = min(feedback, 0.99)
+        let fb = min(feedback, LRConstants.feedbackCap)
         let wet = wetDryMix
         let dry = 1.0 - wet
 

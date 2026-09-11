@@ -5,6 +5,8 @@
 **Plan Reference**: `/mnt/RLTNAS/docs/plans/latent_resonator_v2.0_integration_EXPANDED.md` (5042 lines)
 **Repo State**: `/mnt/RLTNAS/LatentResonator/` as of 2026-04-03
 
+> **2026-07 honesty note:** `docs/E2E_COHESION_ANALYSIS.md`, `docs/ARCHITECTURE_v2_NODAL.md`, and `docs/IMPLEMENTATION_VERIFICATION.md` are **superseded** (WKWebView/AudioGraphMapper era). Citations below are contemporaneous audit inputs only. **Source of truth:** `LatentResonator/LatentResonator/Graph/` (start at `NodeGraph.swift`).
+
 ---
 
 ## A. Plan Structure & Coverage

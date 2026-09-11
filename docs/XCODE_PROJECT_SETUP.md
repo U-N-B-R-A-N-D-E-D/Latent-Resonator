@@ -1,5 +1,7 @@
 # Xcode Project Setup — v2.0 Migration
 
+> **Superseded.** Documents `.pbxproj` fixups for the abandoned `AudioGraphMapper`/WKWebView migration and links to `docs/MIGRATION_V3_NODAL.md` / `docs/LATENT_RESONATOR_WHITEPAPER.md`, neither of which exists. Shipped architecture: pull-render + native canvas (`GraphAudioEngine` → `ExecutionPlan` → `DSPNode`, `PatchCanvasView`). See `README.md`, `docs/whitepaper.md`, and `.cursor/skills/v2-node-graph/SKILL.md`; code is truth.
+
 ## Critical: Missing Files in Xcode Project
 
 Después de la migración a v2.0, algunos archivos Swift existen en el disco pero **NO están incluidos en el proyecto Xcode** (`.pbxproj`), lo que causa errores de compilación tipo `Cannot find type 'SequencerNode'`.
@@ -149,9 +151,9 @@ rm -rf ~/Library/Developer/Xcode/DerivedData/LatentResonator-*
 
 ## Referencias
 
-- **Migración completa:** `docs/MIGRATION_V3_NODAL.md`
-- **Arquitectura v2.0:** `docs/ARCHITECTURE_v2_NODAL.md`
-- **Whitepaper:** `docs/LATENT_RESONATOR_WHITEPAPER.md`
+- **Migración completa:** `docs/MIGRATION_V3_NODAL.md` *(no existe en el repo; histórico)*
+- **Arquitectura v2.0 (RFC superseded):** `docs/ARCHITECTURE_v2_NODAL.md` — no usar como verdad; ver `LatentResonator/LatentResonator/Graph/NodeGraph.swift` y `.cursor/skills/v2-node-graph/SKILL.md`
+- **Whitepaper:** `docs/whitepaper.md` *(no `docs/LATENT_RESONATOR_WHITEPAPER.md`)*
 
 ---
 

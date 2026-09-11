@@ -67,7 +67,7 @@ struct MacroBindingsPanel: View {
                 .font(DS.font(DS.fontBody, weight: .bold))
                 .foregroundColor(DS.textSecondary)
 
-            Text("Exposed controls appear here when you mark parameters in PATCH mode. Right-click a node and select 'Expose Parameter'.")
+            Text("Exposed controls appear here when you mark parameters in STAGES. Right-click a parameter on a canvas card and select 'Expose to Perform'.")
                 .font(DS.font(DS.fontCaption))
                 .foregroundColor(DS.textTertiary)
                 .multilineTextAlignment(.center)

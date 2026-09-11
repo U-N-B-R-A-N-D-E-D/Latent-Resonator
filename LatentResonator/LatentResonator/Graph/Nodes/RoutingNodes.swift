@@ -97,9 +97,19 @@ extension MixerNode: GraphNodeDSPProvider, DSPNode {
         inputs: UnsafeBufferPointer<AudioBuffer>,
         output: AudioBuffer,
         frameCount: Int,
-        sampleRate: Double,
-        controls: [String: Float]
+        sampleRate: Double
     ) {
+        // P1.5 — snapshot every per-input gain + master into locals before
+        // the sum loop. `inputGain(k)` calls `getParam` (COW dict read); a
+        // knob drag mid-block would otherwise force a heap alloc per
+        // iteration on the audio thread. Fixed-size locals — no array
+        // allocation, maxInputs is a compile-time 4.
+        let g1 = inputGain(1)
+        let g2 = inputGain(2)
+        let g3 = inputGain(3)
+        let g4 = inputGain(4)
+        let master = masterGain
+
         // Zero the output before accumulating
         let bytes = frameCount * MemoryLayout<Float>.stride
         memset(output.left, 0, bytes)
@@ -109,7 +119,14 @@ extension MixerNode: GraphNodeDSPProvider, DSPNode {
         for k in 0..<count {
             // Plan builder sorts inputs by target port id ("in1" < "in2" < …),
             // so input index k maps to gain index k+1 (gain1, gain2, …).
-            let g = inputGain(k + 1)
+            let g: Float
+            switch k {
+            case 0: g = g1
+            case 1: g = g2
+            case 2: g = g3
+            case 3: g = g4
+            default: g = 0
+            }
             let inBuf = inputs[k]
             for i in 0..<frameCount {
                 output.left[i]  += inBuf.left[i]  * g
@@ -117,11 +134,10 @@ extension MixerNode: GraphNodeDSPProvider, DSPNode {
             }
         }
 
-        let m = masterGain
-        if m != 1.0 {
+        if master != 1.0 {
             for i in 0..<frameCount {
-                output.left[i] *= m
-                output.right[i] *= m
+                output.left[i] *= master
+                output.right[i] *= master
             }
         }
     }
@@ -194,8 +210,7 @@ extension MasterOutputNode: GraphNodeDSPProvider, DSPNode {
         inputs: UnsafeBufferPointer<AudioBuffer>,
         output: AudioBuffer,
         frameCount: Int,
-        sampleRate: Double,
-        controls: [String: Float]
+        sampleRate: Double
     ) {
         let v = volume
 

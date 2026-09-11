@@ -68,7 +68,11 @@ ACE-Step/
 .Trashes
 
 # IDE
-.cursor/
+# .cursor/ is ignored except .cursor/skills/** (agent skills are tracked).
+# NOTE: git can't re-include files under an ignored directory, so this must
+# stay as ".cursor/*" (one level) + a negation, not ".cursor/" (whole tree).
+.cursor/*
+!.cursor/skills
 .idea/
 .vscode/
 *.swp
@@ -110,4 +114,5 @@ node_modules/
 # Editor / hand-rolled file backups
 *.backup_*
 *.backup
+*.bak.*
 
