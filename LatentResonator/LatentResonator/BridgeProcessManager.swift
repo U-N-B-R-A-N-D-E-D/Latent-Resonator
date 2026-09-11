@@ -100,6 +100,34 @@ final class BridgeProcessManager: ObservableObject {
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
 
+    /// Set by NeuralEngine at init. Lets terminateServer() check for an
+    /// in-flight /infer request before killing the process -- see
+    /// waitForInFlightInferenceToClear().
+    weak var aceBridge: ACEStepBridge?
+
+    // MARK: - MPS Crash Latch
+    //
+    // Runtime backstop for LRConstants.ACEBridge.forceCPU. If a bridge we
+    // launched on mps/auto ever dies unexpectedly (Metal validation abort in
+    // `rsub`, see Constants.swift comment), we latch this true so every
+    // subsequent launch -- regardless of forceCPU -- forces --device cpu.
+    // Cleared only by a fresh app launch (intentionally not auto-cleared:
+    // once we've seen this torch/Metal build abort on GPU, don't trust it
+    // again for the rest of the session).
+    @Published private(set) var mpsCrashLatched: Bool = false
+
+    /// Device string ("cpu" / "auto") actually passed to the most recently
+    /// launched bridge process. Set in `startServerProcess()`, read from the
+    /// termination handler to decide whether a crash was GPU-related.
+    private var lastLaunchedDevice: String = "cpu"
+
+    /// Guards the one automatic CPU-fallback relaunch after an MPS crash so
+    /// a bridge that keeps dying for an unrelated reason can't loop forever
+    /// relaunching itself. One retry, then it's a normal `.error` state
+    /// requiring the user to intervene (matches the existing behavior for
+    /// every other launch failure).
+    private var autoRecoveryAttempted = false
+
     // MARK: - Path Discovery (Compile-Time + Bundle Fallback)
     //
     // Primary: #filePath resolves to this source file at compile time.
@@ -406,23 +434,20 @@ final class BridgeProcessManager: ObservableObject {
         let healthURL = LRConstants.ACEBridge.baseURLAsURL
             .appendingPathComponent(LRConstants.ACEBridge.healthEndpoint)
 
-        // When forceCPU is true, never reuse — an existing bridge may be MPS and will crash.
-        // Kill any process on the port so we launch fresh with --device cpu.
-        if LRConstants.ACEBridge.forceCPU {
-            if checkHealthSync(url: healthURL, timeout: 2.0) {
-                log("forceCPU: terminating existing bridge to launch with --device cpu")
-                requestShutdownViaHTTPSync()
-                killProcessOnPortSync(port: LRConstants.ACEBridge.defaultPort)
-                Thread.sleep(forTimeInterval: 1.0)  // allow port to be released
-            }
-        } else if checkHealthSync(url: healthURL, timeout: 2.0) {
+        // Reuse any already-running, healthy bridge -- regardless of forceCPU.
+        // By the time a bridge answers /health it has already survived model
+        // load (and, if running on MPS, the risky first-op window forceCPU
+        // exists to avoid). Killing a proven-good bridge just to relaunch it
+        // on CPU throws away the only session known to work and forces a slow
+        // cold CPU boot for no safety benefit. forceCPU below only governs the
+        // --device flag for a bridge we are about to launch fresh.
+        if checkHealthSync(url: healthURL, timeout: 2.0) {
             updateState(.running)
-            log("[ok] Bridge already running on port \(LRConstants.ACEBridge.defaultPort) (reusing)")
+            log("[Bridge:boot] ✓ Bridge already running on port \(LRConstants.ACEBridge.defaultPort) (reusing, device unchanged)")
             return
         }
 
         updateState(.launching)
-        log("Starting bridge server on port \(LRConstants.ACEBridge.defaultPort)...")
 
         do {
             try startServerProcess()
@@ -431,27 +456,30 @@ final class BridgeProcessManager: ObservableObject {
             let healthURL = LRConstants.ACEBridge.baseURLAsURL
                 .appendingPathComponent(LRConstants.ACEBridge.healthEndpoint)
             let maxWait: TimeInterval = 120
-            let pollInterval = LRConstants.ACEBridge.bridgeStartupPollInterval
-            let initialDelay = LRConstants.ACEBridge.bridgeStartupInitialDelay
+            var pollInterval = LRConstants.ACEBridge.healthPollBootIntervalInitial
             var waited: TimeInterval = 0
             var up = false
-            Thread.sleep(forTimeInterval: initialDelay)
-            waited = initialDelay
+            var attempt = 0
+
             while waited < maxWait {
                 if serverProcess?.isRunning != true {
                     break
                 }
+                // Back off before each attempt: 1s, 2s, 4s, 8s, 16s cap.
+                Thread.sleep(forTimeInterval: pollInterval)
+                waited += pollInterval
+                attempt += 1
+                log("[Bridge:boot] Waiting for Python server... (attempt \(attempt), backoff \(String(format: "%.1f", pollInterval))s)")
                 if checkHealthSync(url: healthURL, timeout: 2.0) {
                     up = true
                     break
                 }
-                Thread.sleep(forTimeInterval: pollInterval)
-                waited += pollInterval
+                pollInterval = min(pollInterval * 2, LRConstants.ACEBridge.healthPollBootIntervalCap)
             }
 
             if let process = serverProcess, process.isRunning, up {
                 updateState(.running)
-                log("[ok] Bridge server running (PID: \(process.processIdentifier))")
+                log("[Bridge:boot] ✓ Bridge server running (PID: \(process.processIdentifier))")
             } else if serverProcess?.isRunning != true {
                 updateState(.error)
                 setError("Server process exited before ready")
@@ -522,16 +550,29 @@ final class BridgeProcessManager: ObservableObject {
             log("No model weights found -- passthrough mode")
         }
 
-        // Device: use CPU when MPS crashes (Metal validation in rsub). Otherwise auto (MPS on Apple Silicon).
-        let device = LRConstants.ACEBridge.forceCPU ? "cpu" : "auto"
+        // Device: CPU when forceCPU is set OR a previous bridge this session
+        // already crashed on mps/auto (mpsCrashLatched -- see the MPS Crash
+        // Latch section above and the Constants.swift comment on forceCPU).
+        // Otherwise auto (MPS on Apple Silicon).
+        let forceCPUEffective = LRConstants.ACEBridge.forceCPU || mpsCrashLatched
+        let device = forceCPUEffective ? "cpu" : "auto"
         args += ["--device", device]
-        if LRConstants.ACEBridge.forceCPU {
-            log("Using CPU device (MPS disabled due to rsub crash)")
+        lastLaunchedDevice = device
+        if mpsCrashLatched {
+            log("Using CPU device (MPS crash latch engaged earlier this session)")
+        } else if LRConstants.ACEBridge.forceCPU {
+            log("Using CPU device (forceCPU default -- MPS disabled due to rsub crash risk)")
         }
 
         // Performance profile: apply profile-specific CLI flags
         args += effectiveProfile.cliFlags
         log("Performance profile: \(effectiveProfile.rawValue) - \(effectiveProfile.description)")
+
+        // Structured boot lifecycle log: one line, all salient facts.
+        log("[Bridge:boot] Starting ACE-Step bridge on 127.0.0.1:\(LRConstants.ACEBridge.defaultPort) (profile=\(effectiveProfile.rawValue), device=\(device))")
+
+        // Mark the boot start time so the async health client can report model-ready latency.
+        aceBridge?.bridgeStartTime = Date()
 
         process.arguments = args
         process.currentDirectoryURL = Self.scriptsDir
@@ -539,7 +580,7 @@ final class BridgeProcessManager: ObservableObject {
         // Inherit PATH but activate venv
         var env = ProcessInfo.processInfo.environment
         env["VIRTUAL_ENV"] = venvDir.path
-        if LRConstants.ACEBridge.forceCPU {
+        if forceCPUEffective {
             env["LATENT_RESONATOR_FORCE_CPU"] = "1"
         }
         env["PATH"] = "\(venvDir.path)/bin:" + (env["PATH"] ?? "")
@@ -558,6 +599,7 @@ final class BridgeProcessManager: ObservableObject {
             let data = handle.availableData
             guard !data.isEmpty, let str = String(data: data, encoding: .utf8) else { return }
             for line in str.components(separatedBy: .newlines) where !line.isEmpty {
+                guard self?.isMacOSNetworkNoise(line) == false else { continue }
                 self?.log("[server] \(line)")
                 DispatchQueue.main.async {
                     self?.realtimeLog.append(line)
@@ -575,6 +617,7 @@ final class BridgeProcessManager: ObservableObject {
             let data = handle.availableData
             guard !data.isEmpty, let str = String(data: data, encoding: .utf8) else { return }
             for line in str.components(separatedBy: .newlines) where !line.isEmpty {
+                guard self?.isMacOSNetworkNoise(line) == false else { continue }
                 self?.log("[server] \(line)")
                 DispatchQueue.main.async {
                     self?.realtimeLog.append(line)
@@ -589,22 +632,49 @@ final class BridgeProcessManager: ObservableObject {
         process.terminationHandler = { [weak self] proc in
             guard let self = self else { return }
             let code = proc.terminationStatus
-            self.log("Server exited (code: \(code))")
+            self.log("[Bridge:dead] Bridge process exited (code=\(code)) — passthrough active, will retry on next inference")
 
             // Clean up pipe handlers
             stdout.fileHandleForReading.readabilityHandler = nil
             stderr.fileHandleForReading.readabilityHandler = nil
 
             DispatchQueue.main.async {
-                if self.state != .stopping {
-                    // Unexpected termination
-                    self.state = .error
-                    self.lastError = "Server exited unexpectedly (code \(code))"
-                } else {
+                self.serverProcess = nil
+
+                guard self.state != .stopping else {
                     // Expected shutdown
                     self.state = .idle
+                    return
                 }
-                self.serverProcess = nil
+
+                // Unexpected termination. A crash while running on mps/auto
+                // is exactly the failure mode LRConstants.ACEBridge.forceCPU
+                // exists to avoid (Metal validation abort inside `rsub` --
+                // see the Constants.swift comment). Latch CPU for every
+                // future launch this session, and self-heal once instead of
+                // leaving the instrument dead until the user restarts the
+                // app -- graceful degradation, per .cursor/AGENTS.md
+                // invariant #7 ("system must function in all modes").
+                self.state = .error
+                let crashedOnGPU = self.lastLaunchedDevice != "cpu"
+
+                if crashedOnGPU {
+                    self.mpsCrashLatched = true
+                    self.lastError = "MPS crashed (exit \(code)) -- falling back to CPU"
+                    self.log("[WARN] Bridge crashed on device '\(self.lastLaunchedDevice)' -- latching forceCPU for all future launches")
+
+                    if !self.autoRecoveryAttempted {
+                        self.autoRecoveryAttempted = true
+                        self.log("Attempting one automatic CPU-fallback relaunch...")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                            self?.launchServer()
+                        }
+                    } else {
+                        self.log("[WARN] Already attempted a CPU-fallback relaunch this session -- leaving bridge stopped")
+                    }
+                } else {
+                    self.lastError = "Server exited unexpectedly (code \(code))"
+                }
             }
         }
 
@@ -617,10 +687,37 @@ final class BridgeProcessManager: ObservableObject {
 
     // MARK: - Terminate Server
 
+    /// Bounded wait for any in-flight /infer request to finish before the bridge
+    /// process is torn down. Killing the server mid-request destroys real
+    /// inference output and surfaces as a -1005 "network connection lost" error
+    /// on the Swift side for no reason. Capped at
+    /// `LRConstants.ACEBridge.inFlightShutdownGrace` so callers -- including app
+    /// quit -- never hang indefinitely on a stuck request.
+    private func waitForInFlightInferenceToClear() {
+        guard let aceBridge = aceBridge, aceBridge.isInferInFlight else { return }
+        let grace = LRConstants.ACEBridge.inFlightShutdownGrace
+        log("[WARN] /infer in flight -- delaying bridge stop up to \(Int(grace))s so it can finish")
+        let deadline = Date().addingTimeInterval(grace)
+        while aceBridge.isInferInFlight && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        if aceBridge.isInferInFlight {
+            log("[WARN] /infer still in flight after grace period -- stopping bridge anyway")
+        } else {
+            log("[ok] In-flight /infer cleared -- proceeding with bridge stop")
+        }
+    }
+
     /// Terminate the bridge server so it never survives app quit.
     /// - If we started the process: HTTP /shutdown, SIGTERM, wait up to 3s, then SIGKILL (synchronous).
     /// - If we reused an existing server (no process handle): POST /shutdown so that server exits.
+    /// - First waits (bounded) for any in-flight /infer request to clear -- see
+    ///   waitForInFlightInferenceToClear(). Callers that restart the bridge
+    ///   (profile switch, PERFORM mode entry) effectively "queue" behind this wait
+    ///   instead of cutting off the one inference that was actually working.
     func terminateServer() {
+        waitForInFlightInferenceToClear()
+
         if let process = serverProcess, process.isRunning {
             // We own this process -- kill it synchronously so quit never leaves an orphan
             DispatchQueue.main.async { [weak self] in
@@ -784,6 +881,7 @@ final class BridgeProcessManager: ObservableObject {
 
     /// Append a log line (thread-safe, bounded).
     private func log(_ message: String) {
+        if isMacOSNetworkNoise(message) { return }
         print(">> Bridge: \(message)")
         DispatchQueue.main.async { [weak self] in
             self?.setupLog.append(message)
@@ -792,6 +890,26 @@ final class BridgeProcessManager: ObservableObject {
                 self?.setupLog.removeFirst(50)
             }
         }
+    }
+
+    /// Strips macOS URLSession/network-framework noise that is not a real Python
+    /// server log. These lines are emitted by the OS network stack on loopback
+    /// during connection refused / socket teardown and bury actual bridge status.
+    private func isMacOSNetworkNoise(_ line: String) -> Bool {
+        let lowercased = line.lowercased()
+        let noiseMarkers = [
+            "nw_socket_handle_socket_event",
+            "nw_protocol_socket_set_no_wake_from_sleep",
+            "nw_endpoint_flow_failed_with_error",
+            "nw_socket_connect",
+            "nw_connection_",
+            "nw_protocol_",
+            "nw_endpoint_",
+            "nw_path_",
+            "so_nowakefromsleep",
+            "setsockopt so_"
+        ]
+        return noiseMarkers.contains { lowercased.contains($0) }
     }
     
     // MARK: - ACE-Step Package Auto-Installation
@@ -827,18 +945,16 @@ final class BridgeProcessManager: ObservableObject {
         // If pipeline import fails but basic acestep exists, we may need to install missing deps
         if canImportBasic && !canImportPipeline {
             log("[WARN] acestep package exists but pipeline import fails - likely missing dependencies")
-            log("[INFO] Attempting to install inference dependencies...")
+            log("[INFO] Installing inference dependencies from requirements_bridge.txt...")
             updateState(.installing)
 
-            // Install inference dependencies including torchvision
-            log("Installing inference dependencies (torchvision fix)...")
+            // Single source of truth: requirements_bridge.txt (base + inference deps).
+            // No hardcoded package list here — keeps the venv spec in one place.
+            let reqs = Self.projectRoot.appendingPathComponent(
+                "LatentResonator/LatentResonator/Scripts/requirements_bridge.txt"
+            )
             let (depsOk, depsOut) = runSyncProcess(pipInVenv.path, [
-                "install", "torch", "torchaudio", "torchvision", "transformers==4.50.0",
-                "diffusers", "accelerate==1.6.0", "soundfile==0.13.1",
-                "numpy", "tqdm", "loguru", "spacy", "py3langid", "pypinyin",
-                "num2words", "hangul-romanize", "librosa", "matplotlib",
-                "pytorch_lightning", "peft", "cutlet", "fugashi[unidic-lite]",
-                "click", "--quiet"
+                "install", "-r", reqs.path, "--quiet"
             ])
             
             if depsOk {
@@ -892,15 +1008,13 @@ final class BridgeProcessManager: ObservableObject {
                 return
             }
             
-            // Install inference dependencies
-            log("Installing inference dependencies...")
+            // Install inference dependencies from requirements_bridge.txt (single source of truth).
+            log("Installing inference dependencies from requirements_bridge.txt...")
+            let reqs = Self.projectRoot.appendingPathComponent(
+                "LatentResonator/LatentResonator/Scripts/requirements_bridge.txt"
+            )
             let (depsOk, depsOut) = runSyncProcess(pipInVenv.path, [
-                "install", "torch", "torchaudio", "torchvision", "transformers==4.50.0",
-                "diffusers", "accelerate==1.6.0", "soundfile==0.13.1",
-                "numpy", "tqdm", "loguru", "spacy", "py3langid", "pypinyin",
-                "num2words", "hangul-romanize", "librosa", "matplotlib",
-                "pytorch_lightning", "peft", "cutlet", "fugashi[unidic-lite]",
-                "click", "--quiet"
+                "install", "-r", reqs.path, "--quiet"
             ])
             
             if depsOk {

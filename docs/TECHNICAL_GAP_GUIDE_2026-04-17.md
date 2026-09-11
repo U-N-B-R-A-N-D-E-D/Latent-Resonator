@@ -1,5 +1,7 @@
 # Latent Resonator — Guía Técnica para Cerrar Gaps
 
+> **Superseded (partial).** §0–§2 still useful for Envion alignment; tables referencing `AudioGraphMapper`, React PATCH editor, and 80-line `PerformanceMotherbaseView` are stale (April 2026). Current gaps: `docs/ROAD_TO_V2_UX.md`, `.cursor/skills/*`, and this audit pass.
+
 > **Fecha:** 2026-04-17
 > **Objetivo:** Cerrar la brecha entre el estado actual y un instrumento tan poderoso como Envion, con inferencia ACE nativa y prompting ajustable por nodo.
 > **Alineación:** 100% whitepaper — `S(i+1) = ACE(S(i) + N(μ,σ), P, γ)`
@@ -56,7 +58,7 @@ Esto es lo que separa a LR de todo lo demás. No es "un prompt global" — es qu
 
 **Implementación:**
 ```
-MacroNode "MOOG BASS" → PromptEngine("ferrofluid, subharmonic, warm resonance")
+MacroNode "FERROFLUID DRONE" → PromptEngine("ferrofluid, subharmonic, warm resonance")
 MacroNode "ACID LEAD" → PromptEngine("acid, squelchy, TB-303, metallic")  
 MacroNode "NOISE BED" → PromptEngine("granular entropy, white noise as structure")
 ```
@@ -185,13 +187,13 @@ Cada macro-nodo es un instrumento virtual completo con su propia cadena DSP y su
 
 | Macro-Node | Cadena | Prompt Semántico |
 |---|---|---|
-| MOOG BASS | SAW → FFT → SemanticEQ → ... → LP 120Hz | "subharmonic warmth, analog saturation, Moog ladder" |
-| TB-303 ACID | SQUARE → ... → LP 350Hz + resonance | "acid squelch, resonant filter sweep, 303 character" |
+| FERROFLUID DRONE | SAW → FFT → SemanticEQ → ... → LP 120Hz | "subharmonic warmth, analog saturation, Moog ladder" |
+| SPECTRAL TIDE | SQUARE → ... → LP 350Hz + resonance | "acid squelch, resonant filter sweep, 303 character" |
 | BUCHLA PERC | KOENIG → ... → BP 1.4kHz | "metallic percussion, Buchla timbres, plucked resonance" |
 | ROLAND PAD | SINE → ... → HP 400Hz | "ethereal pad, spectral shimmer, slow evolution" |
 | NOISE SCAPE | NOISE → ... → HP 2.5kHz | "granular entropy, noise floor as structure, microsound" |
 
-**Cada uno con su PromptEngine de 3 fases.** El artista puede cargar "MOOG BASS", editar el prompt a "ferrofluid bass, underwater resonance", y el modelo transformará el audio de manera completamente diferente. Esa es la libertad.
+**Cada uno con su PromptEngine de 3 fases.** El artista puede cargar "FERROFLUID DRONE", editar el prompt a "ferrofluid bass, underwater resonance", y el modelo transformará el audio de manera completamente diferente. Esa es la libertad.
 
 ---
 

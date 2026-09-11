@@ -1,4 +1,7 @@
 # Latent Resonator v2.0 — Plan de Integración Cohesiva Completo
+
+> **Superseded (2026-07-20).** This expanded integration plan predates the shipped pull-render engine (`GraphAudioEngine` → `ExecutionPlan` → `DSPNode`) and native `PatchCanvasView` canvas. It references deleted types (`ResonatorLane`, `AudioGraphMapper`, WKWebView patch editor). Keep for history only — code and `.cursor/skills/v2-node-graph/SKILL.md` are truth.
+
 ## Triple Validación: Whitepaper + Sistema + Research Principles
 
 **Status:** Plan oficial validado (2026-04-05) — bloqueadores resueltos, decisiones UX fijadas
@@ -603,7 +606,7 @@ final class SceneManager: ObservableObject {
 // Test: cargar factory preset, grabar 30s, comparar waveforms
 
 func testV1xVsV2xAudioIdentity() {
-    // Load MOOG BASS preset
+    // Load FERROFLUID DRONE preset (formerly MOOG BASS)
     let laneV1x = ResonatorLane(...)  // v1.x (direct @Published)
     let laneV2x = ResonatorLane(...)  // v2.0 (NodeGraph proxy)
     
@@ -1647,7 +1650,7 @@ struct PerformLayoutEngine {
     }
     
     /// Compute layout from exposed controls.
-    /// Rules (from ARCHITECTURE_v2_NODAL.md §4.2):
+    /// Rules (from ARCHITECTURE_v2_NODAL.md §4.2 — superseded RFC; verify against live PerformLayoutEngine / Graph/ code):
     ///   1-4   → Single row, knob size 96pt
     ///   5-8   → Two rows, knob size 74pt
     ///   9-16  → Grid (4 columns), knob size 56pt
@@ -1717,7 +1720,7 @@ extension Array {
 
 **Archivos Modificados:**
 1. `PerformanceMotherbaseView.swift` - Use PerformLayoutEngine.compute()
-2. `PerformLayoutEngine.swift` - Implement layout rules from ARCHITECTURE_v2_NODAL §4.2
+2. `PerformLayoutEngine.swift` - Implement layout rules from ARCHITECTURE_v2_NODAL §4.2 (superseded RFC; match live code)
 3. `MacroNode.swift` - Ensure exposedControls is Codable + @Published
 
 ---
@@ -2972,7 +2975,7 @@ final class MarkovSequencerNode: BaseGraphNode {
         return sampleCategorical(scaled)
     }
     
-    /// Temperature scaling (from ARCHITECTURE_v2_NODAL §8.4):
+    /// Temperature scaling (from ARCHITECTURE_v2_NODAL §8.4 — superseded RFC; verify in Graph/):
     /// p_i = exp(log(m_i)/T) / Σ exp(log(m_j)/T)
     private func temperatureScale(_ probs: [Float], _ T: Float) -> [Float] {
         guard T > 0 else {
@@ -4657,6 +4660,8 @@ final class ComprehensiveABTests: XCTestCase {
 
 **QUÉ:** Actualizar docs para reflejar v2.0 como status "COMPLETED", no "RFC".
 
+> **2026-07 honesty note:** `ARCHITECTURE_v2_NODAL.md`, `E2E_COHESION_ANALYSIS.md`, and `IMPLEMENTATION_VERIFICATION.md` are now **superseded** (WKWebView/AudioGraphMapper era). This section records the *planned* doc updates at plan time. **Source of truth:** `LatentResonator/LatentResonator/Graph/` (`NodeGraph.swift`).
+
 **Archivos a Actualizar:**
 
 **1. ARCHITECTURE_v2_NODAL.md:**
@@ -4757,8 +4762,8 @@ All factory presets: **>99.9% correlation** between v1.x and v2.0 paths.
 
 | Preset | Correlation | Status |
 |--------|-------------|--------|
-| MOOG BASS | 0.99978 | ✅ |
-| TB-303 ACID | 0.99982 | ✅ |
+| FERROFLUID DRONE (formerly MOOG BASS) | 0.99978 | ✅ |
+| SPECTRAL TIDE (formerly TB-303 ACID) | 0.99982 | ✅ |
 | DRUM LANE | 0.99965 | ✅ |
 | BUCHLA PERC | 0.99971 | ✅ |
 | ARP LEAD | 0.99985 | ✅ |

@@ -81,8 +81,26 @@ final class OscillatorNode: BaseGraphNode {
 
     func onTopologyChanged(inputs: [String: GraphEdge], outputs: [String: [GraphEdge]]) {
         // CV modulation (if freq_cv is connected) is applied by the
-        // ControlGraphEvaluator and surfaces in `controls["freq_cv"]`
-        // inside `render(...)`.
+        // ControlGraphEvaluator via `setParameter`/`getParam` per block.
+    }
+
+    // MARK: - Koenig Seed Manual Trigger (Manifesto: "Listen before you adjust")
+    //
+    // When this oscillator is in `.koenigSeed` mode, START must NOT auto-fire
+    // the Euclidean seed. The performer arms it manually. No-op for other
+    // waveforms (saw/sine/square/etc. keep their existing behavior — the
+    // manifesto fix targets only the Koenig seed injection path).
+    @discardableResult
+    func triggerSeed() -> Bool {
+        guard waveform == .koenigSeed else { return false }
+        return generator.triggerKoenigSeed()
+    }
+
+    /// Whether the Koenig seed is currently armed (UI introspection).
+    /// Always `false` for non-koenig waveforms.
+    var isSeedArmed: Bool {
+        guard waveform == .koenigSeed else { return false }
+        return generator.koenigArmed
     }
 }
 
@@ -98,28 +116,34 @@ extension OscillatorNode: GraphNodeDSPProvider, DSPNode {
         inputs: UnsafeBufferPointer<AudioBuffer>,
         output: AudioBuffer,
         frameCount: Int,
-        sampleRate: Double,
-        controls: [String: Float]
+        sampleRate: Double
     ) {
-        // Snapshot mutable parameters once. Read from the @Published store
-        // is not strictly RT-safe but matches the rest of the codebase's
-        // current contract; a parameter-snapshot pattern is queued for a
-        // follow-up pass.
-        generator.sineFrequency = frequency
-        generator.pulseWidth = pulseWidth
-        generator.euclideanPulses = euclideanPulses
-        generator.euclideanSteps = euclideanSteps
-        generator.pulseDensity = pulseDensity
+        // P1.5 — snapshot every getParam read into a local before the
+        // DSP body. A knob drag on the main thread mutates `parameters`
+        // (a COW dict); re-reading mid-render would force a heap alloc on
+        // the audio thread. Locals are immutable value types — no COW.
+        let freq = frequency
+        let pw = pulseWidth
+        let ep = euclideanPulses
+        let es = euclideanSteps
+        let pd = pulseDensity
+        let wave = waveform
+        let amp = amplitude
+
+        generator.sineFrequency = freq
+        generator.pulseWidth = pw
+        generator.euclideanPulses = ep
+        generator.euclideanSteps = es
+        generator.pulseDensity = pd
 
         generator.renderInto(
             left: output.left,
             right: output.right,
             frameCount: frameCount,
-            mode: waveform,
+            mode: wave,
             sampleRate: sampleRate
         )
 
-        let amp = amplitude
         if amp != 1.0 {
             for i in 0..<frameCount {
                 output.left[i] *= amp
@@ -187,8 +211,7 @@ extension NoiseNode: GraphNodeDSPProvider, DSPNode {
         inputs: UnsafeBufferPointer<AudioBuffer>,
         output: AudioBuffer,
         frameCount: Int,
-        sampleRate: Double,
-        controls: [String: Float]
+        sampleRate: Double
     ) {
         generator.renderInto(
             left: output.left,
@@ -210,55 +233,114 @@ extension NoiseNode: GraphNodeDSPProvider, DSPNode {
 
 // MARK: - Audio Input Node
 
-/// External audio input (mic/line).
-/// Wraps AVAudioEngine's inputNode.
+/// External audio input (mic/line) fed by the shared `CircularAudioBuffer`
+/// in `NeuralEngine`. Reads from the lock-free SPSC ring on the audio
+/// thread and applies a gain stage.
 final class AudioInputNode: BaseGraphNode {
-    
+
     // MARK: - Parameters
-    
+
     var gain: Float {
         get { getParam("gain", default: 1.0) }
         set { setParam("gain", value: newValue) }
     }
-    
+
     // MARK: - Internal State
-    
+
+    /// Shared ring buffer fed by the hardware input tap. Single producer
+    /// (input tap), single consumer (this node's `render()`).
+    private var audioInputBuffer: CircularAudioBuffer?
+
+    /// Legacy AVAudioInputNode reference (unused by the pull-render engine
+    /// but kept for any future AudioUnit-style path).
     private weak var engineInputNode: AVAudioInputNode?
-    
+
+    /// Consecutive underflow counter; kept for diagnostics but never blocks.
+    private var underflowCount: Int = 0
+
     // MARK: - Init
-    
-    init(id: UUID = UUID(), params: [String: Any] = [:], engineInputNode: AVAudioInputNode?) {
+
+    init(
+        id: UUID = UUID(),
+        params: [String: Any] = [:],
+        engineInputNode: AVAudioInputNode? = nil,
+        audioInputBuffer: CircularAudioBuffer? = nil
+    ) {
         self.engineInputNode = engineInputNode
-        
+        self.audioInputBuffer = audioInputBuffer
+
         super.init(
             id: id,
             nodeType: "audio_input",
             category: .source,
             displayName: "AUDIO IN"
         )
-        
+
         for (key, value) in params {
             parameters[key] = value
         }
     }
-    
+
     required init(from decoder: Decoder) throws {
         try super.init(from: decoder)
-        // engineInputNode is runtime-only, will be reconnected by AudioGraphMapper
+        // audioInputBuffer is injected at runtime by NeuralEngine/NodeFactory.
     }
-    
+
     // MARK: - Ports
-    
+
     override var ports: [NodePort] {
         [
             NodePort(id: "out", label: "OUT", signalType: .audio, direction: .output)
         ]
     }
-    
-    // MARK: - Audio Unit
-    
+
+    // MARK: - Audio Unit (legacy, not used by the pull-render engine)
+
     override func audioUnit() -> AVAudioNode? {
         return engineInputNode
+    }
+}
+
+// MARK: - AudioInputNode + DSPNode
+
+extension AudioInputNode: GraphNodeDSPProvider, DSPNode {
+
+    var nodeId: UUID { id }
+
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double
+    ) {
+        let g = gain
+        let buf = audioInputBuffer
+
+        // Read whatever the ring buffer has, then zero-pad the rest.
+        let read = buf?.read(into: output.left, count: frameCount) ?? 0
+        if read < frameCount {
+            underflowCount += 1
+            let remaining = frameCount - read
+            let offset = output.left.advanced(by: read)
+            let bytes = remaining * MemoryLayout<Float>.stride
+            memset(offset, 0, bytes)
+        }
+
+        // Apply gain to both channels (mono source → stereo output).
+        if g != 1.0 {
+            for i in 0..<frameCount {
+                output.left[i] *= g
+            }
+        }
+        for i in 0..<frameCount {
+            output.right[i] = output.left[i]
+        }
+    }
+
+    func reset() {
+        underflowCount = 0
     }
 }
 
@@ -421,11 +503,26 @@ final class KoenigSeedNode: BaseGraphNode {
     /// Gate state
     private var gateOpen: Bool = true
 
+    /// Manifesto gate ("Listen before you adjust"): false until the
+    /// performer manually arms the seed via `triggerSeed()` (K key / UI
+    /// button / MIDI). Defaults `false` so START does NOT auto-inject —
+    /// the feedback loop runs silent (or passthrough) until the performer
+    /// deliberately drops the seed. This is the surgical fix for the
+    /// philosophy bug where pressing SPACE auto-fired the Koenig seed,
+    /// contradicting the onboarding manifesto.
+    private var seedArmed: Bool = false
+
     /// Cumulative sample counter across render blocks. Replaces the
     /// `mSampleTime` timestamp the old AVAudioSourceNode callback used to
     /// drive event scheduling — under the new pull-render model the engine
     /// invokes us with `frameCount` only, so we count samples ourselves.
     private var totalSamplesProcessed: Int = 0
+
+    /// Lock-free PRNG for RT-safe stochastic generation (Xenakis/Koenig).
+    /// Replaces `Float.random(in:)` (which uses the global Swift RNG and
+    /// takes a lock — not audio-thread safe). Matches the contract already
+    /// used by `SpectralPipeline` and `SignalGenerator`.
+    private var rng = Xoshiro256StarStar()
 
     // MARK: - Init
 
@@ -524,17 +621,21 @@ final class KoenigSeedNode: BaseGraphNode {
     /// Generate a single nucleation event (impulse + noise tail) into the
     /// caller-provided stereo output. Same DSP body as the v1
     /// AVAudioSourceNode path, just operating on engine-owned pointers.
+    /// P1.5 — takes all user-facing params as arguments so the caller can
+    /// snapshot them once at the top of `render` and we never re-read the
+    /// COW `parameters` dict from the audio thread.
     fileprivate func generateImpulse(
         at index: Int,
         left: UnsafeMutablePointer<Float>,
         right: UnsafeMutablePointer<Float>,
         frameCount: Int,
         decaySamples: Int,
-        tailSamples: Int
+        tailSamples: Int,
+        impulseAmp: Float,
+        tailAmp: Float,
+        tailDecay: Float
     ) {
-        let impulseAmp = self.impulseAmplitude
-        let tailAmp = self.tailAmplitude * impulseAmp
-        let decayFactor = self.tailDecay
+        let tailAmpScaled = tailAmp * impulseAmp
 
         for i in 0..<min(decaySamples + tailSamples, frameCount - index) {
             let sampleIndex = index + i
@@ -548,12 +649,12 @@ final class KoenigSeedNode: BaseGraphNode {
             } else {
                 // Tail phase — Gaussian-ish noise with exponential decay
                 let tailIndex = i - decaySamples
-                let gauss = Float.random(in: -1...1)
+                let gauss = rng.nextGaussian(mean: 0, stddev: 1)
                 let tailIndexF = Float(tailIndex)
                 let tailSamplesF = Float(tailSamples)
-                let decayConstant = tailIndexF / (tailSamplesF * decayFactor)
-                let tailDecay = exp(-decayConstant)
-                sample = tailAmp * gauss * tailDecay
+                let decayConstant = tailIndexF / (tailSamplesF * tailDecay)
+                let tailDecayVal = exp(-decayConstant)
+                sample = tailAmpScaled * gauss * tailDecayVal
             }
 
             left[sampleIndex] += sample
@@ -567,12 +668,25 @@ final class KoenigSeedNode: BaseGraphNode {
     func triggerGate() {
         gateOpen = true
     }
-    
+
     /// Close gate to mute generation
     func closeGate() {
         gateOpen = false
     }
-    
+
+    /// Manifesto: arm/disarm the Koenig seed. Toggled by the performer
+    /// (K key / UI button / MIDI). Until armed, `render` emits silence so
+    /// the performer can listen to the empty feedback loop first. Returns
+    /// the new armed state for UI feedback.
+    @discardableResult
+    func triggerSeed() -> Bool {
+        seedArmed.toggle()
+        return seedArmed
+    }
+
+    /// Whether the seed is currently armed (UI introspection).
+    var isSeedArmed: Bool { seedArmed }
+
     /// Reset pattern to start position. Also implements `DSPNode.reset()`.
     func reset() {
         stepIndex = 0
@@ -620,24 +734,44 @@ extension KoenigSeedNode: GraphNodeDSPProvider, DSPNode {
         inputs: UnsafeBufferPointer<AudioBuffer>,
         output: AudioBuffer,
         frameCount: Int,
-        sampleRate: Double,
-        controls: [String: Float]
+        sampleRate: Double
     ) {
         // Always start by zeroing the buffer; events accumulate on top.
         let bytes = frameCount * MemoryLayout<Float>.stride
         memset(output.left, 0, bytes)
         memset(output.right, 0, bytes)
 
+        // Manifesto ("Listen before you adjust"): the seed does NOT auto-fire
+        // on START. The performer arms it manually via `triggerSeed()` (K key
+        // / UI button / MIDI). Until armed, render emits silence — the
+        // feedback loop runs empty so the performer can listen first.
+        guard seedArmed else { return }
+
+        // P1.5 — snapshot all user-facing params into locals before any
+        // DSP work. A knob drag mid-block mutates `parameters` (COW dict);
+        // re-reading it inside the loop would force a heap alloc on the
+        // audio thread.
+        let isGated = gated
+        let clkRate = clockRate
+        let bpm = tempo
+        let impulseDecayMs = impulseDecay
+        let tailDurationMs = tailDuration
+        let eventProb = eventProbability
+        let nucleation = nucleationDensity
+        let impulseAmp = impulseAmplitude
+        let tailAmp = tailAmplitude
+        let tailDecayFactor = tailDecay
+
         // Gate honors the legacy semantics: when `gated == true`, the node
         // emits nothing unless `gateOpen == true`. Free-running mode bypasses
         // the gate entirely.
-        if gated && !gateOpen { return }
+        if isGated && !gateOpen { return }
 
         // Step duration in samples — driven by either the external clock
         // rate or the internal tempo (BPM as quarter-notes-per-second).
-        let stepsPerSecond: Double = clockRate > 0
-            ? Double(clockRate)
-            : Double(tempo) / 60.0
+        let stepsPerSecond: Double = clkRate > 0
+            ? Double(clkRate)
+            : Double(bpm) / 60.0
 
         let samplesPerStep = Int(self.sampleRate / stepsPerSecond)
         guard samplesPerStep > 0, !rhythmPattern.isEmpty else {
@@ -645,9 +779,9 @@ extension KoenigSeedNode: GraphNodeDSPProvider, DSPNode {
             return
         }
 
-        let decaySamples = Int((Double(impulseDecay) / 1000.0) * self.sampleRate)
-        let tailSamples = Int((Double(tailDuration) / 1000.0) * self.sampleRate)
-        let probability = eventProbability * nucleationDensity
+        let decaySamples = Int((Double(impulseDecayMs) / 1000.0) * self.sampleRate)
+        let tailSamples = Int((Double(tailDurationMs) / 1000.0) * self.sampleRate)
+        let probability = eventProb * nucleation
 
         // Walk the buffer one sample at a time looking for step boundaries.
         // When the modulus aligns with the start of an "on" step in the
@@ -660,7 +794,7 @@ extension KoenigSeedNode: GraphNodeDSPProvider, DSPNode {
 
             let stepIdx = (totalSample / samplesPerStep) % rhythmPattern.count
             guard rhythmPattern[stepIdx] else { continue }
-            guard Float.random(in: 0...1) < probability else { continue }
+            guard rng.nextFloat(in: 0...1) < probability else { continue }
 
             generateImpulse(
                 at: i,
@@ -668,7 +802,10 @@ extension KoenigSeedNode: GraphNodeDSPProvider, DSPNode {
                 right: output.right,
                 frameCount: frameCount,
                 decaySamples: decaySamples,
-                tailSamples: tailSamples
+                tailSamples: tailSamples,
+                impulseAmp: impulseAmp,
+                tailAmp: tailAmp,
+                tailDecay: tailDecayFactor
             )
         }
 

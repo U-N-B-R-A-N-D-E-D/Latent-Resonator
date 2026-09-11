@@ -62,18 +62,13 @@ enum ControlParameter: String, CaseIterable {
     case crossfader
     case mute
     case solo
-    case spectralMorphActive
-    case autoDecayToggle
-    case promptEvolution
+    case spectralMorphActive      // legacy alias for SpectralChainNode.freezeActive
     case inferMethodSDE
-    case laneRecord
-    case archiveRecall
 
     /// Continuous range (min, max). Toggles use (0, 1) and isToggle == true.
     var floatRange: (Float, Float)? {
         switch self {
-        case .volume, .mute, .solo, .spectralMorphActive, .autoDecayToggle,
-             .promptEvolution, .inferMethodSDE, .laneRecord:
+        case .volume, .mute, .solo, .spectralMorphActive, .inferMethodSDE:
             return (0.0, 1.0)
         case .guidanceScale:
             return (LRConstants.cfgScaleRange.lowerBound,
@@ -134,22 +129,20 @@ enum ControlParameter: String, CaseIterable {
         case .lfoDepth:
             return (LRConstants.lfoDepthRange.lowerBound,
                     LRConstants.lfoDepthRange.upperBound)
-        case .archiveRecall:
-            return (0.0, Float(LRConstants.iterationArchiveSize - 1))
         }
     }
 
     /// Toggle params: CC < 64 -> 0, CC >= 64 -> 1.
     var isToggle: Bool {
         switch self {
-        case .mute, .solo, .spectralMorphActive, .autoDecayToggle,
-             .promptEvolution, .inferMethodSDE, .laneRecord:
+        case .mute, .solo, .spectralMorphActive, .inferMethodSDE:
             return true
         default: return false
         }
     }
 
-    /// Default MIDI CC (unique per parameter). CC 20-51.
+    /// Default MIDI CC (unique per live parameter). CC 20-51 with gaps
+    /// left after pruning dead v1-era IDs (38, 39, 49, 51).
     var defaultCC: UInt8 {
         switch self {
         case .volume:              return 20
@@ -170,8 +163,6 @@ enum ControlParameter: String, CaseIterable {
         case .bitCrushDepth:       return 35
         case .entropy:             return 36
         case .granularity:         return 37
-        case .autoDecayToggle:     return 38
-        case .archiveRecall:       return 39
         case .shift:               return 40
         case .inputStrength:       return 41
         case .inferenceSteps:      return 42
@@ -181,9 +172,7 @@ enum ControlParameter: String, CaseIterable {
         case .resonatorDecay:      return 46
         case .lfoRate:             return 47
         case .lfoDepth:            return 48
-        case .promptEvolution:     return 49
         case .inferMethodSDE:      return 50
-        case .laneRecord:          return 51
         }
     }
 }
@@ -565,9 +554,13 @@ final class MIDIInputManager: ObservableObject {
 final class OSCInputManager: ObservableObject {
 
     @Published var isEnabled: Bool = false {
-        didSet { isEnabled ? start() : stop() }
+        didSet { guard isReady else { return }; isEnabled ? start() : stop() }
     }
     @Published var port: UInt16 = 9000
+
+    /// Prevents the `isEnabled` didSet observer from starting the OSC listeners
+    /// during `init`; the one canonical start happens from `NeuralEngine.setupMIDIRouting`.
+    private var isReady: Bool = false
     @Published var lastReceivedAddress: String = ""
 
     /// Traffic monitor: last packet validity and description for Settings > OSC.
@@ -591,6 +584,11 @@ final class OSCInputManager: ObservableObject {
         isEnabled = UserDefaults.standard.bool(forKey: Self.userDefaultsEnabledKey)
         let saved = UserDefaults.standard.integer(forKey: Self.userDefaultsPortKey)
         if saved > 0 { port = UInt16(saved) }
+        // Mark the manager ready so that future `isEnabled` assignments (e.g. from
+        // the Settings toggle) actually start/stop the listeners. The initial
+        // value set above is deliberately ignored to avoid a double-start before
+        // `NeuralEngine.setupMIDIRouting` has installed the parameter callback.
+        isReady = true
     }
 
     func saveSettings() {

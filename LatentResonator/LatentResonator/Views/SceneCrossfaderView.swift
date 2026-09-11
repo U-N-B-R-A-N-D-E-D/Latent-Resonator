@@ -3,8 +3,13 @@ import SwiftUI
 import AppKit
 #endif
 
-// MARK: - Scene Crossfader View (Slide-Slot)
+// MARK: - Scene Crossfader View (Slide-Slot) — SUPERCEDED
 // A/B scene selection and crossfader. Sunken track, titanio thumb, neon border.
+//
+// v2.0 Wave A (2026-07-27): this view is no longer referenced from the active
+// UI. The inline scene section in `PerformanceMotherbaseView` now provides the
+// A/B selectors, scene grid, crossfader, and crossfade-duration control. The
+// file is kept intact for reference / rollback; do not wire it into a new flow.
 
 private typealias DS = LRConstants.DS
 

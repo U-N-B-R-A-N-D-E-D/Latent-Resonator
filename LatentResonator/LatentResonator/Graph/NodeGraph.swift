@@ -34,7 +34,21 @@ final class NodeGraph: ObservableObject {
     
     /// Macro bindings: one control → multiple targets with curves.
     @Published var macroBindings: [MacroBinding] = []
-    
+
+    // MARK: - Neural Bridge
+
+    /// Shared ACE-Step bridge, assigned by `NeuralEngine` before any node is
+    /// created. `NodeFactory.createNode(...)` reads this to inject `bridge:`
+    /// into `ACEStepInferenceNode`/`FeedbackLoopNode` at construction time;
+    /// `wireNeuralNodes()` re-applies it (and connects the two node types to
+    /// each other) after every deserialize/addNode, idempotently.
+    weak var aceBridge: ACEStepBridge?
+
+    /// Shared audio input ring buffer, assigned by `NeuralEngine` before any
+    /// node is created. `NodeFactory.createNode(...)` reads this to inject
+    /// `audioInputBuffer:` into `AudioInputNode` at construction time.
+    var audioInputBuffer: CircularAudioBuffer?
+
     // MARK: - Topology Change Notification
     
     /// Publishes when graph topology changes (add/remove nodes or edges).
@@ -42,9 +56,23 @@ final class NodeGraph: ObservableObject {
     /// not on parameter changes.
     let topologyDidChange = PassthroughSubject<Void, Never>()
     
-    /// Publishes when an audio parameter changes value (for AudioGraphMapper updates).
-    /// Tuple: (nodeId, paramId, newValue)
-    let parameterDidChange = PassthroughSubject<(UUID, String, Float), Never>()
+    // A `parameterDidChange` subject used to live here, publishing
+    // (nodeId, paramId, newValue) "for ExecutionPlan rebuilds" whenever
+    // `setParameter`/`setNodeParameter` touched an "audio parameter". It had
+    // zero subscribers (perimeter audit, 2026-07-21) — a leftover from the
+    // abandoned `AudioGraphMapper` design, whose `updateParameter()` did
+    // incremental `AVAudioEngine` node updates (see `docs/E2E_COHESION_ANALYSIS.md` —
+    // superseded, cited for historical context only; THIS file is the source of truth).
+    // Removed rather than wired up: `ExecutionPlan` never caches parameter
+    // *values*, only topology (buffer-slot assignment). Every `Step.dspNode`
+    // is a live reference to the same `GraphNode` instance the UI mutates via
+    // `setParam`/`setParameter`, so `DSPNode.render(...)` reads the current
+    // value on the very next audio block via `getParam` — no rebuild needed.
+    // Parameter changes are eventual-consistent by design, one buffer
+    // (<= ~1s at `LRConstants.bufferSize`) after the UI edit. Only actual
+    // topology changes (add/remove node or edge) require a plan rebuild —
+    // that's `topologyDidChange`, above, which IS subscribed
+    // (`NeuralEngine.rebuildAudioGraphIfNeeded()`).
     
     // MARK: - Auto-Save (Phase 0)
     
@@ -227,7 +255,13 @@ final class NodeGraph: ObservableObject {
     
     private func addNode(id: UUID, type: String, position: CGPoint, params: [String: Any]) throws {
         // Node factory will be implemented in NodeFactory.swift
-        guard var node = NodeFactory.createNode(id: id, type: type, params: params) else {
+        guard var node = NodeFactory.createNode(
+            id: id,
+            type: type,
+            params: params,
+            bridge: aceBridge,
+            audioInputBuffer: audioInputBuffer
+        ) else {
             throw GraphError.unknownNodeType(type)
         }
         
@@ -236,8 +270,24 @@ final class NodeGraph: ObservableObject {
         node.y = position.y
         
         nodes[id] = node
+        wireNeuralNodes()
         objectWillChange.send()
         topologyDidChange.send()
+    }
+
+    /// Public entry point for canvas-driven node insertion. Generates a fresh
+    /// UUID, delegates to the private factory path, and returns the new id so
+    /// the caller (e.g. `PatchCanvasView`'s right-click palette) can focus the
+    /// newly added node. Returns `nil` if the type is unknown.
+    @discardableResult
+    func addNode(type: String, position: CGPoint, params: [String: Any] = [:]) -> UUID? {
+        let id = UUID()
+        do {
+            try addNode(id: id, type: type, position: position, params: params)
+            return id
+        } catch {
+            return nil
+        }
     }
     
     func removeNode(id: UUID) {
@@ -262,8 +312,28 @@ final class NodeGraph: ObservableObject {
     // MARK: - Macro Expansion
     
     /// Expand a MacroNode to reveal its internal topology.
-    /// Internal nodes are added to the main graph with their positions offset
-    /// by the macro's position. External connections to the macro are preserved.
+    ///
+    /// v2.0 fix (Fix 4): previously only `.control`-category internal nodes
+    /// were promoted to the main graph, so the internal audio chain
+    /// (oscillator → feedback_loop → mixer → master_output) stayed
+    /// black-boxed and was never seen by `ExecutionPlan.build` — meaning
+    /// an expanded macro still rendered silence in the pull-render engine.
+    /// We now promote every internal node EXCEPT the internal
+    /// `MasterOutputNode`: promoting a second master_output would make
+    /// `ExecutionPlan.build`'s terminal-node pick (first `MasterOutputNode`
+    /// in topo order) non-deterministic between the main graph's master and
+    /// the macro's internal one, potentially silencing the main mix. The
+    /// internal chain's terminal edge (mixer.out → internal master_output.in)
+    /// is therefore intentionally dropped on promotion; the promoted
+    /// internal nodes are DSP-active on the canvas for editing.
+    ///
+    /// Fix 4a (closed): when COLLAPSED, the macro itself now renders its
+    /// `internalGraph` through its own cached internal `ExecutionPlan`
+    /// (see `MacroNode.render` / `rebuildInternalPlanIfNeeded`), so a
+    /// collapsed macro's audio reaches the main output without promoting
+    /// any nodes. When EXPANDED, the macro emits silence and the promoted
+    /// internal nodes are the live path. Expand/collapse behavior is
+    /// unchanged.
     func expand(macroId: UUID) throws {
         guard let macroNode = nodes[macroId] as? MacroNode else {
             throw GraphError.invalidConnection("Node is not a MacroNode or doesn't exist")
@@ -278,45 +348,50 @@ final class NodeGraph: ObservableObject {
             let macroX = macroNode.x
             let macroY = macroNode.y
             
-            // Add ONLY control nodes to main graph (audio stays black-boxed in MacroNode)
-            // Control nodes: agitation, peak, manual_control (LFOs, envelopes, manual knobs)
+            // Promote internal nodes to the main graph. We skip the
+            // internal `MasterOutputNode` to avoid a second terminal
+            // candidate in ExecutionPlan.build (see method doc). Every
+            // other node — control AND audio — is promoted so the internal
+            // signal chain is visible and DSP-active on the canvas.
             for (_, var internalNode) in macroNode.internalGraph.nodes {
-                // Filter: only show control-rate nodes, not audio processing nodes
-                if internalNode.category == .control {
-                    // Offset internal node position by macro's position
-                    internalNode.x = macroX + 250 + (internalNode.x * 0.3)  // Offset right and scale down
-                    internalNode.y = macroY + (internalNode.y * 0.3)
-                    
-                    // Mark node as belonging to this macro (for visual grouping)
-                    internalNode.parameters["parentMacroId"] = macroId.uuidString
-                    
-                    nodes[internalNode.id] = internalNode
-                }
+                if internalNode is MasterOutputNode { continue }
+                
+                // Offset internal node position by macro's position
+                internalNode.x = macroX + 250 + (internalNode.x * 0.3)
+                internalNode.y = macroY + (internalNode.y * 0.3)
+                
+                // Mark node as belonging to this macro (for visual grouping
+                // and for collapse() to find promoted nodes reliably).
+                internalNode.parameters["parentMacroId"] = macroId.uuidString
+                
+                nodes[internalNode.id] = internalNode
             }
             
-            // Add control edges only (edges between control nodes)
+            // Promote internal edges whose both endpoints were promoted
+            // (i.e., neither endpoint is the skipped internal master_output).
             for (_, edge) in macroNode.internalGraph.edges {
-                // Only add edge if both ends are control nodes
-                if let sourceNode = macroNode.internalGraph.nodes[edge.sourceNodeId],
-                   let targetNode = macroNode.internalGraph.nodes[edge.targetNodeId],
-                   sourceNode.category == .control && targetNode.category == .control {
-                    edges[edge.id] = edge
+                guard let sourceNode = macroNode.internalGraph.nodes[edge.sourceNodeId],
+                      let targetNode = macroNode.internalGraph.nodes[edge.targetNodeId],
+                      !(sourceNode is MasterOutputNode),
+                      !(targetNode is MasterOutputNode) else {
+                    continue
                 }
+                edges[edge.id] = edge
             }
             
             // Keep the macro visible but marked as expanded (UI shows green border)
             
         } else {
-            // Collapse: remove control nodes and edges
-            let internalNodeIds = Set(macroNode.internalGraph.nodes.keys)
+            // Collapse: remove every node promoted from this macro (tagged
+            // with `parentMacroId`), regardless of category. Previously only
+            // `.control` nodes were removed, which left promoted audio
+            // nodes stranded in the main graph after a collapse.
+            let macroIdString = macroId.uuidString
+            let promotedIds = nodes.values
+                .filter { ($0.parameters["parentMacroId"] as? String) == macroIdString }
+                .map { $0.id }
             
-            for nodeId in internalNodeIds {
-                guard let internalNode = macroNode.internalGraph.nodes[nodeId],
-                      internalNode.category == .control else {
-                    continue  // Only remove control nodes (audio nodes were never added)
-                }
-                
-                // Remove from main graph (but keep in internalGraph)
+            for nodeId in promotedIds {
                 let connectedEdges = edges.values.filter { edge in
                     edge.sourceNodeId == nodeId || edge.targetNodeId == nodeId
                 }
@@ -330,8 +405,54 @@ final class NodeGraph: ObservableObject {
         }
         
         objectWillChange.send()
+        // Fix P1 #4: expand/collapse mutates which nodes are in the parent
+        // graph (and which edges are live), so the parent ExecutionPlan and
+        // every macro's internalPlan must be rebuilt. Without this,
+        // NeuralEngine.rebuildAudioGraphIfNeeded never runs and the audio
+        // thread keeps rendering a stale plan (silence after expand/collapse).
+        topologyDidChange.send()
     }
-    
+
+    /// Scoped inverse of `expand(macroId:)`. Removes the nodes and edges that
+    /// were promoted by the expand (tagged with `parentMacroId`) and restores
+    /// the macro node from the provided snapshot. The internal graph is not
+    /// restored here because `expand` never mutates it; the snapshot is kept
+    /// by `ExpandMacroCommand` for full-graph fallback if ever needed.
+    func collapseExpanded(macroId: UUID, restoring macroSnapshot: SerializedNode) {
+        guard let macroNode = nodes[macroId] as? MacroNode else { return }
+
+        let macroIdString = macroId.uuidString
+        let promotedIds = nodes.values
+            .filter { ($0.parameters["parentMacroId"] as? String) == macroIdString }
+            .map { $0.id }
+
+        for nodeId in promotedIds {
+            let connectedEdges = edges.values.filter { edge in
+                edge.sourceNodeId == nodeId || edge.targetNodeId == nodeId
+            }
+            for edge in connectedEdges {
+                edges.removeValue(forKey: edge.id)
+            }
+            nodes.removeValue(forKey: nodeId)
+        }
+
+        // Restore macro node properties from the snapshot.
+        macroNode.name = macroSnapshot.displayName
+        macroNode.x = Double(macroSnapshot.position.x)
+        macroNode.y = Double(macroSnapshot.position.y)
+        macroNode.stageKind = macroSnapshot.stageKind
+        var restoredParameters: [String: Any] = [:]
+        for (key, value) in macroSnapshot.parameters {
+            restoredParameters[key] = value.anyValue
+        }
+        macroNode.parameters = restoredParameters
+        macroNode.isExpanded = false
+        macroNode.parameters["isExpanded"] = false
+
+        objectWillChange.send()
+        topologyDidChange.send()
+    }
+
     // MARK: - Edge Management
     
     func connectEdge(_ edge: GraphEdge) throws {
@@ -373,14 +494,45 @@ final class NodeGraph: ObservableObject {
         // let inputs = edges.values.filter { $0.targetNodeId == nodeId }...
         // let outputs = edges.values.filter { $0.sourceNodeId == nodeId }...
     }
+
+    // MARK: - Neural Node Wiring
+
+    /// Idempotently connects every `FeedbackLoopNode` in the graph to the
+    /// shared `aceBridge` and to an available `ACEStepInferenceNode` (for
+    /// parameter sync). Called after `deserialize(_:)` and `addNode(...)`
+    /// so a graph built without a hand-authored edge between the two node
+    /// types still ends up wired -- reassigning the same references on a
+    /// repeat call is a no-op in effect.
+    private func wireNeuralNodes() {
+        let inferenceNode = nodes.values.compactMap { $0 as? ACEStepInferenceNode }.first
+        inferenceNode?.bridge = aceBridge
+
+        for node in nodes.values {
+            guard let feedbackLoop = node as? FeedbackLoopNode else { continue }
+            feedbackLoop.bridge = aceBridge
+            if let inferenceNode = inferenceNode {
+                feedbackLoop.connectInferenceNode(inferenceNode)
+            }
+        }
+    }
     
     // MARK: - Parameter Management
     
     /// Get parameter value from any node as Float.
-    /// Thread-safe for reads (returns optional value).
+    /// Coerces Double, Int, and NSNumber to Float. Bool is intentionally
+    /// not coerced (it is not a numeric parameter type).
     func getParameter(nodeId: UUID, key: String) -> Float? {
         guard let node = nodes[nodeId] else { return nil }
-        return node.parameters[key] as? Float
+        guard let value = node.parameters[key] else { return nil }
+
+        // Bool is not a numeric parameter; do not coerce to 0/1.
+        if value is Bool { return nil }
+
+        if let float = value as? Float { return float }
+        if let double = value as? Double { return Float(double) }
+        if let int = value as? Int { return Float(int) }
+        if let number = value as? NSNumber { return number.floatValue }
+        return nil
     }
     
     /// Get raw parameter value (Any type) from node.
@@ -389,7 +541,9 @@ final class NodeGraph: ObservableObject {
         return node.parameters[key]
     }
     
-    /// Set parameter value on any node. Emits change notifications for UI and audio graph.
+    /// Set parameter value on any node. Emits `objectWillChange` for UI observers;
+    /// the audio thread picks up the new value on its own via `getParam` (no
+    /// separate audio-graph notification — see comment above `topologyDidChange`).
     /// Must be called from main thread.
     func setParameter(nodeId: UUID, key: String, value: Float) {
         guard var node = nodes[nodeId] else { return }
@@ -401,10 +555,10 @@ final class NodeGraph: ObservableObject {
         // Notify UI observers
         objectWillChange.send()
         
-        // Notify audio graph if this parameter affects audio topology
-        if isAudioParameter(key) {
-            parameterDidChange.send((nodeId, key, value))
-        }
+        // No audio-graph notification needed: the audio thread reads this
+        // same node's parameters fresh via `getParam` on its next render
+        // block (eventual-consistent by design — see the comment above
+        // `topologyDidChange`/`parameterDidChange`'s old declaration).
     }
     
     /// Legacy parameter setter for Any values (kept for backward compatibility).
@@ -415,10 +569,8 @@ final class NodeGraph: ObservableObject {
         // Update node parameter directly
         nodes[nodeId]?.parameters[paramId] = value
 
-        // Emit parameter change for v2.0 audio graph rebuilds
-        if let floatValue = value as? Float, isAudioParameter(paramId) {
-            parameterDidChange.send((nodeId, paramId, floatValue))
-        }
+        // No audio-graph rebuild needed here either — same reasoning as
+        // `setParameter(nodeId:key:value:)` above.
 
         // Apply macro bindings if this is an exposed control
         if let exposedControl = exposedControls.first(where: { $0.nodeId == nodeId && $0.paramId == paramId }),
@@ -431,20 +583,6 @@ final class NodeGraph: ObservableObject {
     
     func getNodeParameter(nodeId: UUID, paramId: String) -> Any? {
         return nodes[nodeId]?.parameters[paramId]
-    }
-    
-    // MARK: - Parameter Helpers
-    
-    /// Determines if a parameter change should trigger an audio graph rebuild.
-    /// Audio topology parameters (cutoff, resonance, delay time, etc.) require graph rebuilds.
-    private func isAudioParameter(_ key: String) -> Bool {
-        let audioParams = [
-            "cutoff", "resonance", "drive", "mode",
-            "delayTime", "delayFeedback", "delayMix",
-            "combFeedback", "combTapCount", "baseDelay",
-            "saturationMorph", "bitCrushDepth"
-        ]
-        return audioParams.contains(key)
     }
     
     // MARK: - Exposed Controls
@@ -460,20 +598,39 @@ final class NodeGraph: ObservableObject {
         objectWillChange.send()
     }
     
-    /// Auto-generate exposed controls for all parameters of a MacroNode and its internal nodes.
-    /// Called by NeuralEngine to populate the PERFORM surface.
-    /// - Parameter macroNode: The MacroNode to generate controls for
+    /// Curated set of parameter IDs that define a macro's perform identity.
+    /// These are the only parameters auto-exposed by default; everything else
+    /// is opt-in via the canvas context menu (Wave A W3).
+    private static let identityParameterIds: Set<String> = [
+        "guidanceScale", "cfg",
+        "feedback", "feedbackAmount",
+        "entropy", "granularity"
+    ]
+
+    private static func isIdentityParameter(_ paramId: String) -> Bool {
+        identityParameterIds.contains(paramId)
+    }
+
+    /// Auto-generate exposed controls for a MacroNode's identity parameters only.
+    /// Called by NeuralEngine when a macro is added or a factory macro topology is
+    /// loaded without explicit `exposedControls`.
+    ///
+    /// v2.0 Wave C: the previous all-floats flood is removed from the default
+    /// flow. Only CFG/FEEDBACK, ENTROPY, and GRANULARITY are surfaced automatically;
+    /// every other parameter must be opted into manually from the canvas.
     func autoGenerateExposedControls(for macroNode: MacroNode) {
-        // Remove any existing exposed controls for this node
+        // Remove any existing exposed controls for this node or its internal nodes
         exposedControls.removeAll { control in
-            // Check if control belongs to this MacroNode or its internal nodes
             control.nodeId == macroNode.id ||
             macroNode.internalGraph.nodes.keys.contains(control.nodeId)
         }
 
-        // 1. Expose MacroNode's own parameters (texture, chaos, warmth, etc.)
         var positionCounter = 0
+
+        // 1. Expose MacroNode's own identity parameters (if any).
         for (paramId, value) in macroNode.parameters {
+            guard let floatValue = value as? Float,
+                  Self.isIdentityParameter(paramId) else { continue }
             let control = ExposedControl(
                 id: UUID(),
                 nodeId: macroNode.id,
@@ -481,7 +638,7 @@ final class NodeGraph: ObservableObject {
                 label: paramId.capitalized,
                 controlType: inferControlType(for: paramId, value: value),
                 range: inferRange(for: paramId),
-                defaultValue: value as? Float ?? 0.5,
+                defaultValue: floatValue,
                 midiCC: nil,
                 position: positionCounter
             )
@@ -489,13 +646,14 @@ final class NodeGraph: ObservableObject {
             positionCounter += 1
         }
 
-        // 2. Expose internal node parameters with musical names
+        // 2. Expose internal identity parameters with musical labels.
         for (internalNodeId, node) in macroNode.internalGraph.nodes {
-            // Skip utility nodes
             guard !node.nodeType.contains("utility") else { continue }
 
             for (paramId, value) in node.parameters {
-                // Create human-readable label
+                guard let floatValue = value as? Float,
+                      Self.isIdentityParameter(paramId) else { continue }
+
                 let label = createMusicalLabel(nodeType: node.nodeType, paramId: paramId)
 
                 let control = ExposedControl(
@@ -505,7 +663,7 @@ final class NodeGraph: ObservableObject {
                     label: label,
                     controlType: inferControlType(for: paramId, value: value),
                     range: inferRange(for: paramId),
-                    defaultValue: value as? Float ?? 0.5,
+                    defaultValue: floatValue,
                     midiCC: nil,
                     position: positionCounter
                 )
@@ -513,47 +671,19 @@ final class NodeGraph: ObservableObject {
                 positionCounter += 1
             }
         }
-        
+
         objectWillChange.send()
     }
 
-    /// Auto-generate exposed controls for all top-level nodes in the graph.
-    /// Used when loading legacy graphs or templates without macros.
+    /// Auto-generate exposed controls for the main graph.
+    ///
+    /// v2.0 Wave C: the all-floats flood is removed from the default flow. Flat
+    /// graphs without macros now expose no controls by default; every parameter
+    /// must be opted into manually from the canvas.
     func autoGenerateExposedControlsForMainGraph() {
-        // Clear existing exposed controls
-        exposedControls.removeAll()
-
-        var positionCounter = 0
-
-        // Expose parameters from all audio-generating nodes
-        for (nodeId, node) in nodes {
-            // Skip utility/routing nodes without audio parameters
-            guard !node.nodeType.contains("utility"),
-                  !node.nodeType.contains("macro"),
-                  !node.nodeType.contains("master") else { continue }
-
-            for (paramId, value) in node.parameters {
-                // Create human-readable label
-                let label = createMusicalLabel(nodeType: node.nodeType, paramId: paramId)
-
-                let control = ExposedControl(
-                    id: UUID(),
-                    nodeId: nodeId,
-                    paramId: paramId,
-                    label: label,
-                    controlType: inferControlType(for: paramId, value: value),
-                    range: inferRange(for: paramId),
-                    defaultValue: value as? Float ?? 0.5,
-                    midiCC: nil,
-                    position: positionCounter
-                )
-                exposedControls.append(control)
-                positionCounter += 1
-            }
-        }
-
-        print("[NodeGraph] Auto-generated \(exposedControls.count) exposed controls for main graph")
-        objectWillChange.send()
+        // No-op by design. Manual opt-in via GenericNodeCard's "Expose to Perform"
+        // context menu is the only way to populate exposedControls on flat graphs.
+        print("[NodeGraph] Auto-expose for main graph is disabled; use manual opt-in.")
     }
 
     /// Create a human-readable musical label for a parameter.
@@ -574,11 +704,6 @@ final class NodeGraph: ObservableObject {
             "bit_crusher": [
                 "bitDepth": "Bits",
                 "sampleRate": "Rate"
-            ],
-            "semantic_eq": [
-                "lowGain": "Low",
-                "midGain": "Mid",
-                "highGain": "High"
             ]
         ]
         
@@ -617,6 +742,14 @@ final class NodeGraph: ObservableObject {
     /// Infer the appropriate value range for a parameter.
     private func inferRange(for paramId: String) -> ClosedRange<Float> {
         switch paramId {
+        // ACE-Step / neural parameters (ACEStepInferenceNode, FeedbackLoopNode) --
+        // explicit ranges so the auto-generated knob is actually usable instead
+        // of silently falling through to the 0...1 default (guidanceScale's real
+        // range is 3...20; a 0...1 knob can never reach unity gain at 10.0).
+        case "guidanceScale":
+            return LRConstants.cfgScaleRange
+        case "feedback", "inputStrength", "entropy", "granularity":
+            return 0.0...1.0
         case "texture", "chaos", "warmth", "bias", "mix", "drive", "probability":
             return 0.0...1.0
         case "cutoff", "frequency", "rate":
@@ -700,13 +833,75 @@ final class NodeGraph: ObservableObject {
         nodes[nodeId]?.x = x
         nodes[nodeId]?.y = y
         objectWillChange.send()
+        triggerDebouncedSave()
+    }
+
+    /// Remove any edge touching `port` on `nodeId` (output or input side).
+    func disconnectPort(nodeId: UUID, portId: String) {
+        let toRemove = edges.values.filter { edge in
+            (edge.sourceNodeId == nodeId && edge.sourcePortId == portId)
+                || (edge.targetNodeId == nodeId && edge.targetPortId == portId)
+        }
+        for edge in toRemove {
+            disconnectEdge(id: edge.id)
+        }
+    }
+
+    /// Find the audio/control edge wired into a specific input port, if any.
+    func edge(into nodeId: UUID, portId: String) -> GraphEdge? {
+        edges.values.first { $0.targetNodeId == nodeId && $0.targetPortId == portId }
+    }
+
+    /// Find edges leaving a specific output port.
+    func edges(from nodeId: UUID, portId: String) -> [GraphEdge] {
+        edges.values.filter { $0.sourceNodeId == nodeId && $0.sourcePortId == portId }
+    }
+
+    /// Attempt to connect two ports; returns a human-readable error on failure.
+    @discardableResult
+    func connectPorts(
+        from source: PatchPortRef,
+        to target: PatchPortRef
+    ) -> String? {
+        guard source.direction == .output, target.direction == .input else {
+            return "Cables run from output to input"
+        }
+        guard source.nodeId != target.nodeId else {
+            return "Cannot connect a node to itself"
+        }
+
+        // Replace existing audio input (single-connection rule).
+        if target.signalType == .audio, let existing = edge(into: target.nodeId, portId: target.portId) {
+            disconnectEdge(id: existing.id)
+        }
+
+        let edge = GraphEdge(
+            sourceNodeId: source.nodeId,
+            sourcePortId: source.portId,
+            targetNodeId: target.nodeId,
+            targetPortId: target.portId,
+            signalType: source.signalType
+        )
+
+        do {
+            try connectEdge(edge)
+            return nil
+        } catch GraphError.invalidConnection(let message) {
+            return message
+        } catch {
+            return error.localizedDescription
+        }
     }
     
     // MARK: - Serialization
 
     func serialize() -> SerializedGraph {
+        #if DEBUG
         let positions = nodes.values.map { ["id": $0.id.uuidString, "x": $0.x, "y": $0.y] }
         print("NodeGraph.serialize: nodeCount=\(nodes.count) edgeCount=\(edges.count) positions=\(positions)")
+        #else
+        print("NodeGraph.serialize: nodeCount=\(nodes.count) edgeCount=\(edges.count)")
+        #endif
 
         return SerializedGraph(
             version: "2.0.0",
@@ -733,13 +928,21 @@ final class NodeGraph: ObservableObject {
             guard var node = NodeFactory.createNode(
                 id: serialized.id,
                 type: serialized.nodeType,
-                params: params
+                params: params,
+                bridge: aceBridge,
+                audioInputBuffer: audioInputBuffer
             ) else {
                 throw GraphError.unknownNodeType(serialized.nodeType)
             }
             node.name = serialized.displayName
             node.x = serialized.position.x
             node.y = serialized.position.y
+            if let stageKind = serialized.stageKind {
+                (node as? BaseGraphNode)?.stageKind = stageKind
+            }
+            if let macro = node as? MacroNode {
+                macro.migrateStageKindFromMetadataIfNeeded()
+            }
             nodes[node.id] = node
         }
 
@@ -757,6 +960,7 @@ final class NodeGraph: ObservableObject {
         macroBindings = data.macroBindings
         viewport = data.viewport
 
+        wireNeuralNodes()
         objectWillChange.send()
     }
     
@@ -805,501 +1009,29 @@ final class NodeGraph: ObservableObject {
 }
 
 // MARK: - Serialization Types
+//
+// Moved to `Graph/GraphSerialization.swift` for P3.13 (NodeGraph.swift
+// vertedero cleanup). `SerializedGraph`, `SerializedNode`, `CodableValue`,
+// and `GraphViewport` are plain top-level Codable value types with no
+// NodeGraph private-state coupling, so they lift out with no API or
+// behavior change.
 
-struct SerializedGraph: Codable {
-    let version: String
-    let nodes: [SerializedNode]
-    let edges: [GraphEdge]
-    let exposedControls: [ExposedControl]
-    let macroBindings: [MacroBinding]
-    let viewport: GraphViewport
-}
+// (Serialization type bodies — SerializedNode, CodableValue, GraphViewport —
+//  now live in `Graph/GraphSerialization.swift`.)
 
-struct SerializedNode: Codable {
-    let id: UUID
-    let nodeType: String
-    let displayName: String
-    let parameters: [String: CodableValue]
-    let position: CGPoint
-
-    init(from node: any GraphNode) {
-        self.id = node.id
-        self.nodeType = node.nodeType
-        self.displayName = node.name
-
-        // Convert parameters to Codable-compatible values
-        var codableParams: [String: CodableValue] = [:]
-        for (key, value) in node.parameters {
-            if let v = value as? Float {
-                codableParams[key] = .float(v)
-            } else if let v = value as? Int {
-                codableParams[key] = .int(v)
-            } else if let v = value as? String {
-                codableParams[key] = .string(v)
-            } else if let v = value as? Bool {
-                codableParams[key] = .bool(v)
-            }
-        }
-        self.parameters = codableParams
-
-        // Store actual node position
-        self.position = CGPoint(x: node.x, y: node.y)
-    }
-
-    // MARK: - Backward-Compatible Codable
-    //
-    // The KickstartTemplate.json ships with `"position": [x, y]` (array format),
-    // but Swift 5.9+'s SDK `CGPoint: Codable` uses keyed form `{"x":..., "y":...}`.
-    // Without this custom decoder the template fails to load silently and the
-    // app falls through to the emergency graph. We accept either format on
-    // decode and emit the object form on encode (matches SDK default).
-
-    private enum CodingKeys: String, CodingKey {
-        case id, nodeType, displayName, parameters, position
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try container.decode(UUID.self, forKey: .id)
-        self.nodeType = try container.decode(String.self, forKey: .nodeType)
-        self.displayName = try container.decode(String.self, forKey: .displayName)
-        self.parameters = try container.decode([String: CodableValue].self, forKey: .parameters)
-
-        // Position: accept both [x, y] and {"x":..., "y":...}
-        if var arr = try? container.nestedUnkeyedContainer(forKey: .position) {
-            let x = try arr.decode(CGFloat.self)
-            let y = try arr.decode(CGFloat.self)
-            self.position = CGPoint(x: x, y: y)
-        } else {
-            self.position = try container.decode(CGPoint.self, forKey: .position)
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(id, forKey: .id)
-        try container.encode(nodeType, forKey: .nodeType)
-        try container.encode(displayName, forKey: .displayName)
-        try container.encode(parameters, forKey: .parameters)
-        try container.encode(position, forKey: .position)
-    }
-}
-
-/// Type-safe wrapper for parameter values in serialization.
-enum CodableValue: Codable {
-    case float(Float)
-    case int(Int)
-    case string(String)
-    case bool(Bool)
-
-    var anyValue: Any {
-        switch self {
-        case .float(let v): return v
-        case .int(let v): return v
-        case .string(let v): return v
-        case .bool(let v): return v
-        }
-    }
-
-    // Custom Codable implementation for simple JSON format: {"float": 65.41}
-    private enum CodingKeys: String, CodingKey {
-        case float, int, string, bool
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        if let value = try? container.decode(Float.self, forKey: .float) {
-            self = .float(value)
-        } else if let value = try? container.decode(Int.self, forKey: .int) {
-            self = .int(value)
-        } else if let value = try? container.decode(String.self, forKey: .string) {
-            self = .string(value)
-        } else if let value = try? container.decode(Bool.self, forKey: .bool) {
-            self = .bool(value)
-        } else {
-            throw DecodingError.typeMismatch(CodableValue.self, DecodingError.Context(
-                codingPath: decoder.codingPath,
-                debugDescription: "Expected one of: float, int, string, bool"
-            ))
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        switch self {
-        case .float(let v): try container.encode(v, forKey: .float)
-        case .int(let v): try container.encode(v, forKey: .int)
-        case .string(let v): try container.encode(v, forKey: .string)
-        case .bool(let v): try container.encode(v, forKey: .bool)
-        }
-    }
-}
-
-struct GraphViewport: Codable {
-    var x: Float = 0
-    var y: Float = 0
-    var zoom: Float = 1.0
-}
-
-// MARK: - Exposed Control
-
-/// Metadata for a node parameter promoted to the PERFORM surface.
-struct ExposedControl: Identifiable, Codable {
-    let id: UUID
-    let nodeId: UUID
-    let paramId: String
-    let label: String
-    let controlType: ControlWidget
-    let defaultValue: Float
-    var midiCC: Int?
-    var position: Int
-
-    /// Internal Codable storage for the range.
-    private var codableRange: CodableFloatRange
-
-    /// Public accessor for the parameter range.
-    var range: ClosedRange<Float> {
-        get { codableRange.range }
-        set { codableRange = newValue.codable }
-    }
-
-    /// Initialize with all properties.
-    init(
-        id: UUID = UUID(),
-        nodeId: UUID,
-        paramId: String,
-        label: String,
-        controlType: ControlWidget,
-        range: ClosedRange<Float>,
-        defaultValue: Float,
-        midiCC: Int? = nil,
-        position: Int
-    ) {
-        self.id = id
-        self.nodeId = nodeId
-        self.paramId = paramId
-        self.label = label
-        self.controlType = controlType
-        self.codableRange = range.codable
-        self.defaultValue = defaultValue
-        self.midiCC = midiCC
-        self.position = position
-    }
-
-    // MARK: - Backward-Compatible Codable
-
-    private enum CodingKeys: String, CodingKey {
-        case id, nodeId, paramId, label, controlType, defaultValue, midiCC, position
-        case codableRange, range
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-
-        id = try container.decode(UUID.self, forKey: .id)
-        nodeId = try container.decode(UUID.self, forKey: .nodeId)
-        paramId = try container.decode(String.self, forKey: .paramId)
-        label = try container.decode(String.self, forKey: .label)
-        controlType = try container.decode(ControlWidget.self, forKey: .controlType)
-        defaultValue = try container.decode(Float.self, forKey: .defaultValue)
-        midiCC = try container.decodeIfPresent(Int.self, forKey: .midiCC)
-        position = try container.decode(Int.self, forKey: .position)
-
-        // Try new format first (codableRange)
-        if let range = try? container.decode(CodableFloatRange.self, forKey: .codableRange) {
-            codableRange = range
-        } else if let rangeArray = try? container.decode([Float].self, forKey: .range),
-                  rangeArray.count >= 2 {
-            // Legacy format: range: [lower, upper]
-            codableRange = CodableFloatRange(lowerBound: rangeArray[0], upperBound: rangeArray[1])
-        } else {
-            throw DecodingError.dataCorruptedError(forKey: .range, in: container, debugDescription: "Cannot decode range for ExposedControl")
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(id, forKey: .id)
-        try container.encode(nodeId, forKey: .nodeId)
-        try container.encode(paramId, forKey: .paramId)
-        try container.encode(label, forKey: .label)
-        try container.encode(controlType, forKey: .controlType)
-        try container.encode(defaultValue, forKey: .defaultValue)
-        try container.encodeIfPresent(midiCC, forKey: .midiCC)
-        try container.encode(position, forKey: .position)
-        try container.encode(codableRange, forKey: .codableRange)
-    }
-}
-
-enum ControlWidget: String, Codable {
-    case knob
-    case fader
-    case xyPad
-    case toggle
-    case dropdown
-}
-
-// MARK: - Macro Binding
-
-/// Maps one exposed control to multiple node parameters with scaling.
-struct MacroBinding: Codable, Identifiable {
-    let id: UUID
-    let exposedControlId: UUID
-    let targets: [MacroTarget]
-    
-    init(id: UUID = UUID(), exposedControlId: UUID, targets: [MacroTarget]) {
-        self.id = id
-        self.exposedControlId = exposedControlId
-        self.targets = targets
-    }
-}
-
-struct MacroTarget: Codable {
-    let nodeId: UUID
-    let paramId: String
-    let curve: ScalingCurve
-
-    // Internal Codable storage for ranges
-    private var codableInputRange: CodableFloatRange
-    private var codableOutputRange: CodableFloatRange
-
-    /// Input range for scaling.
-    var inputRange: ClosedRange<Float> {
-        get { codableInputRange.range }
-        set { codableInputRange = newValue.codable }
-    }
-
-    /// Output range for scaling.
-    var outputRange: ClosedRange<Float> {
-        get { codableOutputRange.range }
-        set { codableOutputRange = newValue.codable }
-    }
-
-    init(
-        nodeId: UUID,
-        paramId: String,
-        inputRange: ClosedRange<Float>,
-        outputRange: ClosedRange<Float>,
-        curve: ScalingCurve
-    ) {
-        self.nodeId = nodeId
-        self.paramId = paramId
-        self.codableInputRange = inputRange.codable
-        self.codableOutputRange = outputRange.codable
-        self.curve = curve
-    }
-
-    // MARK: - Backward-Compatible Codable
-
-    private enum CodingKeys: String, CodingKey {
-        case nodeId, paramId, curve
-        case codableInputRange, codableOutputRange
-        // Legacy keys
-        case inputLowerBound, inputUpperBound, outputLowerBound, outputUpperBound
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-
-        nodeId = try container.decode(UUID.self, forKey: .nodeId)
-        paramId = try container.decode(String.self, forKey: .paramId)
-        curve = try container.decode(ScalingCurve.self, forKey: .curve)
-
-        // Try new format first
-        if let inRange = try? container.decode(CodableFloatRange.self, forKey: .codableInputRange),
-           let outRange = try? container.decode(CodableFloatRange.self, forKey: .codableOutputRange) {
-            codableInputRange = inRange
-            codableOutputRange = outRange
-        } else {
-            // Fall back to legacy format
-            let inLower = try container.decode(Float.self, forKey: .inputLowerBound)
-            let inUpper = try container.decode(Float.self, forKey: .inputUpperBound)
-            let outLower = try container.decode(Float.self, forKey: .outputLowerBound)
-            let outUpper = try container.decode(Float.self, forKey: .outputUpperBound)
-            codableInputRange = CodableFloatRange(lowerBound: inLower, upperBound: inUpper)
-            codableOutputRange = CodableFloatRange(lowerBound: outLower, upperBound: outUpper)
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(nodeId, forKey: .nodeId)
-        try container.encode(paramId, forKey: .paramId)
-        try container.encode(curve, forKey: .curve)
-        try container.encode(codableInputRange, forKey: .codableInputRange)
-        try container.encode(codableOutputRange, forKey: .codableOutputRange)
-    }
-}
-
-enum ScalingCurve: String, Codable {
-    case linear
-    case exponential
-    case logarithmic
-    case inverted
-    case sCurve
-}
-
-// MARK: - Graph Errors
-
-enum GraphError: Error, LocalizedError {
-    case unknownNodeType(String)
-    case invalidConnection(String)
-    case nodeNotFound(UUID)
-    case edgeNotFound(UUID)
-    case cycleDetected(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .unknownNodeType(let type):
-            return "Unknown node type: \(type)"
-        case .invalidConnection(let reason):
-            return "Invalid connection: \(reason)"
-        case .nodeNotFound(let id):
-            return "Node not found: \(id)"
-        case .edgeNotFound(let id):
-            return "Edge not found: \(id)"
-        case .cycleDetected(let reason):
-            return "Cycle detected: \(reason)"
-        }
-    }
-}
+// MARK: - Exposed Control / Macro Binding / Graph Errors
+//
+// Moved to `Graph/GraphSupportTypes.swift` for P3.13 (NodeGraph.swift
+// vertedero cleanup). `ExposedControl`, `ControlWidget`, `MacroBinding`,
+// `MacroTarget`, `ScalingCurve`, and `GraphError` are plain top-level
+// Codable value types / error enum with no NodeGraph private-state
+// coupling, so they lift out with no API or behavior change.
 
 // MARK: - Node Factory
-
-/// Factory for creating nodes from type strings.
-/// Extended as new node types are implemented.
-enum NodeFactory {
-    static func createNode(
-        id: UUID,
-        type: String,
-        params: [String: Any],
-        mainMixer: AVAudioMixerNode? = nil,
-        inputNode: AVAudioInputNode? = nil
-    ) -> (any GraphNode)? {
-        switch type {
-        case "oscillator":
-            return OscillatorNode(id: id, params: params)
-        case "koenig_seed":
-            return KoenigSeedNode(id: id, params: params)
-        case "markov_sequencer":
-            return MarkovSequencerNode(id: id, params: params)
-        case "gesture_recorder":
-            return GestureRecorderNode(id: id, params: params)
-        case "noise":
-            return NoiseNode(id: id, params: params)
-        case "silence":
-            return SilenceNode(id: id, params: params)
-        case "audio_input":
-            return AudioInputNode(id: id, params: params, engineInputNode: inputNode)
-        case "mixer":
-            return MixerNode(id: id, params: params)
-        case "master_output":
-            let name = params["displayName"] as? String ?? "Master Out"
-            let x = params["x"] as? Double ?? 0
-            let y = params["y"] as? Double ?? 0
-            let node = MasterOutputNode(id: id, name: name, x: x, y: y)
-            // Copy any volume/threshold params
-            if let volume = params["volume"] as? Float {
-                node.setParam("volume", value: volume)
-            }
-            if let threshold = params["limiterThreshold"] as? Float {
-                node.setParam("limiterThreshold", value: threshold)
-            }
-            return node
-        case "passthrough":
-            return PassthroughNode(id: id, params: params)
-        case "fft_analysis":
-            return FFTAnalysisNode(id: id, params: params)
-        case "semantic_eq":
-            return SemanticEQNode(id: id, params: params)
-        case "spectral_saturation":
-            return SpectralSaturationNode(id: id, params: params)
-        case "spectral_noise":
-            return SpectralNoiseNode(id: id, params: params)
-        case "spectral_memory":
-            return SpectralMemoryNode(id: id, params: params)
-        case "spectral_granularity":
-            return SpectralGranularityNode(id: id, params: params)
-        case "spectral_freeze":
-            return SpectralFreezeNode(id: id, params: params)
-        case "ifft_synthesis":
-            return IFFTSynthesisNode(id: id, params: params)
-        case "ladder_filter":
-            return LadderFilterNode(id: id, params: params)
-        case "comb_filter":
-            return CombFilterNode(id: id, params: params)
-        case "tunable_resonator":
-            return TunableResonatorNode(id: id, params: params)
-        case "bit_crusher":
-            return BitCrusherNode(id: id, params: params)
-        case "waveshaper":
-            return WaveshaperNode(id: id, params: params)
-        case "delay_line":
-            return DelayLineNode(id: id, params: params)
-        case "ace_step_inference":
-            return ACEStepInferenceNode(id: id, params: params)
-        case "prompt_engine":
-            return PromptEngineNode(id: id, params: params)
-        case "prompt_bank":
-            return PromptBankNode(id: id)
-        case "macro":
-            // Try complex deserialization first (for saved graphs with full macro data)
-            if let name = params["name"] as? String,
-               let _ = params["internalGraph"] as? [String: Any],
-               let exposedPortsData = params["exposedPorts"] as? [[String: Any]],
-               let portMappingsData = params["portMappings"] as? [String: [String: String]] {
-
-                let internalGraph = NodeGraph(autoSaveEnabled: false)
-                let exposedPorts = exposedPortsData.compactMap { portData -> NodePort? in
-                    guard let id = portData["id"] as? String,
-                          let label = portData["label"] as? String,
-                          let signalTypeRaw = portData["signalType"] as? String,
-                          let directionRaw = portData["direction"] as? String,
-                          let signalType = SignalType(rawValue: signalTypeRaw),
-                          let direction = PortDirection(rawValue: directionRaw) else {
-                        return nil
-                    }
-                    return NodePort(id: id, label: label, signalType: signalType, direction: direction)
-                }
-                
-                var portMappings: [String: (nodeId: UUID, portId: String)] = [:]
-                for (externalPortId, mapping) in portMappingsData {
-                    guard let nodeIdString = mapping["nodeId"],
-                          let nodeId = UUID(uuidString: nodeIdString),
-                          let portId = mapping["portId"] else {
-                        continue
-                    }
-                    portMappings[externalPortId] = (nodeId, portId)
-                }
-                
-                return MacroNode(
-                    id: id,
-                    name: name,
-                    internalGraph: internalGraph,
-                    exposedPorts: exposedPorts,
-                    portMappings: portMappings
-                )
-            }
-            // Fallback to simple deserialization (uses MacroNode's convenience init)
-            return MacroNode(id: id, params: params)
-        case "feedback_loop":
-            return FeedbackLoopNode(id: id, params: params)
-        case "agitation":
-            return AgitationNode(id: id, params: params)
-        case "peak":
-            return PeakNode(id: id, params: params)
-        case "manual_control":
-            return ManualControlNode(id: id, params: params)
-        case "meta_parameter":
-            return MetaParameterNode(id: id, params: params)
-        case "step_sequencer":
-            return SequencerNode(id: id, params: params)
-        case "spectral_analyzer":
-            return SpectralAnalyzerNode(id: id, params: params)
-        case "spectral_chain":
-            return SpectralChainNode(id: id, params: params)
-        default:
-            return nil
-        }
-    }
-}
+//
+// Moved to `Graph/NodeFactory.swift` for P3.13 (NodeGraph.swift vertedero
+// cleanup). `NodeFactory` is a caseless enum used as a namespace for the
+// static `createNode` switch — it closes over no NodeGraph private state,
+// so it lifts out with no API or behavior change. `NodeGraph.addNode` and
+// `NodeGraph.deserialize(_:)` continue to call `NodeFactory.createNode(...)`
+// unchanged.

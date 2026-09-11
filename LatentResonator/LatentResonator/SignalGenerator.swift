@@ -190,6 +190,23 @@ final class SignalGenerator {
     private var cachedKPulses: Int = 0
     private var cachedKSteps: Int = 0
 
+    /// Manifesto gate ("Listen before you adjust"): false until the
+    /// performer manually arms the seed via `triggerKoenigSeed()`
+    /// (K key / UI button / MIDI). Defaults `false` so START does NOT
+    /// auto-inject — `renderKoenigSeedStreaming` returns silence until
+    /// armed. Read on the audio thread, written on the main thread;
+    /// follows the same access pattern as the rest of this struct's
+    /// mutable state.
+    var koenigArmed: Bool = false
+
+    /// Toggle the Koenig seed arm state. Called from `OscillatorNode.triggerSeed()`.
+    /// Returns the new armed state for UI feedback.
+    @discardableResult
+    func triggerKoenigSeed() -> Bool {
+        koenigArmed.toggle()
+        return koenigArmed
+    }
+
     // MARK: - Real-Time Render (Audio Thread)
 
     /// Fill raw audio buffer pointers for use in an AVAudioSourceNode render
@@ -253,6 +270,11 @@ final class SignalGenerator {
         frameCount: Int,
         sampleRate: Double
     ) {
+        // Manifesto ("Listen before you adjust"): the seed does NOT auto-fire
+        // on START. Until the performer arms it via `triggerKoenigSeed()`,
+        // emit silence. The buffer is already zeroed by `renderInto`.
+        guard koenigArmed else { return }
+
         // Recache rhythm pattern when parameters change
         if euclideanPulses != cachedKPulses || euclideanSteps != cachedKSteps {
             cachedRhythm = KoenigSeedGenerator.euclideanRhythm(

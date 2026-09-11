@@ -287,6 +287,17 @@ class ACEStepWrapper:
         use_erg_tag: bool = True,
         use_erg_lyric: bool = True,
         use_erg_diffusion: bool = True,
+        # --- LR §6.1 "circumventing the LM" + task routing ---
+        # `thinking` (LR UI): when False, bypass the LM planner by disabling
+        # all three ERG guidance channels — prompts reach the DiT unmediated.
+        # `task_type` (LR UI): LR vocabulary → ACE-Step `task` param.
+        #   "cover"    → audio2audio (default; ref_audio feedback loop = §3.3)
+        #   "repaint"  → repaint (src_audio + repaint_start/end window)
+        #   "extend"   → extend (continues past src_audio end)
+        #   "edit"     → edit (edit_target_prompt rewrites a segment)
+        #   "lego"/"extract"/"complete" → reserved (log + fall back to cover)
+        thinking: bool = True,
+        task_type: str = "cover",
     ) -> np.ndarray:
         """
         Run one inference cycle through ACE-Step 1.5.
@@ -319,6 +330,14 @@ class ACEStepWrapper:
             use_erg_tag: Enable tag-based guidance routing.
             use_erg_lyric: Enable lyric-based guidance routing.
             use_erg_diffusion: Enable diffusion-based guidance routing.
+            thinking: LR §6.1 "circumventing the LM". When False, all three ERG
+                channels are disabled so prompts reach the DiT unmediated by
+                the LM planner. Overrides the per-channel flags above.
+            task_type: LR vocabulary mapped to ACE-Step `task`. "cover" (default)
+                runs audio2audio with ref_audio feedback (§3.3). "repaint" /
+                "extend" / "edit" route to the matching ACE-Step task using the
+                input audio as `src_audio`. Other values are reserved and fall
+                back to "cover" with a warning.
 
         Returns:
             Processed audio as float32 numpy array
@@ -326,6 +345,30 @@ class ACEStepWrapper:
         if not self.is_loaded or self.model is None:
             # Passthrough when model not loaded
             return audio_samples
+
+        # §6.1 — thinking=False bypasses the LM planner by disabling all ERG
+        # guidance channels. Prompts are injected directly into the DiT.
+        if not thinking:
+            use_erg_tag = False
+            use_erg_lyric = False
+            use_erg_diffusion = False
+
+        # LR task vocabulary → ACE-Step task param.
+        # "cover" keeps audio2audio (the §3.3 feedback loop); repaint/extend/edit
+        # route to their native ACE-Step paths using the input as src_audio.
+        _LR_TASK_MAP = {
+            "cover": None,           # audio2audio auto-set below
+            "repaint": "repaint",
+            "extend": "extend",
+            "edit": "edit",
+        }
+        resolved_task = _LR_TASK_MAP.get(task_type)
+        if resolved_task is None and task_type != "cover":
+            logging.warning(
+                f"task_type='{task_type}' is reserved (no ACE-Step mapping yet); "
+                "falling back to 'cover' (audio2audio)."
+            )
+        use_repaint_path = resolved_task in ("repaint", "extend", "edit")
 
         # Per-step denoise strength: 0 = passthrough; (0,1] = run that fraction of steps.
         # Mapping: effective_steps = max(1, round(num_steps * denoise_strength)).
@@ -360,17 +403,30 @@ class ACEStepWrapper:
                     use_erg_tag=use_erg_tag,
                     use_erg_lyric=use_erg_lyric,
                     use_erg_diffusion=use_erg_diffusion,
-                    audio2audio_enable=True,
-                    ref_audio_strength=input_strength,
-                    ref_audio_input=tmp_input,
                     retake_variance=retake_variance,
                     save_path=tmp_dir,
                     batch_size=1,
                 )
 
+                if use_repaint_path:
+                    # repaint/extend/edit use src_audio_path + task; they do NOT
+                    # set audio2audio_enable (which would override task="audio2audio").
+                    infer_kwargs["task"] = resolved_task
+                    infer_kwargs["src_audio_path"] = tmp_input
+                    if resolved_task == "repaint":
+                        infer_kwargs["repaint_start"] = 0
+                        infer_kwargs["repaint_end"] = int(audio_duration)
+                else:
+                    # "cover" — the §3.3 feedback loop. audio2audio_enable + ref_audio
+                    # auto-set task="audio2audio" inside ACEStepPipeline.__call__.
+                    infer_kwargs["audio2audio_enable"] = True
+                    infer_kwargs["ref_audio_strength"] = input_strength
+                    infer_kwargs["ref_audio_input"] = tmp_input
+
                 logging.info(
-                    f"Inference: steps={effective_steps} (denoise={denoise_strength:.2f}), cfg={guidance_scale}, "
-                    f"strength={input_strength}, omega={omega_scale}, "
+                    f"Inference: task='{task_type}'→{resolved_task or 'audio2audio'}, "
+                    f"thinking={thinking}, steps={effective_steps} (denoise={denoise_strength:.2f}), "
+                    f"cfg={guidance_scale}, strength={input_strength}, omega={omega_scale}, "
                     f"interval={guidance_interval}, decay={guidance_interval_decay}, "
                     f"retake_var={retake_variance}, seed={seed}"
                 )
@@ -706,9 +762,16 @@ def infer():
         input_strength = safe_float(data.get("input_strength"), 0.6)
         audio_duration = safe_float(data.get("audio_duration"), 10.0)
         
-        # Low-latency mode: cap inference steps for real-time performance
+        # Low-latency mode: cap inference steps for real-time performance.
+        # Honor the profile-specific --max-steps (Ultra=4, Balanced=8, see
+        # BridgeProcessManager.PerformanceProfile) when the launch args set
+        # one; PERF_CONFIG["max_steps"] was previously computed and stored
+        # but never read here, so every performance-mode launch silently
+        # capped to the same hardcoded 6 regardless of profile -- Ultra's
+        # "4 steps, faster first land" promise was dead on arrival.
         if LOW_LATENCY_MODE:
-            num_steps = min(num_steps, 6)
+            step_cap = PERF_CONFIG.get("max_steps") or 6
+            num_steps = min(num_steps, step_cap)
             logging.info(f"Low-latency mode: capped steps to {num_steps}")
 
         shift_raw = safe_float(data.get("shift"), 5.0)
@@ -736,6 +799,17 @@ def infer():
         # Per-step denoise strength (0 = no denoise, 1 = full). App skips bridge when 0.
         denoise_strength = max(0.0, min(1.0, safe_float(data.get("denoise_strength"), 1.0)))
 
+        # §6.1 "circumventing the LM": thinking=False bypasses the LM planner.
+        # Default True (LRConstants.aceThinkingDefault is false, but the server
+        # defaults to True to preserve ACE-Step's native behavior unless the app
+        # explicitly requests bypass).
+        thinking = data.get("thinking", True)
+        if not isinstance(thinking, bool):
+            thinking = safe_int(thinking, 1) != 0
+
+        # LR task vocabulary → ACE-Step task routing (see ACEStepWrapper.infer).
+        task_type = data.get("task_type") if isinstance(data.get("task_type"), str) else "cover"
+
         # Min guidance scale — floor during CFG decay
         min_guidance_scale = max(1.0, guidance_scale * 0.2)
 
@@ -760,6 +834,8 @@ def infer():
             retake_variance=retake_variance,
             scheduler_type="euler",
             cfg_type="apg",
+            thinking=thinking,
+            task_type=task_type,
         )
 
         duration_ms = (time.time() - t0) * 1000.0

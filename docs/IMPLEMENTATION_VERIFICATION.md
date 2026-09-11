@@ -1,4 +1,7 @@
 # Graph-First Migration: Implementation Verification Report
+
+> **Superseded.** Describes `AudioGraphMapper`, `LRConstants.useGraphAudioPath`, and WKWebView patch sync — none of which ship in the current pull-render architecture. **Source of truth:** `LatentResonator/LatentResonator/Graph/` (start at `NodeGraph.swift`). See also `README.md` and `.cursor/skills/v2-node-graph/SKILL.md`.
+
 **Date**: 2026-04-03  
 **Session**: b296b795-c49d-4e0a-8274-ac76752b94ee  
 **Status**: ✅ BUILD SUCCEEDED  

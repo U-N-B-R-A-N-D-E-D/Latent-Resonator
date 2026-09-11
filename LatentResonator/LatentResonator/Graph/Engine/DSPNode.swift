@@ -26,8 +26,12 @@ import Foundation
 /// - `inputs.count` matches the audio-input port count of this node, in
 ///   stable port-id order (so `MixerNode`'s `in0`, `in1`, … indices line
 ///   up with the `inputs` buffer).
-/// - `controls` carries control-rate values keyed by control-input port id,
-///   evaluated once per render block by `ControlGraphEvaluator`.
+/// The single control-rate contract is `ControlGraphEvaluator` →
+/// `setParameter` → `getParam` per render block, eventual-consistent by
+/// design. A second `controls: [String: Float]` path was trialed in
+/// `ExecutionPlan.Step` but was always initialized `[:]` and therefore
+/// never used; it was removed on 2026-07-27 perimeter closure to keep
+/// one unambiguous control path.
 protocol DSPNode: AnyObject {
 
     /// Stable identity matching the owning `GraphNode.id`. Used by the
@@ -46,13 +50,11 @@ protocol DSPNode: AnyObject {
     ///     (no leftover garbage from previous renders).
     ///   - frameCount: number of samples to process.
     ///   - sampleRate: the engine's sample rate (typically 48 000).
-    ///   - controls: control-rate values keyed by port id; may be empty.
     func render(
         inputs: UnsafeBufferPointer<AudioBuffer>,
         output: AudioBuffer,
         frameCount: Int,
-        sampleRate: Double,
-        controls: [String: Float]
+        sampleRate: Double
     )
 
     /// Clears any internal DSP state (filter accumulators, delay lines,

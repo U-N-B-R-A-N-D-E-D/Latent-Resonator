@@ -2,90 +2,96 @@ import SwiftUI
 
 // MARK: - Cable Layer
 //
-// Sits underneath the node cards on the patch canvas and draws every
-// cable as a horizontal-tangent Bézier. Cable color comes from the
-// edge's `SignalType` (audio = cyan, control = orange, gate = green,
-// trigger = red), thickness from the lock mode (perform mode dims and
-// thins cables so the focus shifts to the live controls).
-//
-// Port-to-pixel resolution is done at draw time using the
-// `GeometryProxy` the canvas hosts, applying the same coordinate space
-// every port chip reports through `PatchPortLocationsKey`.
+// Draws patch cables underneath node cards. When unlocked, cables accept
+// secondary-click to delete (Envion / Pure Data patch-cord model).
 
 private typealias DS = LRConstants.DS
 
 struct CableLayer: View {
 
     let edges: [GraphEdge]
-    let portLocations: [PatchPortLocation]
     let lockMode: PatchLockMode
-    let geometry: GeometryProxy
+    var previewDrag: PatchCableDragState? = nil
+    var resolvedCenters: [PatchPortRef: CGPoint] = [:]
+    var onSelectEdge: ((UUID) -> Void)? = nil
 
     var body: some View {
-        Canvas { context, _ in
-            for edge in edges {
-                guard let source = portLocation(
-                    nodeId: edge.sourceNodeId,
-                    portId: edge.sourcePortId,
-                    direction: .output
-                ) else { continue }
-
-                guard let target = portLocation(
-                    nodeId: edge.targetNodeId,
-                    portId: edge.targetPortId,
-                    direction: .input
-                ) else { continue }
-
-                let p0 = geometry[source.anchor]
-                let p1 = geometry[target.anchor]
-                let path = bezier(from: p0, to: p1)
-                let color = edge.signalType.color.opacity(opacity(for: edge.signalType))
-                context.stroke(
-                    path,
-                    with: .color(color),
-                    style: StrokeStyle(
-                        lineWidth: lineWidth(for: edge.signalType),
-                        lineCap: .round,
-                        lineJoin: .round
+        ZStack {
+            Canvas { context, _ in
+                for edge in edges {
+                    guard let path = path(for: edge) else { continue }
+                    let color = edge.signalType.color.opacity(opacity(for: edge.signalType))
+                    context.stroke(
+                        path,
+                        with: .color(color),
+                        style: StrokeStyle(
+                            lineWidth: lineWidth(for: edge.signalType),
+                            lineCap: .round,
+                            lineJoin: .round
+                        )
                     )
-                )
+                }
 
-                // Subtle endpoint dots, matched to the cable color.
-                // Helps when two cables of different types meet at the
-                // same port chip (port chips are only 11pt wide).
-                context.fill(Path(ellipseIn: CGRect(
-                    x: p0.x - 2, y: p0.y - 2, width: 4, height: 4
-                )), with: .color(color))
-                context.fill(Path(ellipseIn: CGRect(
-                    x: p1.x - 2, y: p1.y - 2, width: 4, height: 4
-                )), with: .color(color))
+                if let preview = previewDrag,
+                   let start = resolvedCenters[preview.source] {
+                    let previewPath = bezier(from: start, to: preview.currentPoint)
+                    context.stroke(
+                        previewPath,
+                        with: .color(preview.source.signalType.color.opacity(0.9)),
+                        style: StrokeStyle(lineWidth: 2.4, lineCap: .round, dash: [6, 4])
+                    )
+                }
+            }
+            .allowsHitTesting(false)
+
+            if lockMode == .unlocked {
+                cableHitOverlay
             }
         }
-        .allowsHitTesting(false)
         .animation(.easeOut(duration: 0.15), value: lockMode)
+    }
+
+    /// Invisible hit targets along each cable for secondary-click delete.
+    private var cableHitOverlay: some View {
+        ForEach(edges, id: \.id) { edge in
+            if let path = path(for: edge) {
+                path
+                    .stroke(Color.clear, lineWidth: 14)
+                    .contentShape(path.strokedPath(StrokeStyle(lineWidth: 14, lineCap: .round)))
+                    .onTapGesture(count: 2) {
+                        onSelectEdge?(edge.id)
+                    }
+                    .help("Double-click to delete cable")
+            }
+        }
     }
 
     // MARK: - Lookup
 
-    private func portLocation(
-        nodeId: UUID,
-        portId: String,
-        direction: PortDirection
-    ) -> PatchPortLocation? {
-        portLocations.first { loc in
-            loc.nodeId == nodeId
-                && loc.portId == portId
-                && loc.direction == direction
-        }
+    private func path(for edge: GraphEdge) -> Path? {
+        let sourceRef = PatchPortRef(
+            nodeId: edge.sourceNodeId,
+            portId: edge.sourcePortId,
+            direction: .output,
+            signalType: edge.signalType
+        )
+        let targetRef = PatchPortRef(
+            nodeId: edge.targetNodeId,
+            portId: edge.targetPortId,
+            direction: .input,
+            signalType: edge.signalType
+        )
+        #if DEBUG
+        let hasSource = resolvedCenters[sourceRef] != nil
+        let hasTarget = resolvedCenters[targetRef] != nil
+        print("[Cable] edge \(edge.id.uuidString.prefix(8)) sourceHit=\(hasSource) targetHit=\(hasTarget) totalCenters=\(resolvedCenters.count)")
+        #endif
+        guard let p0 = resolvedCenters[sourceRef], let p1 = resolvedCenters[targetRef] else { return nil }
+        return bezier(from: p0, to: p1)
     }
 
     // MARK: - Bezier shape
 
-    /// Horizontal-tangent Bézier (the patch-cable look). The control
-    /// points push out perpendicular to the source/target edges, scaled
-    /// with horizontal distance so short cables stay tight and long
-    /// cables stay legible. The minimum tangent stops cables from
-    /// collapsing to a straight line when source ≈ target.
     private func bezier(from p0: CGPoint, to p1: CGPoint) -> Path {
         let dx = abs(p1.x - p0.x)
         let tangent = max(50, dx * 0.5)

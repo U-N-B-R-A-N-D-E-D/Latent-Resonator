@@ -22,6 +22,14 @@ struct NodeCardChrome<Content: View>: View {
     let footerText: String?
     @ViewBuilder let content: () -> Content
 
+    @EnvironmentObject var portInteractionHandler: PortInteractionHandler
+    @Environment(\.nodeDragHandler) private var nodeDragHandler
+    @EnvironmentObject var selectionHandler: CanvasSelectionHandler
+
+    private var isSelected: Bool {
+        selectionHandler.selectedNodeIds.contains(node.id)
+    }
+
     private var inputPorts: [NodePort] {
         node.ports.filter { $0.direction == .input }
     }
@@ -34,6 +42,18 @@ struct NodeCardChrome<Content: View>: View {
         node.category
     }
 
+    private var stageKind: StageKind? {
+        node.effectiveStageKind
+    }
+
+    private var stageAccent: Color {
+        stageKind?.accentColor ?? category.color.opacity(0.55)
+    }
+
+    private var isHero: Bool {
+        node.isResonatorHero
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -42,44 +62,74 @@ struct NodeCardChrome<Content: View>: View {
                 footer(text: footerText)
             }
         }
-        .frame(width: NodeCardMetrics.minWidth)
+        .frame(width: isHero ? NodeCardMetrics.minWidth + 8 : NodeCardMetrics.minWidth)
         .fixedSize(horizontal: false, vertical: true)
         .background(cardBackground)
         .overlay(cardBorder)
-        .shadow(color: shadowColor, radius: isFocused ? 14 : 6, y: 2)
+        .overlay(selectionBorder)
+        .background(
+            // Report the card's bounding frame in the named canvas space so
+            // marquee selection and zoom-to-fit can use real rendered bounds.
+            GeometryReader { cardGeometry in
+                let frame = cardGeometry.frame(in: .named(PatchCanvasSpace.name))
+                Color.clear
+                    .preference(
+                        key: PatchCardFramesKey.self,
+                        value: [PatchCardFrame(nodeId: node.id, frame: frame)]
+                    )
+            }
+        )
+        .clipShape(RoundedRectangle(cornerRadius: NodeCardMetrics.cornerRadius))
+        .shadow(color: shadowColor, radius: isFocused ? 14 : (isHero ? 10 : 6), y: 2)
         .animation(.easeOut(duration: 0.12), value: isFocused)
         .animation(.easeOut(duration: 0.18), value: lockMode)
+        .gesture(nodeDragGesture())
     }
 
     // MARK: - Sections
 
     private var header: some View {
         HStack(spacing: 6) {
-            Image(systemName: category.icon)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(category.color)
-            Text(node.name)
-                .font(DS.font(DS.fontCaption, weight: .bold))
-                .foregroundColor(DS.textPrimary)
-                .tracking(0.5)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            Circle()
+                .fill(stageAccent)
+                .frame(width: 6, height: 6)
+
+            if let stageKind = stageKind {
+                Text(stageKind.headerLabel)
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(stageAccent)
+                    .tracking(0.8)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            } else {
+                Text(node.name.uppercased())
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(DS.textPrimary)
+                    .tracking(0.5)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
             Spacer(minLength: 4)
-            Text(node.nodeType.uppercased())
-                .font(DS.font(DS.fontCaption2))
-                .foregroundColor(DS.textTertiary)
-                .lineLimit(1)
+
+            if let stageKind = stageKind, node.name.uppercased() != stageKind.headerLabel {
+                Text(node.name)
+                    .font(DS.font(DS.fontCaption2))
+                    .foregroundColor(DS.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
         }
         .padding(.horizontal, 8)
         .frame(height: NodeCardMetrics.headerHeight)
         .background(
             RoundedRectangle(cornerRadius: NodeCardMetrics.cornerRadius)
-                .fill(category.color.opacity(0.16))
+                .fill(stageAccent.opacity(isHero ? 0.22 : 0.14))
                 .overlay(
                     Rectangle()
-                        .fill(category.color.opacity(0.5))
-                        .frame(height: 1)
-                        .padding(.top, NodeCardMetrics.headerHeight - 1),
+                        .fill(stageAccent.opacity(isHero ? 0.65 : 0.4))
+                        .frame(height: isHero ? 2 : 1)
+                        .padding(.top, NodeCardMetrics.headerHeight - (isHero ? 2 : 1)),
                     alignment: .bottom
                 )
         )
@@ -107,6 +157,8 @@ struct NodeCardChrome<Content: View>: View {
         Text(text)
             .font(DS.font(DS.fontCaption2))
             .foregroundColor(DS.textTertiary)
+            .lineLimit(1)
+            .truncationMode(.tail)
             .frame(height: NodeCardMetrics.footerHeight)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, NodeCardMetrics.bodyPaddingH)
@@ -129,6 +181,20 @@ struct NodeCardChrome<Content: View>: View {
         let nodeId = node.id
         let portId = port.id
         let signalType = port.signalType
+        let portRef = PatchPortRef(
+            nodeId: nodeId,
+            portId: portId,
+            direction: side,
+            signalType: signalType
+        )
+        let isValidDropTarget: Bool = {
+            guard lockMode == .unlocked,
+                  let source = portInteractionHandler.activeCableDrag,
+                  port.direction == .input,
+                  source.signalType == port.signalType,
+                  source.nodeId != nodeId else { return false }
+            return true
+        }()
 
         return Circle()
             .fill(port.signalType.color)
@@ -137,18 +203,79 @@ struct NodeCardChrome<Content: View>: View {
                 Circle()
                     .stroke(DS.surfaceElevated, lineWidth: 1.5)
             )
+            .overlay(
+                Circle()
+                    .stroke(DS.neonTurquesa, lineWidth: 2)
+                    .frame(width: NodeCardMetrics.portChipSize + 7, height: NodeCardMetrics.portChipSize + 7)
+                    .opacity(isValidDropTarget ? 1 : 0)
+                    .animation(.easeOut(duration: 0.12), value: isValidDropTarget)
+            )
             .help("\(port.label) · \(port.signalType.rawValue)")
-            .anchorPreference(
-                key: PatchPortLocationsKey.self,
-                value: .center
-            ) { anchor in
-                [PatchPortLocation(
-                    nodeId: nodeId,
-                    portId: portId,
-                    direction: side,
-                    signalType: signalType,
-                    anchor: anchor
-                )]
+            .background(
+                // Report the port chip's center in the named canvas space.
+                // Using .background(GeometryReader { Color.clear.preference })
+                // matches the card-frame reporter and avoids the non-standard
+                // GeometryReader wrapper that was failing to propagate.
+                GeometryReader { portGeometry in
+                    let portFrame = portGeometry.frame(in: .named(PatchCanvasSpace.name))
+                    let center = CGPoint(x: portFrame.midX, y: portFrame.midY)
+                    #if DEBUG
+                    let _: () = print("[PortChip] port=\(portId) center=\(center)")
+                    #endif
+                    Color.clear
+                        .preference(
+                            key: PatchPortLocationsKey.self,
+                            value: [PatchPortLocation(
+                                nodeId: nodeId,
+                                portId: portId,
+                                direction: side,
+                                signalType: signalType,
+                                center: center
+                            )]
+                        )
+                }
+            )
+            .gesture(portDragGesture(for: portRef))
+            .onTapGesture(count: 2) {
+                guard lockMode == .unlocked else { return }
+                portInteractionHandler.handlers.onPortSecondaryClick?(portRef)
+            }
+    }
+
+    /// Output ports start a patch cord; input ports complete one. Double-click
+    /// on a port removes its cable(s).
+    private func portDragGesture(for portRef: PatchPortRef) -> some Gesture {
+        // Named space, not `.global`: `.global` is relative to the whole
+        // window, but `RootView` stacks a mode-toggle bar above the canvas,
+        // so every `.global` point used to land offset by that bar's height
+        // — see `PatchCanvasSpace`.
+        DragGesture(minimumDistance: 4, coordinateSpace: .named(PatchCanvasSpace.name))
+            .onChanged { value in
+                guard lockMode == .unlocked else { return }
+                portInteractionHandler.handlers.onPortDragChanged?(portRef, value.location)
+            }
+            .onEnded { value in
+                guard lockMode == .unlocked else { return }
+                portInteractionHandler.handlers.onPortDragEnded?(portRef, value.location)
+            }
+    }
+
+    /// Drag the card from anywhere on the card background. Child controls
+    /// (sliders, knobs, faders, buttons, port chips) have their own gestures
+    /// and win by SwiftUI's child-first gesture precedence, so dragging a
+    /// control adjusts the control, not the card.
+    private func nodeDragGesture() -> some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .local)
+            .onChanged { value in
+                guard lockMode == .unlocked else { return }
+                #if DEBUG
+                print("[Drag] node=\(node.id.uuidString.prefix(8)) translation=\(value.translation)")
+                #endif
+                nodeDragHandler.handlers.onNodeDragChanged?(node.id, value.translation)
+            }
+            .onEnded { _ in
+                guard lockMode == .unlocked else { return }
+                nodeDragHandler.handlers.onNodeDragEnded?(node.id)
             }
     }
 
@@ -172,15 +299,26 @@ struct NodeCardChrome<Content: View>: View {
     private var cardBorder: some View {
         RoundedRectangle(cornerRadius: NodeCardMetrics.cornerRadius)
             .stroke(
-                isFocused ? category.color : DS.border,
-                lineWidth: isFocused ? 1.5 : 1
+                isFocused ? stageAccent : (isHero ? stageAccent.opacity(0.55) : DS.border),
+                lineWidth: isFocused ? 1.5 : (isHero ? 1.75 : 1)
             )
     }
 
+    private var selectionBorder: some View {
+        RoundedRectangle(cornerRadius: NodeCardMetrics.cornerRadius)
+            .stroke(DS.neonTurquesa, lineWidth: 2)
+            .opacity(isSelected ? 1 : 0)
+            .animation(.easeOut(duration: 0.12), value: isSelected)
+    }
+
     private var shadowColor: Color {
-        isFocused
-            ? category.color.opacity(0.45)
-            : Color.black.opacity(0.35)
+        if isFocused {
+            return stageAccent.opacity(0.45)
+        }
+        if isHero {
+            return stageAccent.opacity(0.25)
+        }
+        return Color.black.opacity(0.35)
     }
 }
 

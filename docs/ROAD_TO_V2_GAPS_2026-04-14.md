@@ -1,5 +1,7 @@
 # Latent Resonator — Road to v2: Gap Report & Recovery Plan
 
+> **Superseded.** This gap report describes the `AudioGraphMapper` / React-Flow-in-WKWebView recovery path, which was abandoned. The shipped architecture is pull-render + native canvas (`GraphAudioEngine` → `ExecutionPlan` → `DSPNode`, `PatchCanvasView`). See `README.md` and `.cursor/skills/v2-node-graph/SKILL.md`; code is truth.
+
 > **Date:** 2026-04-14
 > **Status:** Migration partially executed. No audio, no usable PERFORM mode. Build probably compiles but runtime is dead.
 > **Purpose:** Concrete, ordered list of actionables to restore audio and usability. Written to be executed by an LLM agent.

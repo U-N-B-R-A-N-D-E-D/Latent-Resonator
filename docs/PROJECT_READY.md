@@ -1,5 +1,7 @@
 # ✅ PROYECTO LISTO PARA COMPILAR — v2.0
 
+> **Superseded.** This document describes the pre-pull-render, `AudioGraphMapper`-based migration. The shipped architecture is pull-render + native canvas (`GraphAudioEngine` → `ExecutionPlan` → `DSPNode`, `PatchCanvasView`). See `README.md` and `.cursor/skills/v2-node-graph/SKILL.md`; code is truth.
+
 ## Estado: COMPLETO ✅
 
 **Fecha:** 2026-04-13  
@@ -122,7 +124,7 @@ Script bash para verificar archivos faltantes y abrir Xcode.
 
 ### Documentos de referencia:
 - `docs/MIGRATION_V3_NODAL.md` — Plan de migración 8 fases
-- `docs/ARCHITECTURE_v2_NODAL.md` — Arquitectura v2.0
+- `docs/ARCHITECTURE_v2_NODAL.md` — RFC superseded; ver `Graph/NodeGraph.swift` + `.cursor/skills/v2-node-graph/SKILL.md`
 - `docs/LATENT_RESONATOR_WHITEPAPER.md` — Visión conceptual
 
 ---

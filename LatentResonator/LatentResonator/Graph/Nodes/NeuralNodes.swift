@@ -1,11 +1,17 @@
 import Foundation
-import AVFoundation
 import Combine
+import os
 
 // MARK: - ACE-Step Inference Node
 
-/// Async neural inference node wrapping ACEStepBridge.
-/// Takes audio input, performs diffusion model inference, outputs processed audio.
+/// Parameter surface for ACE-Step inference. Does NOT conform to `DSPNode` /
+/// `GraphNodeDSPProvider` and is silently skipped by `ExecutionPlan.build` —
+/// it never touches an audio buffer. The connected `FeedbackLoopNode` (the
+/// only neural-adjacent `DSPNode`) reads a parameter snapshot from this node
+/// through a weak reference and calls `ACEStepBridge.infer(...)` itself, off
+/// the audio thread. Keeping inference out of this node's `render` path is
+/// intentional: a synchronous `await bridge.infer(...)` here would block the
+/// audio thread for the multi-second inference duration.
 final class ACEStepInferenceNode: BaseGraphNode {
     
     // MARK: - Parameters
@@ -49,15 +55,37 @@ final class ACEStepInferenceNode: BaseGraphNode {
         get { getParam("thinking", default: LRConstants.aceThinkingDefault) }
         set { setParam("thinking", value: newValue) }
     }
-    
-    // MARK: - State
-    
-    private weak var bridge: ACEStepBridge?
-    private var inputBuffer: [Float] = []
-    private var outputBuffer: [Float] = []
-    private var isProcessing: Bool = false
-    private var lastInferenceTime: Date?
-    
+
+    /// ACE-Step §6.1 attention allocation. 1.0 = structure, 10.0 = detail.
+    /// Surfaced by `ACEStepInferenceCard` and forwarded to the Python server
+    /// via `FeedbackLoopNode.snapshotParameters()` -> `bridge.infer(...)`.
+    var shift: Float {
+        get { getParam("shift", default: LRConstants.aceShiftDefault) }
+        set { setParam("shift", value: newValue) }
+    }
+
+    /// ACE-Step §6.1 inference method. `"ode"` (deterministic) or `"sde"`
+    /// (stochastic). Mirrored from the Python server's `infer_method` field.
+    var inferMethod: String {
+        get { getParam("inferMethod", default: LRConstants.aceInferMethodDefault) }
+        set { setParam("inferMethod", value: newValue) }
+    }
+
+    /// ACE-Step §6.1 per-step denoise amount (0 = none, 1 = full). The app
+    /// already skips the bridge entirely when this is 0; non-zero values
+    /// must reach the server for the parameter to mean anything.
+    var denoiseStrength: Float {
+        get { getParam("denoiseStrength", default: LRConstants.denoiseStrengthDefault) }
+        set { setParam("denoiseStrength", value: newValue) }
+    }
+
+    // MARK: - Bridge
+
+    /// Shared ACE-Step bridge, injected by `NodeFactory` at construction time
+    /// (mirrors `FeedbackLoopNode.bridge`). Exposed (not `private`) so
+    /// `NodeGraph`'s topology-wiring pass can (re)assign it idempotently.
+    weak var bridge: ACEStepBridge?
+
     // MARK: - Init
     
     init(id: UUID = UUID(), params: [String: Any] = [:], bridge: ACEStepBridge? = nil) {
@@ -93,84 +121,17 @@ final class ACEStepInferenceNode: BaseGraphNode {
     }
     
     // MARK: - Telemetry
-    
+
     override var telemetry: NodeTelemetry {
-        NodeTelemetry(
+        let modelLoaded = bridge?.isModelLoaded ?? false
+        return NodeTelemetry(
             rmsLevel: 0.0,
             spectralCentroid: 0.0,
             spectralFlatness: 0.0,
-            level: isProcessing ? 1.0 : 0.0,
-            isActive: isProcessing,
-            cpuUsage: 0.5
+            level: modelLoaded ? 1.0 : 0.0,
+            isActive: modelLoaded,
+            cpuUsage: 0.0
         )
-    }
-    
-    // MARK: - Processing
-    
-    /// Accumulate input samples for inference.
-    /// When buffer reaches target size, trigger async inference.
-    func accumulate(_ samples: [Float]) {
-        inputBuffer.append(contentsOf: samples)
-        
-        // Trigger inference when we have enough samples (~1 sec of audio)
-        let targetSize = Int(LRConstants.sampleRate)
-        if inputBuffer.count >= targetSize && !isProcessing {
-            triggerInference()
-        }
-    }
-    
-    /// Asynchronously run inference via ACEStepBridge.
-    private func triggerInference() {
-        guard let bridge = bridge else { return }
-        guard bridge.status == .modelLoaded else { return }
-        
-        isProcessing = true
-        let chunk = Array(inputBuffer.prefix(Int(LRConstants.sampleRate)))
-        inputBuffer.removeFirst(chunk.count)
-        
-        Task {
-            do {
-                let result = try await bridge.infer(
-                    samples: chunk,
-                    prompt: prompt,
-                    guidanceScale: guidanceScale,
-                    numSteps: numSteps,
-                    inputStrength: inputStrength,
-                    entropy: entropy,
-                    granularity: granularity,
-                    taskType: taskType,
-                    thinking: thinking
-                )
-                
-                await MainActor.run {
-                    self.outputBuffer = result
-                    self.isProcessing = false
-                    self.lastInferenceTime = Date()
-                }
-            } catch {
-                print("ACEStepInferenceNode: inference failed - \(error)")
-                await MainActor.run {
-                    self.isProcessing = false
-                }
-            }
-        }
-    }
-    
-    /// Read processed samples from the output buffer.
-    func read(_ count: Int) -> [Float] {
-        guard !outputBuffer.isEmpty else {
-            return Array(repeating: 0, count: count)
-        }
-        
-        let available = min(count, outputBuffer.count)
-        let chunk = Array(outputBuffer.prefix(available))
-        outputBuffer.removeFirst(available)
-        
-        if chunk.count < count {
-            return chunk + Array(repeating: 0, count: count - chunk.count)
-        }
-        
-        return chunk
     }
 }
 
@@ -422,17 +383,24 @@ extension Float {
 
 // MARK: - Feedback Loop Node
 
-/// Audio feedback node implementing the whitepaper §3.3 recursive formula:
-/// S(i+1) = ACE(S(i) + F(S(i)), T(i))
+/// Real-time DSPNode implementing the whitepaper §3.3 recursive formula:
+/// S(i+1) = ACE(S(i) + N(μ,σ), P, γ)
 ///
-/// This is the ONLY node that may create cycles in the graph.
-/// It connects spectral processing (F) with neural inference (ACE) to create
-/// the recursive feedback loop that defines the Latent Resonator sound.
+/// This is the ONLY node that may create cycles in the graph, and the ONLY
+/// neural-adjacent node that participates in the audio render graph
+/// (`GraphNodeDSPProvider` / `DSPNode` below). `ACEStepInferenceNode` is a
+/// parameter surface read through `inferenceNode` — it never runs inference
+/// itself.
 ///
-/// Architecture:
-/// - Audio thread: real-time DSP, reads/writes circular buffers
-/// - Inference Task: async ACE calls, triggered when buffer has enough samples
-/// - Lock-free SPSC communication between threads
+/// Architecture (hybrid, see the `v2-node-graph` / `audio-thread-safety` skills):
+/// - `render()` — audio thread. Pointer-based `captureBuffer.write` +
+///   `feedbackBuffer.read` only, plus a cheap `os_unfair_lock_trylock`
+///   check to fire at most one inference cycle at a time. No allocation,
+///   no `await`, no blocking.
+/// - `runInferenceCycle()` — triggered async `Task`, off the audio thread.
+///   Awaits `bridge.infer(...)` for real and writes the result back into
+///   `feedbackBuffer` for a future `render()` call to pick up.
+/// - Lock-free SPSC `CircularAudioBuffer`s carry audio across the boundary.
 final class FeedbackLoopNode: BaseGraphNode {
 
     // MARK: - Parameters
@@ -442,6 +410,9 @@ final class FeedbackLoopNode: BaseGraphNode {
         set { setParam("delayTime", value: newValue) }
     }
 
+    /// Loop gain applied to the inference-cycle output before it re-enters
+    /// the mix. Capped below 1.0 to keep the recirculating signal stable —
+    /// same convention as `DelayLineNode`/`CombFilterNode`.
     var feedback: Float {
         get { getParam("feedback", default: 0.5) }
         set { setParam("feedback", value: newValue) }
@@ -453,66 +424,104 @@ final class FeedbackLoopNode: BaseGraphNode {
         set { setParam("inferenceBufferSize", value: newValue) }
     }
 
-    // MARK: - v2.0 Recursive Loop State (Whitepaper §3.3)
+    // MARK: - Recursive Loop State (Whitepaper §3.3)
 
-    /// Circular buffer for incoming audio from spectral chain (S(i) + F(S(i)))
-    /// Single-producer: audio thread writes
-    /// Single-consumer: inference Task reads
+    /// Incoming audio captured for the next inference cycle (S(i)).
+    /// Single-producer: audio thread writes in `render()`.
+    /// Single-consumer: the triggered inference `Task` reads.
     private let captureBuffer: CircularAudioBuffer
 
-    /// Circular buffer for processed audio from ACE (S(i+1))
-    /// Single-producer: inference Task writes
-    /// Single-consumer: audio thread reads
+    /// Processed audio from the last completed inference cycle (S(i+1)).
+    /// Single-producer: the inference `Task` writes.
+    /// Single-consumer: audio thread reads in `render()`.
     private let feedbackBuffer: CircularAudioBuffer
-
-    /// Backup loop buffer for sustain between inference cycles
-    /// When feedbackBuffer drains, we read from here to keep audio flowing
-    private var loopBuffer: [Float]
-    private var loopWritePos: Int = 0
-    private var loopReadPos: Int = 0
-    private var loopSampleCount: Int = 0
-    private let loopCapacity: Int
 
     /// Iteration counter for recursive formula (exposed for SequencerNode subscription)
     @Published var iterationCount: Int = 0
 
-    /// Inference state
-    private var isInferring: Bool = false
-    private var consecutiveFailures: Int = 0
-    private var inferenceTask: Task<Void, Never>?
+    /// Outcome of the most recently *completed* inference cycle. UI-facing
+    /// counterpart to the `print(">> FeedbackLoop: ...")` lines below --
+    /// those only ever reached the Xcode console, so there was no way to
+    /// see success/failure without it open. `.idle` until the first cycle
+    /// completes; never reset back to `.idle` afterwards so the last result
+    /// stays visible (a transient flash is easy to miss mid-performance).
+    enum InferOutcome: Equatable {
+        case idle
+        case success(iteration: Int, at: Date)
+        case failure(reason: String, at: Date)
+    }
+    @Published var lastOutcome: InferOutcome = .idle
 
-    /// Reference to connected ACE inference node (for parameter sync)
+    /// Non-nil while an `/infer` HTTP call is actually in flight (set right
+    /// before `bridge.infer(...)`, cleared on completion/failure). Distinct
+    /// from `isInferringLock`, which also covers buffer bookkeeping around
+    /// the call -- this is specifically "is the neural round-trip running
+    /// right now", for a UI "RUNNING (elapsed)" readout.
+    @Published var inferenceStartedAt: Date?
+
+    /// Wall-clock duration (ms) of the most recently *completed* inference
+    /// round-trip. Used by the UI to show the cost of the last neural cycle
+    /// (e.g. an "elapsed" readout). Zero until the first cycle completes;
+    /// never reset, so the last value stays visible.
+    @Published var lastInferenceDurationMs: Double = 0
+
+    /// Guards against spawning more than one inference `Task` at a time.
+    /// `withLockIfAvailable` from `render()` (never blocks the audio
+    /// thread); `withLock` from the async `runInferenceCycle()`'s `defer`
+    /// (`OSAllocatedUnfairLock`, unlike raw `os_unfair_lock`, is safe to
+    /// use from an async context).
+    private let isInferringLock = OSAllocatedUnfairLock(initialState: false)
+    private var consecutiveFailures: Int = 0
+    private var currentInferenceTask: Task<Void, Never>?
+
+    // MARK: - Arrival Crossfade State (real-time safe)
+    //
+    // When a new inference result lands in `feedbackBuffer`, the output
+    // must crossfade from the recirculating dry input into the new
+    // neural output — a hard cut produces an audible click and breaks
+    // the Lucier illusion of continuous recursive drift. The ramp is
+    // driven entirely from `render()` (audio thread only, no locks).
+    //
+    // `xfadeSamplesRemaining` counts down each render block; while > 0
+    // the output is `dry*(1-r) + fb*r` with `r` going 0→1. When it hits
+    // 0 the new inference output is fully "in" and the dry input is
+    // fully "out". A second ramp (`xfadeOutSamplesRemaining`) covers
+    // the feedbackBuffer→dry transition at the tail of the buffer so
+    // the hand-off back to the recirculating signal is also click-free.
+    //
+    // Equal-power crossfade would be nicer perceptually, but linear is
+    // chosen here for branch-free DSP and to keep the fix surgical.
+    private static let xfadeDurationSamples: Int = max(64, Int(LRConstants.sampleRate * 0.08)) // ~80ms
+    private var xfadeInSamplesRemaining: Int = 0
+    private var xfadeOutSamplesRemaining: Int = 0
+    private var wasReadingFeedback: Bool = false
+
+    /// Reference to the connected ACE inference node (parameter surface only).
     private weak var inferenceNode: ACEStepInferenceNode?
 
-    /// Sample rate for calculations
-    private let sampleRate: Double
+    /// Shared ACE-Step bridge, injected by `NodeFactory` / `NodeGraph`'s
+    /// topology-wiring pass. `render()` degrades to passthrough when nil.
+    weak var bridge: ACEStepBridge?
 
-    /// Audio format for node creation
-    private let format: AVAudioFormat
+    /// Sample rate for buffer sizing.
+    private let sampleRate: Double
 
     // MARK: - Init
 
     init(id: UUID = UUID(),
          params: [String: Any] = [:],
          sampleRate: Double = LRConstants.sampleRate,
-         inferenceNode: ACEStepInferenceNode? = nil) {
+         inferenceNode: ACEStepInferenceNode? = nil,
+         bridge: ACEStepBridge? = nil) {
         self.sampleRate = sampleRate
         self.inferenceNode = inferenceNode
+        self.bridge = bridge
 
-        // Initialize circular buffers for async communication
-        // Capacity: 2 seconds of audio at 48kHz
+        // Circular buffers for async communication. Capacity: 2 seconds of
+        // audio at 48kHz — comfortably larger than any realistic
+        // inferenceBufferSize so a slow inference cycle can't overrun it.
         self.captureBuffer = CircularAudioBuffer(capacity: Int(sampleRate * 2.0))
         self.feedbackBuffer = CircularAudioBuffer(capacity: Int(sampleRate * 2.0))
-
-        // Loop buffer for sustain between inference cycles
-        self.loopCapacity = Int(sampleRate * 2.0)
-        self.loopBuffer = [Float](repeating: 0, count: loopCapacity)
-
-        // Audio format
-        self.format = AVAudioFormat(
-            standardFormatWithSampleRate: sampleRate,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
 
         super.init(
             id: id,
@@ -524,34 +533,22 @@ final class FeedbackLoopNode: BaseGraphNode {
         for (key, value) in params {
             parameters[key] = value
         }
-
-        // Start inference loop
-        startInferenceLoop()
     }
-    
+
     required init(from decoder: Decoder) throws {
         let sr = LRConstants.sampleRate
         self.sampleRate = sr
-        
+
         self.captureBuffer = CircularAudioBuffer(capacity: Int(sr * 2.0))
         self.feedbackBuffer = CircularAudioBuffer(capacity: Int(sr * 2.0))
-        
-        self.loopCapacity = Int(sr * 2.0)
-        self.loopBuffer = [Float](repeating: 0, count: loopCapacity)
-        
-        self.format = AVAudioFormat(
-            standardFormatWithSampleRate: sr,
-            channels: AVAudioChannelCount(LRConstants.channelCount)
-        )!
-        
+
         try super.init(from: decoder)
-        
-        // inferenceNode will be connected at runtime
-        startInferenceLoop()
+
+        // inferenceNode / bridge connected at runtime by NodeGraph's wiring pass.
     }
 
     deinit {
-        stopInferenceLoop()
+        currentInferenceTask?.cancel()
     }
 
     // MARK: - Ports
@@ -566,143 +563,54 @@ final class FeedbackLoopNode: BaseGraphNode {
         ]
     }
 
-    // MARK: - Audio Unit
+    // MARK: - Inference Trigger (Whitepaper §3.3)
 
-    private var sourceNode: AVAudioSourceNode?
+    /// Checks the capture buffer and fires at most one inference `Task`.
+    /// Called from `render()`; itself real-time safe — the only thing it
+    /// does beyond the trylock/flag dance is spawn a `Task`, which is a
+    /// cheap, non-blocking runtime call.
+    /// P1.5 — `bufferSize` is snapshotted by the caller in `render` so we
+    /// don't re-read the COW `parameters` dict here.
+    private func triggerInferenceIfNeeded(bufferSize: Int) {
+        guard captureBuffer.availableToRead >= bufferSize else { return }
 
-    override func audioUnit() -> AVAudioNode? {
-        if sourceNode == nil {
-            createSourceNode()
-        }
-        return sourceNode
-    }
+        let shouldTrigger = isInferringLock.withLockIfAvailable { isInferring -> Bool in
+            guard !isInferring else { return false }
+            isInferring = true
+            return true
+        } ?? false
+        guard shouldTrigger else { return }
 
-    private func createSourceNode() {
-        sourceNode = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
-            guard let self = self else { return noErr }
-
-            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            guard ablPointer.count >= 2 else { return OSStatus(kAudio_ParamError) }
-
-            let leftPtr = ablPointer[0].mData!.assumingMemoryBound(to: Float.self)
-            let rightPtr = ablPointer[1].mData!.assumingMemoryBound(to: Float.self)
-
-            // Read from feedback buffer (S(i+1) from ACE)
-            var outputSamples = [Float](repeating: 0, count: Int(frameCount))
-            let readCount = self.feedbackBuffer.read(into: &outputSamples, count: Int(frameCount))
-
-            // If feedback buffer underruns, read from loop buffer (sustain)
-            if readCount < Int(frameCount) {
-                for i in readCount..<Int(frameCount) {
-                    if self.loopSampleCount > 0 {
-                        outputSamples[i] = self.loopBuffer[self.loopReadPos]
-                        self.loopReadPos = (self.loopReadPos + 1) % self.loopCapacity
-                    } else {
-                        outputSamples[i] = 0
-                    }
-                }
-            }
-
-            // Apply feedback amount
-            let fb = min(self.feedback, 0.99)
-            for i in 0..<Int(frameCount) {
-                outputSamples[i] *= fb
-            }
-
-            // Write to output (stereo)
-            for i in 0..<Int(frameCount) {
-                leftPtr[i] = outputSamples[i]
-                rightPtr[i] = outputSamples[i]
-            }
-
-            return noErr
+        currentInferenceTask = Task(priority: .utility) { [weak self] in
+            await self?.runInferenceCycle()
         }
     }
 
-    // MARK: - Audio Input Interface
-
-    /// Receive processed audio from spectral chain (S(i) + F(S(i)))
-    /// Called by upstream node via tap.
+    /// Run one iteration of the recursive formula: S(i+1) = ACE(S(i) + N(μ,σ), P, γ)
     ///
-    /// - Parameter samples: Audio buffer from spectral chain output
-    func receiveSpectralAudio(_ samples: [Float]) {
-        // Write to capture buffer for inference
-        captureBuffer.write(samples)
-    }
-
-    /// Install tap on upstream spectral node to receive audio input.
-    ///
-    /// - Parameters:
-    ///   - upstreamNode: The upstream AVAudioNode (typically SpectralChainNode's sourceNode)
-    ///   - engine: The AVAudioEngine for tap installation
-    func installUpstreamTap(from upstreamNode: AVAudioNode, in engine: AVAudioEngine) {
-        upstreamNode.removeTap(onBus: 0)
-
-        upstreamNode.installTap(
-            onBus: 0,
-            bufferSize: 4096,
-            format: format
-        ) { [weak self] buffer, _ in
-            guard let self = self else { return }
-
-            guard let channelData = buffer.floatChannelData else { return }
-            let frameLength = Int(buffer.frameLength)
-            let samples = Array(UnsafeBufferPointer(start: channelData[0], count: frameLength))
-
-            // Feed to our capture buffer
-            self.receiveSpectralAudio(samples)
-        }
-    }
-
-    // MARK: - Inference Loop (Whitepaper §3.3)
-
-    /// Start the async inference loop that implements the recursive formula.
-    /// This runs on a background Task and communicates with the audio thread
-    /// via lock-free circular buffers.
-    private func startInferenceLoop() {
-        guard inferenceTask == nil else { return }
-
-        inferenceTask = Task(priority: .low) { [weak self] in
-            while !Task.isCancelled {
-                guard let self = self else { break }
-                await self.runInferenceCycle()
-                // Yield to let audio thread breathe
-                try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
-            }
-        }
-    }
-
-    private func stopInferenceLoop() {
-        inferenceTask?.cancel()
-        inferenceTask = nil
-    }
-
-    /// Run one iteration of the recursive formula: S(i+1) = ACE(S(i) + F(S(i)), T(i))
-    ///
-    /// This implements the whitepaper §3.3 formula in the graph context.
+    /// Runs entirely off the audio thread. This is the only place in the
+    /// class that `await`s anything — `render()` never blocks on it.
     ///
     /// Recursive audio lineage:
     ///   - Lucier: I Am Sitting in a Room (1969) — recursive room acoustics
     ///   - Roads: Computer Music Tutorial (1996) — Chapter 10 on analysis/resynthesis
     private func runInferenceCycle() async {
-        let needed = inferenceBufferSize
-        let available = captureBuffer.availableToRead
-
-        guard available >= needed else { return }
-
-        // 1. Read captured audio (S(i) + F(S(i)))
-        var inputSamples = [Float](repeating: 0, count: needed)
-        let _ = captureBuffer.read(into: &inputSamples, count: needed)
-
-        // 2. Signal inference in progress
-        await MainActor.run { [weak self] in
-            self?.isInferring = true
+        defer {
+            isInferringLock.withLock { isInferring in
+                isInferring = false
+            }
         }
 
-        // 3. Get current parameters from connected inference node or use local
+        let needed = inferenceBufferSize
+        guard captureBuffer.availableToRead >= needed else { return }
+
+        // 1. Read captured audio (S(i))
+        var inputSamples = captureBuffer.read(count: needed)
+
+        // 2. Current parameters from the connected ACEStepInferenceNode (or local defaults)
         let params = await snapshotParameters()
 
-        // 4. Inject entropy (whitepaper §4.2.2)
+        // 3. Inject entropy (whitepaper §4.2.2)
         let noiseScale = params.entropy * 0.5
         if noiseScale > 0.0001 {
             for i in 0..<inputSamples.count {
@@ -710,63 +618,123 @@ final class FeedbackLoopNode: BaseGraphNode {
             }
         }
 
-        // 5. Run ACE inference
-        var processedSamples: [Float] = []
+        // 4. Run ACE inference for real. No bridge / no model / too many
+        //    consecutive failures / inputStrength ~0 -> skip this cycle.
+        //    render() already falls back to dry passthrough whenever
+        //    feedbackBuffer has nothing new, so skipping here is a graceful
+        //    no-op, not a failure state.
+        guard let bridge = bridge else { return }
 
-        if let inference = inferenceNode,
-           consecutiveFailures < 3,
-           params.inputStrength > 0.0001 {
-            // Accumulate and trigger inference
-            inference.accumulate(inputSamples)
-
-            // Read back processed audio (non-blocking)
-            // ACEStepInferenceNode processes asynchronously
-            // We read whatever is available in its output buffer
-            try? await Task.sleep(nanoseconds: 100_000_000) // Brief delay for ACE processing (100ms)
-            processedSamples = inference.read(needed)
+        // Bridge currently unreachable (disconnected, crashed, mid-restart --
+        // see BridgeProcessManager's MPS crash latch) is NOT counted toward
+        // consecutiveFailures. That counter only resets on a completed
+        // success below, so without this reset, three drops in a row during
+        // a routine bridge restart would permanently disable this node for
+        // the rest of the session -- a node that never attempts inference
+        // again can never land the success that would reset it. Health
+        // polling / the crash-latch auto-relaunch own the reconnection
+        // story; this just makes sure the node keeps trying once they land.
+        guard bridge.status == .connected || bridge.status == .modelLoaded else {
+            consecutiveFailures = 0
+            return
         }
 
-        // 6. Fallback: if no processed audio, use input (passthrough)
-        if processedSamples.isEmpty || processedSamples.count < needed {
-            processedSamples = inputSamples
+        guard consecutiveFailures < 3, params.inputStrength > 0.0001 else {
+            return
         }
 
-        // 7. Write to feedback buffer (S(i+1))
-        feedbackBuffer.write(processedSamples)
+        // UI-visible "RUNNING" state starts here -- right before the actual
+        // HTTP round-trip, not before the eligibility guards above (those
+        // are silent no-ops, not "inferring").
+        let inferStart = Date()
+        await MainActor.run { [weak self] in self?.inferenceStartedAt = Date() }
 
-        // 8. Copy to loop buffer for sustain
-        let copyCount = min(processedSamples.count, loopCapacity)
-        processedSamples.withUnsafeBufferPointer { src in
-            guard let base = src.baseAddress else { return }
-            for i in 0..<copyCount {
-                loopBuffer[(loopWritePos + i) % loopCapacity] = base[i]
+        do {
+            let processed = try await bridge.infer(
+                samples: inputSamples,
+                prompt: params.prompt,
+                guidanceScale: params.cfg,
+                numSteps: params.steps,
+                inputStrength: params.inputStrength,
+                entropy: params.entropy,
+                granularity: params.grain,
+                taskType: params.taskType,
+                thinking: params.thinking,
+                shift: params.shift,
+                inferMethod: params.inferMethod,
+                denoiseStrength: params.denoiseStrength
+            )
+            consecutiveFailures = 0
+
+            // 5. Write S(i+1) for a future render() call to read.
+            feedbackBuffer.write(processed)
+
+            let sampleCount = processed.count
+            let durationMs = Date().timeIntervalSince(inferStart) * 1000.0
+            await MainActor.run { [weak self] in
+                guard let self = self else { return }
+                self.iterationCount += 1
+                self.inferenceStartedAt = nil
+                self.lastInferenceDurationMs = durationMs
+                self.lastOutcome = .success(iteration: self.iterationCount, at: Date())
+                print(">> FeedbackLoop: ✓ infer complete -- \(sampleCount) samples written to feedbackBuffer (iteration \(self.iterationCount))")
             }
+        } catch {
+            consecutiveFailures += 1
+            let reason = Self.shortFailureReason(error)
+            await MainActor.run { [weak self] in
+                guard let self = self else { return }
+                self.inferenceStartedAt = nil
+                self.lastOutcome = .failure(reason: reason, at: Date())
+            }
+            print(">> FeedbackLoop: ✗ infer failed (\(consecutiveFailures)/3 consecutive) -- \(error.localizedDescription)")
         }
-        loopWritePos = (loopWritePos + copyCount) % loopCapacity
-        loopSampleCount = copyCount
+    }
 
-        // 9. Update iteration counter
-        iterationCount += 1
-
-        await MainActor.run { [weak self] in
-            self?.isInferring = false
+    /// Truncates an error's description to something that fits a one-line
+    /// status strip instead of the full `URLError`/`ACEBridgeError` message.
+    private static func shortFailureReason(_ error: Error) -> String {
+        // "The network connection was lost" / "could not connect to server"
+        // is what a dropped localhost socket looks like on the client side
+        // when the bridge PROCESS dies mid-request (Metal/MPS abort, crash,
+        // restart for a profile switch) -- there is no other network in
+        // this picture (bridge binds 127.0.0.1 only, see the python-bridge
+        // skill). Naming that plainly is a lot less alarming than the raw
+        // NSURLError text, which reads like a Wi-Fi problem.
+        if case ACEBridgeError.networkError(let underlying) = error,
+           let urlError = underlying as? URLError,
+           [.networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .timedOut].contains(urlError.code) {
+            return "bridge unreachable -- reconnecting"
         }
+        let msg = error.localizedDescription
+        return msg.count > 48 ? String(msg.prefix(48)) + "…" : msg
     }
 
     // MARK: - Parameter Snapshot
 
     /// Thread-safe parameter snapshot for inference.
     /// Mirrors the parameter snapshot pattern used across the v2.0 architecture.
-    private struct InferenceParams {
+    ///
+    /// Visibility is `internal` (not `private`) so `LatentResonatorTests` can
+    /// pin the snapshot -> `InferenceParams` -> `bridge.infer(...)` path
+    /// directly via `@testable import`. Not `public` — no external consumer.
+    struct InferenceParams {
         let prompt: String
         let cfg: Float
         let entropy: Float
         let grain: Float
         let steps: Int
         let inputStrength: Float
+        // §6.1 task-routing surface — the UI toggle/picker must reach the
+        // Python server for these to mean anything.
+        let taskType: String
+        let thinking: Bool
+        let shift: Float
+        let inferMethod: String
+        let denoiseStrength: Float
     }
 
-    private func snapshotParameters() async -> InferenceParams {
+    func snapshotParameters() async -> InferenceParams {
         // Read from connected inference node if available
         if let inference = inferenceNode {
             return InferenceParams(
@@ -775,7 +743,12 @@ final class FeedbackLoopNode: BaseGraphNode {
                 entropy: inference.entropy,
                 grain: inference.granularity,
                 steps: inference.numSteps,
-                inputStrength: inference.inputStrength
+                inputStrength: inference.inputStrength,
+                taskType: inference.taskType,
+                thinking: inference.thinking,
+                shift: inference.shift,
+                inferMethod: inference.inferMethod,
+                denoiseStrength: inference.denoiseStrength
             )
         }
 
@@ -786,29 +759,141 @@ final class FeedbackLoopNode: BaseGraphNode {
             entropy: 0.25,
             grain: 0.45,
             steps: LRConstants.aceStepsDefault,
-            inputStrength: LRConstants.inputStrengthDefault
+            inputStrength: LRConstants.inputStrengthDefault,
+            taskType: LRConstants.aceTaskTypeDefault,
+            thinking: LRConstants.aceThinkingDefault,
+            shift: LRConstants.aceShiftDefault,
+            inferMethod: LRConstants.aceInferMethodDefault,
+            denoiseStrength: LRConstants.denoiseStrengthDefault
         )
     }
 
     // MARK: - Control Interface
 
     /// Connect to an ACEStepInferenceNode for parameter synchronization.
+    /// Idempotent — safe to call repeatedly with the same node.
     func connectInferenceNode(_ node: ACEStepInferenceNode) {
         self.inferenceNode = node
     }
+}
 
-    /// Reset all recursive state.
+// MARK: - FeedbackLoopNode + DSPNode
+
+extension FeedbackLoopNode: GraphNodeDSPProvider, DSPNode {
+
+    var nodeId: UUID { id }
+
+    func dspNode() -> DSPNode? { self }
+
+    func render(
+        inputs: UnsafeBufferPointer<AudioBuffer>,
+        output: AudioBuffer,
+        frameCount: Int,
+        sampleRate: Double
+    ) {
+        // P1.5 — snapshot user-facing params into locals. `feedback` is read
+        // for the recirculation gain below; `inferenceBufferSize` is read by
+        // `triggerInferenceIfNeeded`. Both come from the COW `parameters`
+        // dict — a knob drag mid-block would otherwise force a heap alloc
+        // on the audio thread.
+        let fb = min(feedback, LRConstants.feedbackCap)
+        let inferSize = inferenceBufferSize
+
+        // Port order: ExecutionPlan sorts connected audio inputs by
+        // targetPortId. "feedback_in" < "in" alphabetically, so when both
+        // are wired the primary signal is the LAST entry — never assume
+        // inputs.first here.
+        guard let inputBuffer = inputs.last else {
+            for i in 0..<frameCount {
+                output.left[i] = 0
+                output.right[i] = 0
+            }
+            return
+        }
+
+        // Capture S(i) for the next inference cycle. Pointer-based, no
+        // allocation — mono (left channel), matching the bridge's mono
+        // contract and ACEStepBridge.infer's [Float] signature.
+        captureBuffer.write(inputBuffer.left, count: frameCount)
+
+        // Emit S(i) from the last completed inference cycle. Whatever the
+        // ring buffer doesn't have yet falls back to the dry input — this
+        // IS the "graceful passthrough" behavior when no model is loaded,
+        // not a special case bolted on top.
+        //
+        // ARRIVAL CROSSFADE: when new inference output lands in
+        // feedbackBuffer (transition from empty→non-empty), we ramp the
+        // output from the recirculating dry input into the neural signal
+        // over ~80ms. When the feedbackBuffer tail is reached (read <
+        // frameCount at the end of the neural buffer), we ramp back into
+        // the dry input over the same window. Both ramps prevent the
+        // hard-cut clicks that would otherwise punctuate every cycle and
+        // break the recursive-drift illusion. Real-time safe: only stack
+        // scalars + a fixed-size VLA, no allocations, no locks.
+        let read = feedbackBuffer.read(into: output.left, count: frameCount)
+
+        // Detect new-arrival transition: empty → has data.
+        if read > 0 && !wasReadingFeedback {
+            xfadeInSamplesRemaining = Self.xfadeDurationSamples
+        }
+        // Detect tail transition: had data → partial/empty read this block.
+        if wasReadingFeedback && read < frameCount {
+            xfadeOutSamplesRemaining = Self.xfadeDurationSamples
+        }
+        wasReadingFeedback = read > 0
+
+        let xfadeTotal = Float(Self.xfadeDurationSamples)
+
+        // No scratch buffer: dry input is read directly from inputBuffer.left
+        // (we write to output.left — a different buffer, so no aliasing).
+        for i in 0..<frameCount {
+            let dry = inputBuffer.left[i]
+            // Neural signal: only defined for [0, read). Beyond that the
+            // feedbackBuffer is exhausted and we hand off to dry input.
+            var neural: Float = 0
+            if i < read {
+                let s = output.left[i] * fb
+                neural = (s.isNaN || s.isInfinite) ? 0 : s
+            }
+
+            // Crossfade in (arrival): blend dry → neural.
+            if xfadeInSamplesRemaining > 0 {
+                let done = Float(Self.xfadeDurationSamples - xfadeInSamplesRemaining)
+                let r = min(1.0, done / xfadeTotal)
+                output.left[i] = dry * (1.0 - r) + neural * r
+                xfadeInSamplesRemaining -= 1
+                continue
+            }
+            // Crossfade out (tail): blend neural → dry.
+            if xfadeOutSamplesRemaining > 0 && i >= read {
+                let done = Float(Self.xfadeDurationSamples - xfadeOutSamplesRemaining)
+                let r = min(1.0, done / xfadeTotal)
+                output.left[i] = neural * (1.0 - r) + dry * r
+                xfadeOutSamplesRemaining -= 1
+                continue
+            }
+            // No active crossfade: hard route neural-or-dry.
+            output.left[i] = (i < read) ? neural : dry
+        }
+        for i in 0..<frameCount {
+            output.right[i] = output.left[i]
+        }
+
+        triggerInferenceIfNeeded(bufferSize: inferSize)
+    }
+
     func reset() {
         iterationCount = 0
         consecutiveFailures = 0
+        lastOutcome = .idle
+        inferenceStartedAt = nil
         captureBuffer.reset()
         feedbackBuffer.reset()
-        loopWritePos = 0
-        loopReadPos = 0
-        loopSampleCount = 0
-        for i in 0..<loopCapacity {
-            loopBuffer[i] = 0
-        }
+        // Arrival-crossfade state — clear so a reset node doesn't resume
+        // a stale ramp into the next cycle.
+        xfadeInSamplesRemaining = 0
+        xfadeOutSamplesRemaining = 0
+        wasReadingFeedback = false
     }
 }
 

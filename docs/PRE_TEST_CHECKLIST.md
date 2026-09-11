@@ -1,5 +1,7 @@
 # ✅ Checklist de Verificación — v2.0 Pre-Test
 
+> **Superseded.** Describes the pre-pull-render migration (`AudioGraphMapper`, `WebViewBridge`, `ResonatorLane`). Shipped architecture: pull-render + native canvas (`GraphAudioEngine` → `ExecutionPlan` → `DSPNode`, `PatchCanvasView`). See `README.md` and `.cursor/skills/v2-node-graph/SKILL.md`; code is truth.
+
 ## Estado: LISTO PARA TESTEAR (con instrucciones de setup)
 
 ---
@@ -161,7 +163,7 @@ Ver **instrucciones detalladas** en:
 
 ### Documentos de referencia:
 - `docs/MIGRATION_V3_NODAL.md` — Plan de migración completo (8 fases)
-- `docs/ARCHITECTURE_v2_NODAL.md` — Arquitectura v2.0 detallada
+- `docs/ARCHITECTURE_v2_NODAL.md` — RFC superseded (WKWebView/AudioGraphMapper); arquitectura actual: `Graph/NodeGraph.swift` + `.cursor/skills/v2-node-graph/SKILL.md`
 - `docs/LATENT_RESONATOR_WHITEPAPER.md` — Visión conceptual
 
 ---

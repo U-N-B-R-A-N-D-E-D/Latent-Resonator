@@ -11,9 +11,9 @@ BACKUP_FILE = "#{PBXPROJ}.backup_#{Time.now.to_i}"
 
 # Archivo a agregar
 RESOURCE_FILE = {
-  path: "Resources/KickstartTemplate.json",
-  name: "KickstartTemplate.json",
-  group: "Resources"
+  path: "Resources/Topologies/kickstart-legacy.json",
+  name: "kickstart-legacy.json",
+  group: "Topologies"
 }
 
 def generate_uuid

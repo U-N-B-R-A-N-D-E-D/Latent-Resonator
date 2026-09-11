@@ -194,8 +194,7 @@ final class GraphAudioEngine {
                     inputs: inputs,
                     output: outputBuf,
                     frameCount: frameCount,
-                    sampleRate: sampleRate,
-                    controls: step.controls
+                    sampleRate: sampleRate
                 )
                 wroteToTerminal = true
             } else {
@@ -205,8 +204,7 @@ final class GraphAudioEngine {
                     inputs: inputs,
                     output: outputBuf,
                     frameCount: frameCount,
-                    sampleRate: sampleRate,
-                    controls: step.controls
+                    sampleRate: sampleRate
                 )
             }
         }

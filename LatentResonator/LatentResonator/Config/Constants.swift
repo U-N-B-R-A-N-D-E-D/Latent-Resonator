@@ -48,6 +48,13 @@ enum LRConstants {
     /// Default feedback: 0.5 -- active loop from the start.
     static let feedbackDefault: Float = 0.5
 
+    /// Hard ceiling applied to all feedback-path gains (FeedbackLoopNode,
+    /// DelayLineNode, TunableResonatorNode). 0.999 lets the performer push
+    /// to the edge of controlled self-oscillation (Envion/Buchla territory)
+    /// without the runaway that 1.0 would guarantee. Was a hardcoded 0.99
+    /// per-node — too conservative, killed the instrument's edge.
+    static let feedbackCap: Float = 0.999
+
     static let entropyRange: ClosedRange<Float> = 0.0...100.0
     /// Default entropy: 35 -- starts in the "textured" zone where spectral
     /// noise is clearly audible. Was 25 (inaudible in real-time DSP path).
@@ -66,6 +73,33 @@ enum LRConstants {
     /// White paper §4.2.1: 0.60 initial, §4.2.2: 0.45 for recursive drift.
     static let inputStrengthRange: ClosedRange<Float> = 0.0...1.0
     static let inputStrengthDefault: Float = 0.6
+
+    // MARK: - Factory Topology (Envion §3.2 — Topology Reservoir)
+
+    /// Default bundled topology when no saved session exists.
+    /// Must include `FeedbackLoopNode` + `ACEStepInferenceNode` (whitepaper §3.3).
+    /// v2.0: macro-based default so PERFORM mode is alive on first launch
+    /// (focus macro + VU meters + envelope editor + knobs). The flat
+    /// `seed-feedback-flat` topology is preserved as an alternative.
+    static let defaultFactoryTopologyFileName = "seed-feedback-macro"
+
+    /// Scaffold topology used by `ImplicitGraphBuilder.buildGraph(from:)` to
+    /// construct a `MacroNode`'s *internal* graph from a `LanePreset`.
+    ///
+    /// P0 REGRESSION NOTE (2026-07-21): this must NEVER be
+    /// `defaultFactoryTopologyFileName`. That file is itself macro-based —
+    /// its "Resonator Macro" node has `presetName: "BUCHLA PERC"` and no
+    /// inline `internalGraph`, so building it re-enters `NodeFactory.createNode`
+    /// -> `MacroNode(id:params:)` -> `MacroNode.fromPreset` ->
+    /// `ImplicitGraphBuilder.buildGraph`. If that function reloaded
+    /// `defaultFactoryTopologyFileName` as its own scaffold, it would deserialize
+    /// the SAME macro node again, forever — infinite recursion, stack overflow,
+    /// before any audio. `seed-feedback-flat` is the minimal
+    /// source -> resonator -> output topology (see its metadata) and contains
+    /// no "macro" node, so it structurally cannot restart the cycle. See
+    /// `ImplicitGraphBuilder.presetsUnderConstruction` for the belt-and-suspenders
+    /// reentrancy guard in case that invariant is ever broken.
+    static let macroInternalScaffoldTopologyFileName = "seed-feedback-flat"
 
     // MARK: - Auto Decay (White Paper §4.2.2 -- Recursive Drift Trajectory)
     //
@@ -209,6 +243,35 @@ enum LRConstants {
     /// drift audible to the performer. Was 0.7 (too subtle).
     static let spectralMemoryCoeff: Float = 0.85
 
+    // MARK: - Spectral Feedback Node (Emergence — Round 2 audit, Booth)
+    //
+    // SpectralFeedbackNode closes a loop around SpectralPipeline itself:
+    // Stage 3 (polar saturation) + Stage 5 (leaky memory) coupled through a
+    // hop-quantized delay become a real nonlinear dynamical system with
+    // state -- a spectral attractor owned entirely by Latent Resonator's
+    // own DSP, no ACE-Step dependency. gain < 1.0 (feedbackCap, existing
+    // constant above) guarantees stability regardless of these ranges.
+
+    /// Feedback gain range/default for the spectral loop. Exposed range
+    /// tops out at 0.95 (matches filterResonanceRange/delayFeedbackRange
+    /// convention); the render path additionally clamps via `feedbackCap`.
+    static let spectralFeedbackRange: ClosedRange<Float> = 0.0...0.95
+    static let spectralFeedbackDefault: Float = 0.7
+
+    /// Stage 5 leaky-memory coefficient for the node's internal pipeline.
+    static let spectralFeedbackMemoryRange: ClosedRange<Float> = 0.0...0.99
+    static let spectralFeedbackMemoryDefault: Float = 0.85
+
+    /// Stage 3 polar-saturation amount for the node's internal pipeline.
+    static let spectralFeedbackSaturationRange: ClosedRange<Float> = 0.0...1.0
+    static let spectralFeedbackSaturationDefault: Float = 0.3
+
+    /// How many hops of delay elapse before the loop's own output returns
+    /// as feedback. 1 hop = tightest loop (fastest attractor cycling); 4 =
+    /// loosest. Delay length in samples = delayHopCount * (fftSize / 2).
+    static let spectralFeedbackHopDelayRange: ClosedRange<Int> = 1...4
+    static let spectralFeedbackHopDelayDefault: Int = 2
+
     // MARK: - Signal Generator (dataflow system Excitation Sources)
 
     /// Sine oscillator frequency range (Hz). Covers sub-bass to mid-range.
@@ -308,6 +371,23 @@ enum LRConstants {
     /// Oscillator waveform selection (0=sine, 1=square, 2=saw, 3=triangle).
     static let oscillatorWaveformDefault: Int = 0  // sine
 
+    // MARK: - Audio Pipeline Health (Auto-Recovery)
+    //
+    // Safety net for `NeuralEngine.verifyAudioPipeline()`. A source whose
+    // amplitude sits at/near zero produces total silence with no audible
+    // signal that anything is wrong -- `startProcessing()` auto-restores it
+    // once, on START only (never mid-performance), so a bad preset or a
+    // stray knob drag doesn't strand the user in silence with no recovery.
+
+    /// Below this, a source's amplitude counts as "silent" for pipeline
+    /// health checks and auto-recovery.
+    static let silentAmplitudeThreshold: Float = 0.01
+
+    /// Amplitude a silent source is lifted to on auto-recovery -- matches
+    /// `OscillatorNode.amplitude`'s own class default (see `getParam`
+    /// fallback in `SourceNodes.swift`), i.e. "as if never touched."
+    static let autoRestoreAmplitude: Float = 0.5
+
     // MARK: - Pulse Width (Square Oscillator PWM)
 
     static let pulseWidthRange: ClosedRange<Float> = 0.1...0.9
@@ -319,6 +399,15 @@ enum LRConstants {
     static let textureDefault: Float = 0.0
     static let chaosDefault: Float = 0.0
     static let warmthDefault: Float = 0.0
+
+    // MARK: - Control-Rate CV Routing (ControlGraphEvaluator)
+
+    /// Default scaling from normalized CV source (0…1) to parameter units when
+    /// an `AgitationNode` / `MetaParameterNode` output drives a `_cv` input.
+    static let controlCVDepth: Float = 1.0
+
+    /// Frequency CV depth in Hz (LFO → oscillator `freq_cv`).
+    static let controlFrequencyCVDepth: Float = 400.0
 
     // MARK: - Spectral Freeze
 
@@ -471,6 +560,15 @@ enum LRConstants {
         static let paramDelay     = Color.blue
         static let paramCrush     = Color.purple
 
+        // Stage identity accents (Envion-style sparse hierarchy)
+        static let stageSeed      = neonAmbar
+        static let stageResonator = neonTurquesa
+        static let stageSpectra   = Color(red: 0.55, green: 0.72, blue: 0.68)
+        static let stageLadder    = Color(red: 0.85, green: 0.55, blue: 0.35)
+        static let stageEcho      = Color(red: 0.45, green: 0.62, blue: 0.78)
+        static let stageFlat      = textSecondary
+        static let stageNeural    = Color(red: 0.62, green: 0.68, blue: 0.72)
+
         // -- Divider (panel line)
         static let dividerColor = panelHollow
         static let dividerHeight: CGFloat = 1
@@ -560,9 +658,43 @@ enum LRConstants {
     // MARK: - ACE-Step Bridge Server
 
     enum ACEBridge {
-        /// When true, pass --device cpu to the bridge. Use when MPS crashes
-        /// (e.g. Metal validation in rsub). Set to false to try MPS for faster inference.
+        /// When true, pass --device cpu to any *freshly launched* bridge process.
+        /// Default is true -- CONFIRMED CRASH (2026-07-10): running with this
+        /// flipped false let the bridge resolve `Device: auto` -> `mps`, and a
+        /// STOP mid-infer landed on `at::native::rsub` -> MPS
+        /// `structured_sub_out_mps` -> `validateComputeFunctionArguments`
+        /// ("Read-only bytes ... bound ... with write access enabled") ->
+        /// Metal abort -> bridge process exit code 6 (SIGABRT). This is the
+        /// exact failure this flag was originally added to avoid.
+        ///
+        /// Nuance for whoever is tempted to flip this again: standalone e2e
+        /// runs of the ACE-Step pipeline OUTSIDE Xcode (plain `python
+        /// ace_bridge_server.py --device mps`) have loaded and inferred on MPS
+        /// without crashing. The abort above only reproduces under Xcode's
+        /// Debug + Metal API validation instrumentation attached to the child
+        /// process, and/or this exact PyTorch/ACE-Step build's `rsub` kernel.
+        /// Until someone confirms which of those it is (and fixes it, or ships
+        /// Release-config child process launches with Metal validation off),
+        /// CPU is the reliable default -- slower (45-95s/diffusion step) but
+        /// it does not abort the process out from under a live performance.
+        /// See `BridgeProcessManager.mpsCrashLatched` for the runtime backstop:
+        /// if a bridge ever does crash while on mps/auto, the NEXT launch is
+        /// forced to CPU regardless of this constant.
+        ///
+        /// NOTE: this only governs cold starts. An already-running, healthy bridge
+        /// (any device) is always reused rather than torn down -- see
+        /// BridgeProcessManager.performLaunch(). By the time a bridge answers
+        /// /health it has already survived model load and (if MPS) the risky
+        /// first-op window, so killing it to re-launch on CPU throws away a
+        /// proven-good session for no safety benefit.
         static let forceCPU: Bool = true
+
+        /// How long terminateServer() will wait for an in-flight /infer request
+        /// to finish before killing the bridge process anyway. Prevents bridge
+        /// restarts (profile switch, PERFORM mode entry, app quit) from cutting
+        /// off the one inference that was actually working. Kept short so app
+        /// quit / mode switches never hang indefinitely on a stuck request.
+        static let inFlightShutdownGrace: TimeInterval = 5.0
 
         /// Default base URL for the Python bridge server.
         static let baseURL: String = "http://127.0.0.1:8976"
@@ -581,18 +713,20 @@ enum LRConstants {
         static let statusEndpoint: String = "status"
         /// Default port.
         static let defaultPort: Int = 8976
-        /// Health polling interval in seconds.
-        /// 10s reduces CPU churn during inference-heavy workloads.
-        static let healthPollInterval: TimeInterval = 10.0
+        /// Health polling steady-state interval after the bridge has successfully booted.
+        static let healthPollSteadyInterval: TimeInterval = 30.0
+        /// Initial boot-backoff interval for health polling (8s, then 16s cap).
+        /// The Python server historically takes ~10-20s to load the model;
+        /// starting probes at 1s produced four noisy failed probes before the
+        /// first realistic chance of success. The 8s first probe keeps the
+        /// boot robust while cutting the failed-probe count to 0-1.
+        static let healthPollBootIntervalInitial: TimeInterval = 8.0
+        /// Maximum boot-backoff interval for health polling before capping.
+        static let healthPollBootIntervalCap: TimeInterval = 16.0
         /// Health check request timeout in seconds.
         /// When the bridge is busy with inference (40–70s per step), /health can be queued
         /// behind infer requests. 2s was too short and caused false "disconnected" status.
         static let healthTimeout: TimeInterval = 15.0
-        /// Delay before first health poll during bridge startup (seconds).
-        /// Model load takes ~4–7s; avoid hammering the port before the server can possibly respond.
-        static let bridgeStartupInitialDelay: TimeInterval = 3.0
-        /// Poll interval during bridge startup (seconds). 2s reduces "Connection refused" spam.
-        static let bridgeStartupPollInterval: TimeInterval = 2.0
         /// Inference timeout in seconds.
         /// CPU-only inference takes 45-95s per diffusion step; with multi-lane concurrent
         /// requests, total wait can exceed 120s even with threaded serving. 300s safety net.
@@ -792,21 +926,6 @@ enum LRConstants {
         "pwm":         [0.8, 1.3, 1.5, 1.0],   // pulse width modulation
     ]
 
-    // MARK: - Preset Fallback Semantic Profiles
-    //
-    // When a prompt has no keyword matches, the processor falls back to these
-    // preset-specific profiles instead of flat [1,1,1,1]. Each profile is tuned
-    // to reinforce the lane's frequency slot and sonic identity.
-
-    static let presetFallbackProfiles: [String: [Float]] = [
-        "moog_bass":   [1.8, 1.3, 0.6, 0.3],   // sub-heavy fallback
-        "arp_lead":    [0.6, 1.3, 1.7, 1.2],   // mid-presence fallback
-        "buchla_perc": [0.8, 1.2, 1.6, 1.1],   // mid-bright percussive
-        "roland_pad":  [1.2, 1.3, 1.2, 0.9],   // even, lush
-        "tb303_acid":  [0.8, 1.8, 1.4, 0.6],   // resonant mid peak
-        "noise_scape": [0.4, 0.6, 1.4, 1.8],   // air-only
-        "drum_lane":   [1.4, 1.1, 1.4, 1.6],   // punch + transient attack
-    ]
 }
 
 // MARK: - Drum Voice (Drum Lane P-Lock)
@@ -858,11 +977,18 @@ enum DrumVoice: String, CaseIterable, Codable, Identifiable {
 // MARK: - Lane Preset
 //
 // Encapsulates a complete parameter snapshot for one MacroNode.
-// Seven factory presets ship with the app (MOOG BASS, ARP LEAD, etc.),
+// Seven factory presets ship with the app (FERROFLUID DRONE, ARP LEAD, etc.),
 // each tuned to elicit a distinct sonic character from the ACE-Step
 // base model. All presets use task="cover", thinking=false (§6.1
 // circumventing the LM for deterministic control), and model=Base
 // for full CFG support (white paper §4.2.1).
+//
+// Naming (2026-07-21, perimeter honesty pass): two presets were renamed
+// from analog-gear references to names that honor the slow-feedback-
+// resonator identity instead of implying a subtractive-synth lineage.
+// Only `name` (the performer-facing label)
+// changed — `id`, `prompt`, and every DSP/ACE parameter are untouched, so
+// the sonic recipe each preset produces is identical to before the rename.
 
 struct LanePreset: Identifiable {
     let id: String
@@ -945,10 +1071,16 @@ struct LanePreset: Identifiable {
 
 extension LanePreset {
 
-    /// MOOG BASS — Slot: sub 20–120Hz. Polarized: sub only, NO highs.
+    /// FERROFLUID DRONE — Slot: sub 20–120Hz.
+    /// Polarized: sub only, NO highs. Identity-aligned rename 2026-07-21 — "ferrofluid" is
+    /// already this project's own vocabulary (`LRConstants.defaultPrompt`,
+    /// `PromptEngineNode.phase1Prompt`) for warm, viscous, sub-heavy
+    /// resonance, and fits its phase-3 evolution toward "infrasonic
+    /// dissolution, sub rumble" better than a Moog reference. `id` and every
+    /// sonic parameter below are unchanged.
     static let moogBass = LanePreset(
         id: "moog_bass",
-        name: "MOOG BASS",
+        name: "FERROFLUID DRONE",
         prompt: "sub bass only, fundamental, sine-like, fat low end, NO high frequencies, NO shimmer",
         accentColor: "blue",
         guidanceScale: 10.0,
@@ -1105,10 +1237,16 @@ extension LanePreset {
         promptPhase3: "dissolved pad mass, spectral blur, infinite sustain"
     )
 
-    /// TB-303 ACID — Slot: low-mid 120–350Hz. Polarized: squelch, NO air.
+    /// SPECTRAL TIDE — Slot: low-mid 120–350Hz.
+    /// Polarized: squelch, NO air. Identity-aligned rename 2026-07-21 — the self-oscillating
+    /// resonant filter rises and falls like a tide across its 3-phase
+    /// evolution ("squelchy resonance" -> "filter squelch, resonant peak" ->
+    /// "dissolved acid mass, low-mid entropy"); "tide" names that motion
+    /// without the 303 gear reference. `id` and every sonic parameter below
+    /// are unchanged.
     static let tb303Acid = LanePreset(
         id: "tb303_acid",
-        name: "TB-303 ACID",
+        name: "SPECTRAL TIDE",
         prompt: "acid bass, squelchy resonance, 303, low-mid, NO high shimmer NO air",
         accentColor: "green",
         guidanceScale: 14.0,

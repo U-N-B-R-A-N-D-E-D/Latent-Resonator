@@ -58,6 +58,8 @@ final class AgitationNode: BaseGraphNode {
     /// The underlying modulator (source of truth for parameters).
     let modulator: AgitationModulator
     
+    override var category: NodeCategory { .control }
+    
     override var ports: [NodePort] {
         [NodePort(id: "out", label: "CV OUT", signalType: .control, direction: .output)]
     }
@@ -161,6 +163,8 @@ final class PeakNode: BaseGraphNode {
     
     /// The underlying modulator (source of truth for parameters).
     let modulator: PeakModulator
+    
+    override var category: NodeCategory { .control }
     
     override var ports: [NodePort] {
         [
@@ -269,6 +273,8 @@ final class ManualControlNode: BaseGraphNode {
     /// The underlying modulator (source of truth for parameters).
     let modulator: ControlModulator
     
+    override var category: NodeCategory { .control }
+    
     override var ports: [NodePort] {
         [NodePort(id: "out", label: "CV OUT", signalType: .control, direction: .output)]
     }
@@ -327,13 +333,11 @@ final class ManualControlNode: BaseGraphNode {
     }
     
     /// Evaluate control output at time t. Called by ControlGraphEvaluator (Phase 2).
+    /// Returns the current manual value directly (0..1), bypassing the
+    /// modulator's bipolar/slew path so that control edges see a stable,
+    /// predictable 0..1 signal.
     func evaluate(at time: TimeInterval, dt: Double) -> Float {
-        // Create a dummy connection for evaluation (or use first real connection if available)
-        let dummyConnection = ModulationConnection(
-            destination: ModulationAddress(nodeId: id, parameter: .volume),
-            scale: 1.0
-        )
-        return modulator.evaluate(connection: dummyConnection, dt: dt)
+        return modulator.value
     }
 }
 
@@ -370,7 +374,11 @@ final class MetaParameterNode: BaseGraphNode {
     }
     
     /// Current playback position (0.0...1.0 normalized)
-    private var phase: Float = 0.0
+    /// P5 Slice 1: exposed as `private(set)` so the PERFORM envelope
+    /// visualization (`EnvelopeCurveView`) can read the live phase
+    /// without coupling to the evaluator's internal tick. Mutated only
+    /// by `evaluate(dt:)` on the control thread.
+    private(set) var phase: Float = 0.0
     
     /// True while gate is high (one-shot plays while high)
     private var isRunning: Bool = false
@@ -384,6 +392,8 @@ final class MetaParameterNode: BaseGraphNode {
 
     
     // MARK: - Ports
+    
+    override var category: NodeCategory { .control }
     
     override var ports: [NodePort] {
         [
@@ -730,6 +740,8 @@ final class MarkovSequencerNode: BaseGraphNode {
     
     // MARK: - Ports
     
+    override var category: NodeCategory { .control }
+    
     override var ports: [NodePort] {
         [
             NodePort(id: "value_out", label: "VALUE", signalType: .control, direction: .output),
@@ -748,9 +760,9 @@ final class MarkovSequencerNode: BaseGraphNode {
         case "value_out":
             return stateValues[safe: currentState] ?? 0.0
         case "gate_out":
-            // Gate is high for a short pulse after state change
+            // Gate is high for a short pulse after state change (50 ms inclusive)
             let timeSinceChange = time - lastClockTime
-            return timeSinceChange < 0.05 ? 1.0 : 0.0
+            return timeSinceChange <= 0.05 ? 1.0 : 0.0
         default:
             return 0.0
         }
@@ -1001,6 +1013,8 @@ final class GestureRecorderNode: BaseGraphNode {
 
     // MARK: - Ports
     
+    override var category: NodeCategory { .control }
+    
     override var ports: [NodePort] {
         [
             // Outputs (modulation signals)
@@ -1035,7 +1049,7 @@ final class GestureRecorderNode: BaseGraphNode {
     }
     
     /// Get current X output (live input during recording, trajectory during playback)
-    private func currentOutputX() -> Float {
+    func currentOutputX() -> Float {
         switch state {
         case .recording:
             return inputX
@@ -1047,7 +1061,7 @@ final class GestureRecorderNode: BaseGraphNode {
     }
     
     /// Get current Y output
-    private func currentOutputY() -> Float {
+    func currentOutputY() -> Float {
         switch state {
         case .recording:
             return inputY
@@ -1059,7 +1073,7 @@ final class GestureRecorderNode: BaseGraphNode {
     }
     
     /// Get current pressure output
-    private func currentOutputPressure() -> Float {
+    func currentOutputPressure() -> Float {
         switch state {
         case .recording:
             return inputPressure
@@ -1139,6 +1153,9 @@ final class GestureRecorderNode: BaseGraphNode {
     /// Stop recording and store trajectory
     func stopRecording() {
         guard state == .recording else { return }
+        
+        // Capture the final input state so short recordings/tests have at least one point.
+        capturePoint()
         
         recordTimer?.invalidate()
         recordTimer = nil
@@ -1248,16 +1265,18 @@ final class GestureRecorderNode: BaseGraphNode {
     
     // MARK: - Private
     
-    /// Capture current input state at 60Hz during recording
-    private func capturePoint() {
+    /// Capture current input state at 60Hz during recording.
+    /// - Parameter time: Optional absolute time; if omitted, the current time is used.
+    func capturePoint(at time: TimeInterval? = nil) {
         guard state == .recording else { return }
         guard let start = recordingStartTime else { return }
         
+        let t = time ?? Date().timeIntervalSince(start)
         let point = GesturePoint(
             x: inputX,
             y: inputY,
             pressure: inputPressure,
-            time: Date().timeIntervalSince(start)
+            time: t
         )
         
         recordingBuffer.append(point)

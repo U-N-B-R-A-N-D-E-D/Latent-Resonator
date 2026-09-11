@@ -30,7 +30,7 @@ todos:
     content: "Verification: A/B test suite comparing v1.x vs v2.0 audio quality across all factory presets, >99.9% correlation required"
     status: pending
   - id: docs-update
-    content: Update ARCHITECTURE_v2_NODAL.md and IMPLEMENTATION_VERIFICATION.md to reflect completed status, remove RFC banners
+    content: "Update ARCHITECTURE_v2_NODAL.md and IMPLEMENTATION_VERIFICATION.md to reflect completed status, remove RFC banners (superseded docs — historical plan item; live spec is LatentResonator/LatentResonator/Graph/NodeGraph.swift)"
     status: pending
 isProject: false
 ---

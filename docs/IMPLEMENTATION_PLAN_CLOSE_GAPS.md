@@ -1,5 +1,7 @@
 # Latent Resonator — Implementation Plan to Close Technical Gaps
 
+> **Superseded.** This document describes the pre-pull-render, `AudioGraphMapper`-based migration. The shipped architecture is pull-render + native canvas (`GraphAudioEngine` → `ExecutionPlan` → `DSPNode`, `PatchCanvasView`). See `README.md` and `.cursor/skills/v2-node-graph/SKILL.md`; code is truth.
+
 > **Date:** 2026-04-17  
 > **Objective:** Complete cohesive plan to transform LR from current state to production-ready instrument with native ACE inference and per-node prompting  
 > **Alignment:** Whitepaper — `S(i+1) = ACE(S(i) + N(μ,σ), P, γ)`
@@ -458,7 +460,7 @@ extension Float {
 
 **Architecture:**
 ```
-MacroNode "MOOG BASS"
+MacroNode "FERROFLUID DRONE"
 ├── OscillatorNode (excitation)
 ├── LadderFilterNode (shaping)
 ├── PromptEngineNode (semantic control) ─┐
@@ -1050,8 +1052,8 @@ func createWhitepaperTopology() -> NodeGraph {
 // In LatentResonator/Config/FactoryMacros.swift
 
 enum FactoryMacro: String, CaseIterable {
-    case moogBass = "MOOG BASS"
-    case tb303Acid = "TB-303 ACID"
+    case moogBass = "FERROFLUID DRONE"
+    case tb303Acid = "SPECTRAL TIDE"
     case buchlaPerc = "BUCHLA PERC"
     case rolandPad = "ROLAND PAD"
     case noiseScape = "NOISE SCAPE"

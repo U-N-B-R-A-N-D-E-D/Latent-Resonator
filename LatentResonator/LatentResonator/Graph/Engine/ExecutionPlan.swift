@@ -33,14 +33,18 @@ final class ExecutionPlan {
         /// audio-input port count (sorted by port id for stability).
         let inputBufferIndices: [Int]
 
+        /// Map from audio input `targetPortId` to the index within
+        /// `inputBufferIndices`. Lets nodes (notably `MacroNode`) resolve
+        /// which physical input slot corresponds to a named port without
+        /// re-scanning edges on the audio thread. Built on the main thread
+        /// during plan construction; read-only on the audio thread.
+        let inputPortIndexMap: [String: Int]
+
         /// Buffer-pool slot this step writes to, OR `ExecutionPlan.terminalSlot`
         /// if this is the master output and the engine should write to
         /// the ABL instead.
         let outputBufferIndex: Int
 
-        /// Control-rate values keyed by port id (Phase 1: empty; the
-        /// `ControlGraphEvaluator` will populate these in a later pass).
-        let controls: [String: Float]
     }
 
     let steps: [Step]
@@ -81,6 +85,14 @@ extension ExecutionPlan {
     ///    `targetPortId` so that mixer-style nodes receive their inputs
     ///    in `in0`, `in1`, … order.
     ///
+    /// `MacroNode` now participates (Fix 4a closed): it conforms to
+    /// `GraphNodeDSPProvider` / `DSPNode`, so a collapsed macro renders its
+    /// `internalGraph` through its own cached internal `ExecutionPlan`
+    /// (built here on the same `internalGraph`) and writes the internal
+    /// terminal into its own output buffer. Expanded macros still
+    /// participate — they emit silence in `render(...)` while their
+    /// promoted internal nodes are rendered directly by this parent plan.
+    ///
     /// - Returns: A plan, or `nil` if the graph has no participating DSP
     ///   nodes (engine renders silence in that case).
     static func build(
@@ -89,7 +101,8 @@ extension ExecutionPlan {
     ) -> ExecutionPlan? {
         let topo = graph.topologicalSort()
 
-        // Collect participating nodes in topo order
+        // Collect participating nodes in topo order. MacroNode now conforms
+        // (Fix 4a) and is no longer skipped here.
         var participating: [(UUID, DSPNode)] = []
         participating.reserveCapacity(topo.count)
         for nid in topo {
@@ -145,8 +158,11 @@ extension ExecutionPlan {
                 .sorted { $0.targetPortId < $1.targetPortId }
 
             var inputs: [Int] = []
+            var inputPortIndexMap: [String: Int] = [:]
             inputs.reserveCapacity(incoming.count)
-            for edge in incoming {
+            inputPortIndexMap.reserveCapacity(incoming.count)
+            for (index, edge) in incoming.enumerated() {
+                inputPortIndexMap[edge.targetPortId] = index
                 if let slot = bufferIndex[edge.sourceNodeId] {
                     inputs.append(slot)
                 }
@@ -155,13 +171,26 @@ extension ExecutionPlan {
                 // count, which is the right behavior during migration.
             }
 
+            // Hand the parent step's input-port map to a MacroNode so it can
+            // pre-compute external-input routing once its internal plan is
+            // rebuilt. This is the only cross-node mutation performed during
+            // plan build; it runs on the main thread and is read-only on the
+            // audio thread (via the macro's `externalInputRouting` snapshot).
+            if let macroNode = graph.nodes[nid] as? MacroNode {
+                macroNode.parentStepInputPortIndexMap = inputPortIndexMap
+                // Rebuild the macro's internal plan now that the parent
+                // input-port map is known, so external-input routing is
+                // computed against the correct parent map and internal plan.
+                macroNode.rebuildInternalPlanIfNeeded(frameCapacity: frameCapacity)
+            }
+
             let outputIndex = isTerminal ? terminalSlot : (bufferIndex[nid] ?? 0)
             steps.append(Step(
                 nodeId: nid,
                 dspNode: dsp,
                 inputBufferIndices: inputs,
-                outputBufferIndex: outputIndex,
-                controls: [:]   // Phase 1: control evaluation deferred
+                inputPortIndexMap: inputPortIndexMap,
+                outputBufferIndex: outputIndex
             ))
         }
 
@@ -170,6 +199,85 @@ extension ExecutionPlan {
             bufferPool: pool,
             frameCapacity: frameCapacity,
             terminalNodeId: terminalId
+        )
+    }
+}
+
+// MARK: - External audio input slot injection (collapsed macro inputs)
+
+extension ExecutionPlan {
+    /// Returns a new plan with extra `BufferPool` slots reserved for external
+    /// audio inputs into a macro's internal graph. The internal steps that
+    /// receive external inputs get their `inputBufferIndices` and
+    /// `inputPortIndexMap` updated to include the new slots, keeping the
+    /// target-port-id sort order that mixer-style nodes rely on.
+    ///
+    /// - Parameter externalInputs: `(externalPortId, internalNodeId, internalPortId)`
+    ///   tuples describing each mapped external audio input port.
+    func planAddingExternalAudioInputs(
+        _ externalInputs: [(externalPortId: String, internalNodeId: UUID, internalPortId: String)]
+    ) -> ExecutionPlan {
+        guard !externalInputs.isEmpty else { return self }
+
+        // Assign each external input a fresh buffer slot appended after the
+        // existing internal slots, so existing indices remain valid.
+        var externalSlotByPort: [String: Int] = [:]
+        var nextSlot = bufferPool.count
+        for input in externalInputs {
+            externalSlotByPort[input.externalPortId] = nextSlot
+            nextSlot += 1
+        }
+
+        // Group external inputs by the internal node they feed.
+        var externalsByNode: [UUID: [(portId: String, slot: Int)]] = [:]
+        for input in externalInputs {
+            if let slot = externalSlotByPort[input.externalPortId] {
+                externalsByNode[input.internalNodeId, default: []].append((input.internalPortId, slot))
+            }
+        }
+
+        let newPool = BufferPool(count: bufferPool.count + externalInputs.count, frameCapacity: frameCapacity)
+
+        let newSteps = steps.map { step -> Step in
+            guard let externals = externalsByNode[step.nodeId] else {
+                return Step(
+                    nodeId: step.nodeId,
+                    dspNode: step.dspNode,
+                    inputBufferIndices: step.inputBufferIndices,
+                    inputPortIndexMap: step.inputPortIndexMap,
+                    outputBufferIndex: step.outputBufferIndex
+                )
+            }
+
+            // Merge existing internal inputs with the new external inputs,
+            // then sort by target port id to preserve mixer in0/in1/… order.
+            var portToSlot: [String: Int] = [:]
+            for (portId, index) in step.inputPortIndexMap {
+                portToSlot[portId] = step.inputBufferIndices[index]
+            }
+            for (portId, slot) in externals {
+                portToSlot[portId] = slot
+            }
+            let sorted = portToSlot.sorted { $0.key < $1.key }
+            let newInputBufferIndices = sorted.map { $0.value }
+            let newInputPortIndexMap = Dictionary(
+                uniqueKeysWithValues: sorted.enumerated().map { (offset, pair) in (pair.key, offset) }
+            )
+
+            return Step(
+                nodeId: step.nodeId,
+                dspNode: step.dspNode,
+                inputBufferIndices: newInputBufferIndices,
+                inputPortIndexMap: newInputPortIndexMap,
+                outputBufferIndex: step.outputBufferIndex
+            )
+        }
+
+        return ExecutionPlan(
+            steps: newSteps,
+            bufferPool: newPool,
+            frameCapacity: frameCapacity,
+            terminalNodeId: terminalNodeId
         )
     }
 }

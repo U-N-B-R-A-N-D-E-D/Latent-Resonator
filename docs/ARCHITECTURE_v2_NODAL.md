@@ -1,5 +1,7 @@
 # Latent Resonator v2.0 — Dataflow Architecture
 
+> **Superseded.** This RFC specifies a WKWebView/React-Flow canvas and an `AudioGraphMapper`-rebuilds-AVAudioEngine model. Neither was implemented as written. **Source of truth:** `LatentResonator/LatentResonator/Graph/` (start at `NodeGraph.swift`) — pull-render + native canvas (`GraphAudioEngine` → `ExecutionPlan` → `DSPNode`, `PatchCanvasView`, CANVAS \| PERFORM modes). See also `README.md` and `.cursor/skills/v2-node-graph/SKILL.md`.
+
 ## Technical Specification: Fixed-Topology to Node-Graph Migration
 
 **Version**: 0.2
@@ -595,8 +597,8 @@ Each `LanePreset` becomes a factory macro-node containing the full 14-stage proc
 
 | Macro-Node | Internal Topology | Key Params Exposed |
 |-----------|-------------------|-------------------|
-| MOOG BASS | SAW→FFT→SemanticEQ[moog]→...→IFFT→Ladder[LP,200Hz]→Comb[d=137]→... | cfg, feedback, cutoff, warmth |
-| TB-303 ACID | SQUARE→FFT→SemanticEQ[acid]→...→IFFT→Ladder[LP,800Hz,res=0.7]→... | cfg, feedback, cutoff, resonance |
+| FERROFLUID DRONE (RFC label: MOOG BASS) | SAW→FFT→SemanticEQ[moog]→...→IFFT→Ladder[LP,200Hz]→Comb[d=137]→... | cfg, feedback, cutoff, warmth |
+| SPECTRAL TIDE (RFC label: TB-303 ACID) | SQUARE→FFT→SemanticEQ[acid]→...→IFFT→Ladder[LP,800Hz,res=0.7]→... | cfg, feedback, cutoff, resonance |
 | DRUM LANE | KOENIG→FFT→SemanticEQ[percussion]→...→IFFT→Ladder[BP]→... | cfg, feedback, drumVoice, entropy |
 | BUCHLA PERC | KOENIG→FFT→SemanticEQ[buchla]→...→IFFT→Ladder[BP]→... | cfg, feedback, cutoff |
 | ARP LEAD | SQUARE→FFT→SemanticEQ[lead]→...→IFFT→Ladder[LP]→... | cfg, feedback, cutoff, resonance |
