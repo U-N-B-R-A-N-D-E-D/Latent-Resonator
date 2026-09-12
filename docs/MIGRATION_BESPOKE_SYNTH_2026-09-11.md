@@ -10,11 +10,13 @@ hace 20+ años en otro lado. Lo que sí funciona y no tiene por qué tirarse es 
 recursivo del whitepaper. Ver `docs/whitepaper.md` para la fórmula `S(i+1) = ACE(S(i) +
 N(μ,σ), P, γ)`.
 
-Decisión: migrar todo a **Bespoke Synth** (github.com/BespokeSynth/BespokeSynth, GPL,
-activo — último update jun 2026, ~3700 miembros en Discord). Ya existe precedente directo
-del patrón que necesitamos: un módulo **StableAudio3** (PR mayo 2026) genera audio desde
-un prompt vía modelo neural, embebido como nodo del patch — es la prueba de que este patrón
-ya es aceptado por la comunidad y por los maintainers.
+Decisión: migrar todo a **Bespoke Synth** (github.com/BespokeSynth/BespokeSynth, GPL-3,
+activo — último update jun 2026) como base sobre la que corre **nuestro** proyecto.
+Esto es un fork/build propio, no una contribución al proyecto de Cycling/BespokeSynth —
+no se abre PR ni se coordina con su Discord. Ya existe precedente técnico directo del
+patrón que necesitamos: un módulo **StableAudio3** (mayo 2026) genera audio desde un
+prompt vía modelo neural, embebido como nodo del patch — lo usamos como referencia de
+implementación real, no como aval de nadie.
 
 Dato de arquitectura clave (confirmado con research, no supuesto): el cuello de botella
 real es la inferencia de ACE-Step en sí (CPU local), no el host. Ningún entorno —Bespoke,
@@ -65,23 +67,22 @@ vía por subprocess+HTTP que ya tenemos probada.
 
 ## Fases
 
-### Fase 0 — Alinear con la comunidad *antes* de escribir código
+### Fase 0 — Esto es nuestro fork, no una contribución a Bespoke
 
 Bespoke no carga módulos externos — todo vive compilado dentro del propio binario. Eso
-significa que el camino real no es "plugin drop-in", es **fork mantenido o merge upstream**.
-Su propio `CONTRIBUTING.md` pide explícitamente esto antes de tocar código:
+significa que técnicamente el único camino para tener `ModuleACEResonator` corriendo es
+un **fork propio**, con nuestro módulo agregado a su árbol de fuentes y compilado como
+parte de nuestro propio binario. Eso es exactamente lo que hicimos y lo que seguimos
+haciendo — **no** hay intención de PR a `BespokeSynth/BespokeSynth`, ni de coordinar nada
+en su Discord. Su código sigue siendo de ellos (GPL-3, Copyright Ryan Challinor); nosotros
+mantenemos nuestro propio fork/build con el módulo agregado, para uso propio.
 
-1. Unirse al Discord (discord.gg/YdTMkvvpZZ), canal `#feature-request`.
-2. Postear la propuesta citando el precedente de `StableAudio3` como referencia directa,
-   y preguntar si prefieren:
-   - (a) un módulo nuevo vía PR a `main` (subprocess + HTTP, como ya lo tenemos probado), o
-   - (b) integración vía el `ScriptModule` embebido (Python nativo, sin subprocess).
-3. Confirmar con los maintainers el apetito por una dependencia pesada (torch, modelo de
-   varios GB) — puede que prefieran que viva en un fork mantenido en vez de mergearse a
-   `main` por tamaño/footprint. Esto decide si Fase 5 termina en PR o en fork propio.
-
-No se escribe una línea de C++ hasta tener esta señal — evita repetir el error de esta
-vez (4 meses construidos en el vacío, sin feedback externo).
+Implicancia real (no de comunidad, de licencia): Bespoke Synth es GPL-3. Si en algún
+momento distribuimos un binario compilado de nuestro fork fuera de esta organización,
+la GPL-3 nos obliga a poner el código fuente completo de ese fork a disposición de quien
+lo reciba. Esto no bloquea nada hoy (todo el trabajo vive en nuestro propio repo, público),
+pero es una obligación real a tener presente antes de un release binario, no un detalle
+de cortesía.
 
 ### Fase 1 — Congelar el "jugo real" en un paquete host-agnóstico
 
@@ -108,8 +109,9 @@ Confirmar que compila limpio ANTES de escribir el módulo nuevo. Mientras tanto,
 - `Source/ModuleContainer.h` — cómo el host registra/orquesta módulos.
 - `Source/ScriptModule.cpp` / `ScriptModule_PythonInterface.i` — el Python embebido, para
   evaluar la opción B de la Fase 3.
-- Un módulo comparable ya mergeado (ideal: el propio `StableAudio3` si el maintainer lo
-  señala en el Discord de la Fase 0) como referencia de estilo real, no inventado.
+- Un módulo comparable ya existente en su árbol de fuentes (ideal: el propio
+  `StableAudio3`, o `SamplePlayer` como ya se usó) como referencia de estilo real,
+  no inventado.
 
 ### Fase 3 — Portar el ciclo de vida del bridge a un módulo nuevo
 
@@ -133,7 +135,7 @@ Nuevo módulo: `Source/ModuleACEResonator.cpp/h`, hereda de `IAudioProcessor`.
 - Riesgo real: el intérprete embebido de Bespoke tiene su propio Python empaquetado
   (`bundle-python.cmake`) — instalar torch + deps de ACE-Step ahí puede chocar con lo que
   ya tenemos andando en `.venv-ace-bridge/`. Se evalúa como v2 una vez que la Opción A esté
-  en producción y haya feedback de la comunidad (Fase 0 ya deja esto preguntado).
+  funcionando de punta a punta en nuestro fork.
 
 ### Fase 4 — Validar contra el comportamiento viejo, no contra el código viejo
 
@@ -146,14 +148,16 @@ Nuevo módulo: `Source/ModuleACEResonator.cpp/h`, hereda de `IAudioProcessor`.
   arranque/cierre limpio del subprocess sin huérfanos — la misma barra de verificación que
   ya se usó para el `.app` de Swift.
 
-### Fase 5 — Contribución upstream
+### Fase 5 — Nuestro propio fork/release, sin PR a nadie
 
-- Pasar `clang-format` (el propio `.clang-format` del repo).
-- Abrir PR contra `main` vía la vista de compare de GitHub, mencionar el hilo de Discord
-  de la Fase 0, aclarar explícitamente que los pesos del modelo NO se bundlean (igual que
-  el CTA que ya usábamos para el repo Swift: son locales, no van en git).
-- Si Fase 0 devolvió "mejor como fork" en vez de merge a `main`, este paso se reemplaza por
-  mantener un fork documentado con release propio, mismo criterio de calidad.
+- Pasar `clang-format` (el propio `.clang-format` del repo) — buena práctica de código,
+  no un requisito de aprobación externa.
+- Mantener el fork de Bespoke Synth con `ModuleACEResonator` agregado como el build que
+  usamos y distribuimos nosotros. Documentar claramente en el README de ese fork que los
+  pesos del modelo NO se bundlean (son locales, no van en git) — mismo criterio que ya
+  usábamos para el repo Swift.
+- Si en algún momento tiene sentido compartir el módulo con el proyecto original, es una
+  decisión de producto a evaluar más adelante — no un paso de este plan.
 
 ### Fase 6 — Dar de baja el repo Swift
 
@@ -162,20 +166,26 @@ Nuevo módulo: `Source/ModuleACEResonator.cpp/h`, hereda de `IAudioProcessor`.
 - Dropear `stash@{0}` (ya confirmado muerto en la revisión anterior).
 - Retirar `LatentResonator.xcodeproj`, el canvas SwiftUI, el motor de grafo custom y los
   122 tests Swift asociados.
-- Actualizar el `README.md` raíz para apuntar al nuevo módulo/fork de Bespoke Synth como
-  proyecto vivo, enlazando `docs/whitepaper.md` como fundamento conceptual.
+- Actualizar el `README.md` raíz para apuntar a nuestro fork de Bespoke Synth (con
+  `ModuleACEResonator` incorporado) como proyecto vivo, enlazando `docs/whitepaper.md`
+  como fundamento conceptual.
 
 ---
 
 ## Riesgos a vigilar
 
-- **Licencia/tamaño**: torch + pesos de ACE-Step son pesados; puede que el maintainer de
-  Bespoke prefiera no mergear esto a `main` por footprint — de ahí que Fase 0 pregunte
-  esto explícitamente antes de invertir tiempo en Fase 3.
+- **Licencia GPL-3 de Bespoke Synth**: al usar su código como base de nuestro fork,
+  cualquier binario que distribuyamos de ese fork queda sujeto a GPL-3 — código fuente
+  completo disponible para quien lo reciba. No es un tema de "pedir permiso", es una
+  obligación legal a cumplir al momento de un release, no antes.
 - **CPU local sigue siendo el techo real**: migrar de host no cambia la velocidad de
   inferencia de ACE-Step en CPU. Si la latencia por bloque sigue siendo alta, el patrón
   ring-buffer + thread pool la absorbe (no bloquea el audio), pero la "sensación" de
   resonador recursivo en vivo depende de conseguir GPU en algún momento — esto es
   independiente de la migración y no lo resuelve por sí sola.
 - **Opción B (Python embebido) es la más incierta** — no evaluar hasta tener Opción A
-  funcionando y feedback real de la comunidad.
+  funcionando de punta a punta en nuestro fork.
+- **Mantener un fork implica arrastrar sus futuros cambios manualmente** (rebase/merge
+  periódico contra `BespokeSynth/BespokeSynth` upstream si queremos sus mejoras) — costo
+  de mantenimiento a largo plazo que no existía con el canvas 100% propio, a cambio de no
+  tener que mantener nosotros mismos un motor de UI de audio en tiempo real.
