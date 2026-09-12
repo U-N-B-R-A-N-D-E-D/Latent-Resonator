@@ -22,7 +22,14 @@ plain (non-hidden) `REGISTER(...)` block, right after `TapeLooper`:
 ```cpp
    REGISTER(ChordKeyboard, chordkeyboard, kModuleCategory_Note);
    REGISTER(TapeLooper, tapelooper, kModuleCategory_Audio);
-   REGISTER(ModuleACEResonator, aceresonator, kModuleCategory_Synth);   // <-- added, ModuleFactory.cpp line 527
+   REGISTER(ModuleACEResonator, latentresonator, kModuleCategory_Synth);   // <-- added, ModuleFactory.cpp line 527
+
+   (Registered name changed from `aceresonator` to `latentresonator` after
+   interactive testing surfaced the request to brand it as Latent Resonator
+   on the canvas -- lowercase/no-space to match every other module's
+   registered-name convention, e.g. `chordkeyboard`, `tapelooper`,
+   `sampleplayer`. The C++ class stays `ModuleACEResonator` -- that's
+   internal source naming, never shown to a user.)
 ```
 
 `kModuleCategory_Synth` was chosen from the enum in `Source/ModuleFactory.h`
