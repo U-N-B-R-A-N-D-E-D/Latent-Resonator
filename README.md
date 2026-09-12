@@ -15,13 +15,29 @@ Grounded in the avant-garde traditions of Musique Concrète (Schaeffer), Stochas
 
 > *"We do not create music; we organize sound, and in the process, we allow the machine to reveal its own acoustic unconscious."*
 
-## Screenshots
+## Project Status
 
-| Setup | Perform |
-|-------|---------|
-| [![Setup](docs/screenshots/setup.png)](docs/screenshots/setup.png) | [![Perform](docs/screenshots/perform.png)](docs/screenshots/perform.png) |
+This repository is mid-migration away from the custom native SwiftUI canvas
+(the `LatentResonator.app` documented below) toward **[Bespoke Synth](https://www.bespokesynth.com/)**,
+an actively maintained, open-source (GPL-3.0) modular synthesizer with a
+proven node-based UI. The custom canvas was the source of most UX friction
+(rendering lag, no smooth cable/node interaction); the neural feedback loop
+itself -- the actual research contribution -- is being carried over, not
+rebuilt. See [`docs/MIGRATION_BESPOKE_SYNTH_2026-09-11.md`](docs/MIGRATION_BESPOKE_SYNTH_2026-09-11.md)
+for the full plan.
 
-*Setup: multi-lane configuration, Drift Field, channel mixer. Perform: Motherbase, step grid, P-locks, XY pad, lane headers.*
+**Done and verified:**
+- [`bespoke-migration/ace-bridge/`](bespoke-migration/ace-bridge/) -- the ACE-Step Python bridge, extracted into a standalone, host-agnostic package (9/9 tests passing).
+- [`bespoke-migration/module/`](bespoke-migration/module/) -- `ModuleACEResonator`, a real Bespoke Synth module implementing the `S(i+1) = ACE(S(i) + N(mu,sigma), P, gamma)` recursion, written and verified against an actual local build of Bespoke Synth (see [`BUILD_VERIFICATION.md`](bespoke-migration/module/BUILD_VERIFICATION.md)).
+
+**Pending** (human/community steps, not automatable): aligning with the
+Bespoke Synth community on Discord before proposing the module upstream, and
+opening the pull request itself.
+
+The Swift app below (v1.0.3) remains downloadable and functional, but is now
+**legacy** -- it is not receiving further UI work. Its screenshots have been
+removed from this README since they depict the canvas being phased out; new
+screenshots will follow once the Bespoke Synth module lands.
 
 ---
 
@@ -47,7 +63,32 @@ xattr -cr /path/to/LatentResonator.app
 
 ---
 
-## Architecture
+## Bespoke Synth Module (Active Development)
+
+`ModuleACEResonator` reimplements the same recursion inside Bespoke Synth,
+with the slow, CPU-bound neural inference fully isolated from both the audio
+thread and the UI thread:
+
+```mermaid
+graph TD
+    Input["Live input audio"] --> Snapshot["Rolling snapshot buffer S(i)\n(audio thread, Process())"]
+    Snapshot -->|"trigger: button or patch-cable pulse"| Noise["+ N(mu, sigma)\nGaussian noise injection"]
+    Noise --> Worker["ACEBridgeWorker\n(dedicated background thread)"]
+    Worker -->|"HTTP POST /infer"| Bridge["ace_bridge_server.py\n(ACE-Step 1.5, subprocess)"]
+    Bridge -->|"WAV response"| Worker
+    Worker -->|"atomic publish"| DoubleBuffer["Double-buffered output\n(lock-free handoff)"]
+    DoubleBuffer --> Playback["Process() drains into the patch cable --\nbecomes S(i+1)'s seed on the next trigger"]
+```
+
+Source: [`bespoke-migration/module/ModuleACEResonator.h`](bespoke-migration/module/ModuleACEResonator.h) / [`.cpp`](bespoke-migration/module/ModuleACEResonator.cpp). Build verification, including the exact registration diffs against a real Bespoke Synth checkout: [`BUILD_VERIFICATION.md`](bespoke-migration/module/BUILD_VERIFICATION.md).
+
+---
+
+## Architecture (Legacy Swift App, v1.x)
+
+This section documents the native macOS app as it exists today. It is frozen
+-- no further UI work is planned -- and is kept here for historical reference
+while the Bespoke Synth module above becomes the primary target.
 
 The system runs on two independent clocks. The **real-time DSP path** (solid lines) processes audio at buffer rate (<5 ms latency). The **async inference path** (dotted lines) sends captured audio to ACE-Step or Core ML in the background (2-30 s per cycle) and feeds the hallucinated result back into the mix. When no neural engine is connected, the DSP path operates standalone as the "Black Box Resonator."
 
@@ -497,6 +538,16 @@ Each lane preset defines an `accentColor` string (e.g., "blue", "cyan", "red"). 
 
 ## Testing
 
+### Bespoke Migration Bridge Tests
+
+The standalone, open-source-ready copy of the bridge (`bespoke-migration/ace-bridge/`)
+carries its own verified test suite -- same coverage as the legacy copy below, run
+from its new host-agnostic location:
+
+```bash
+pytest bespoke-migration/ace-bridge/test_bridge.py -v
+```
+
 ### Python Bridge Tests (included)
 
 The Python bridge codec tests are included in the repository and run in CI:
@@ -563,9 +614,13 @@ RLTNAS/
 ├── .gitignore
 ├── docs/
 │   ├── whitepaper.md                # Full research paper
+│   ├── MIGRATION_BESPOKE_SYNTH_2026-09-11.md  # Bespoke Synth migration plan
 │   └── audio/
 │       └── latent_resonator_texture_improv.mp3  # Full session (14m 47s)
-└── LatentResonator/
+├── bespoke-migration/                # Active development target
+│   ├── ace-bridge/                   # Standalone, open-source-ready ACE-Step bridge
+│   └── module/                       # ModuleACEResonator (Bespoke Synth module source)
+└── LatentResonator/                  # Legacy Swift app (v1.x, frozen)
     ├── LatentResonator.xcodeproj/
     └── LatentResonator/
         ├── LatentResonatorApp.swift    # App entry point
