@@ -5,8 +5,9 @@ import AppKit
 
 // MARK: - Performance Motherbase View
 //
-// Fixed-layout performance surface: scenes, crossfader, step grid, focus lane.
+// Fixed-layout performance surface: scenes, crossfader, step grid, macro controls.
 // No scroll; same controls in same place for muscle memory (Elektron-style).
+// v2.0: Migrated to MacroNode-based architecture.
 // Whitepaper §4.2.2, §7.
 
 private typealias DS = LRConstants.DS
@@ -14,19 +15,23 @@ private typealias DS = LRConstants.DS
 struct PerformanceMotherbaseView: View {
 
     @ObservedObject var engine: NeuralEngine
+    @Binding var showTopologyReservoir: Bool
 
     @State private var clipboardStep: PerformanceStep? = nil
-
-    // MARK: XY Axis Mode
-
-    enum XYAxisMode: String, CaseIterable {
-        case txtChs = "TXT/CHS"
-        case cfgFbk = "CFG/FBK"
-        case cutRes = "CUT/RES"
-        case cntFlat = "CNT/FLAT"
-    }
-
-    @State private var xyAxisMode: XYAxisMode = .txtChs
+    @State private var showSequencer = false
+    @State private var showScenes = false
+    @State private var showMacroBindings = false
+    @State private var selectedEnvelopeId: UUID? = nil
+    /// Musician P0.1 — per-control ARM state for the step p-lock strip.
+    /// Keys are `ExposedControl.id`; presence == armed.
+    @State private var armedPLockControls: Set<UUID> = []
+    /// Transient feedback after an explicit scene capture + persistence write.
+    @State private var sceneSavedFeedback: String? = nil
+    /// Current page of the paginated exposed-controls region (Wave C C3).
+    @State private var exposedControlsPage: Int = 0
+    /// Live XY coordinates for the dedicated Gesture Recorder region (Wave C C4).
+    @State private var gestureX: Float = 0.5
+    @State private var gestureY: Float = 0.5
 
     var body: some View {
         ZStack {
@@ -38,315 +43,1497 @@ struct PerformanceMotherbaseView: View {
             .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                topBar
+                performHeader
                 LRDivider()
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: 0) {
-                        masterXYSection
-                            .background(DS.surfaceElevated.opacity(0.5))
-                        LRDivider()
-                        SceneCrossfaderView(engine: engine)
-                        LRDivider()
-                        stepGridSectionOrPlaceholder
-                            .background(DS.surfaceElevated.opacity(0.3))
-                        LRDivider()
-                        laneTabsSection
+
+                // Fixed, dense PERFORM surface (Wave C C3): no whole-surface ScrollView.
+                // Overflow in the exposed-controls region is handled by pagination.
+                VStack(spacing: DS.spacingMD) {
+                    exposedControlsRegion
+
+                    if hasGestureRecorderNodes {
+                        gestureRecorderRegion
+                    }
+
+                    if !metaParameterNodes.isEmpty {
+                        envelopeEditorSection
+                    } else {
+                        inactiveSectionNotice(
+                            title: "ENVELOPES",
+                            color: DS.stageNeural.opacity(0.7),
+                            message: "No Meta Parameter nodes in this patch.",
+                            hint: "Add a Meta Parameter node (right-click canvas → CONTROL) to sculpt time-varying curves."
+                        )
+                    }
+
+                    if !engine.macroNodes.isEmpty {
+                        macroMixerSection
+                    } else {
+                        inactiveSectionNotice(
+                            title: "MACRO MIXER",
+                            color: DS.neonAmbar.opacity(0.7),
+                            message: "No Macro nodes in this patch.",
+                            hint: "Load a macro topology from the Reservoir, or add a Macro node (right-click canvas → MACRO) to mix lanes."
+                        )
+                    }
+
+                    performSectionToggle(
+                        title: "SEQUENCER",
+                        isExpanded: $showSequencer,
+                        hint: "Step grid · P-locks · advance modes"
+                    )
+                    if showSequencer {
+                        stepGridSection
+                    }
+
+                    performSectionToggle(
+                        title: "SCENES",
+                        isExpanded: $showScenes,
+                        hint: "Scene morph · crossfader · scene bank"
+                    )
+                    if showScenes {
+                        sceneCrossfaderSection
                     }
                 }
+                .padding(.bottom, DS.spacingSM)
                 .frame(maxHeight: .infinity)
+
                 triggerButton
                 statusBar
             }
         }
-        .onChange(of: engine.focusLaneId) { _, _ in
+        .onChange(of: engine.focusMacroId) { _, _ in
             engine.selectedStepIndices = []
+            exposedControlsPage = 0
         }
-        .onChange(of: engine.focusLane?.stepGrid.chainLength) { _, newLen in
-            guard let newLen else { return }
-            if let idx = engine.pLockEditingStepIndex, idx >= newLen {
-                engine.pLockEditingStepIndex = nil
-            }
-            engine.selectedStepIndices = engine.selectedStepIndices.filter { $0 < newLen }
+        .onChange(of: engine.crossfaderPosition) { _, _ in
+            engine.applyCrossfader()
         }
-        .onChange(of: engine.focusLane?.stepGrid.advanceMode) { _, _ in
-            engine.syncStepTimer()
-        }
-        .onChange(of: engine.focusLane?.stepGrid.stepTimeBPM) { _, _ in
-            engine.syncStepTimer()
+        .sheet(isPresented: $showMacroBindings) {
+            MacroBindingsPanel(engine: engine)
         }
     }
 
-    // MARK: - Top Bar (+ PANIC button)
+    // MARK: - Header
 
-    private var topBar: some View {
+    private var performHeader: some View {
         HStack(spacing: DS.spacingMD) {
-            Text("MOTHERBASE")
+            Text("PERFORM")
                 .font(DS.font(DS.fontTitle, weight: .bold))
-                .foregroundColor(DS.neonTurquesa.opacity(0.85))
+                .foregroundColor(DS.textPrimary)
 
-            Circle()
-                .fill(engine.aceBridge.status == .modelLoaded ? DS.success : (engine.aceBridge.status == .connected ? DS.warning : DS.textTertiary))
-                .frame(width: DS.dotMD, height: DS.dotMD)
-            Text(engine.aceBridge.status.rawValue)
-                .font(DS.font(DS.fontCaption, weight: .bold))
-                .foregroundColor(DS.textSecondary)
-
-            if engine.aceBridge.lastLatencyMs > 0 {
-                Text(String(format: "%.0fms", engine.aceBridge.lastLatencyMs))
-                    .font(DS.font(DS.fontCaption))
-                    .foregroundColor(DS.neonTurquesa.opacity(0.6))
-            }
+            Text(engine.nodeGraph.nodes.count > 0
+                 ? "\(scopedExposedControls.count) CTRL · \(pagedLayouts.count) PAGE\(pagedLayouts.count == 1 ? "" : "S")"
+                 : "NO PATCH")
+                .font(DS.font(DS.fontCaption2, weight: .bold))
+                .foregroundColor(DS.textTertiary)
 
             Spacer()
 
             if engine.isProcessing {
                 LRToggle(
-                    label: "PANIC", isActive: true, activeColor: DS.danger,
-                    helpText: "Emergency stop -- immediately halt all audio processing (Esc)"
+                    label: "PANIC",
+                    isActive: true,
+                    activeColor: DS.danger,
+                    helpText: "Emergency stop — immediately halt all audio processing (Esc)"
                 ) {
                     engine.stopProcessing()
                 }
             }
 
-            Button(action: { engine.toggleMasterRecording() }) {
-                HStack(spacing: 3) {
-                    Circle()
-                        .fill(engine.isMasterRecording ? DS.danger : DS.textDisabled)
-                        .frame(width: DS.dotMD, height: DS.dotMD)
-                    Text("REC")
-                        .font(DS.font(DS.fontCaption2, weight: .bold))
-                        .foregroundColor(engine.isMasterRecording ? DS.danger : DS.textTertiary)
+            Button(action: { showTopologyReservoir = true }) {
+                HStack(spacing: DS.spacingXS) {
+                    Image(systemName: "square.stack.3d.up")
+                        .font(.system(size: 10))
+                    Text("RESERVOIR")
+                        .font(DS.font(DS.fontCaption, weight: .bold))
                 }
+                .foregroundColor(DS.neonTurquesa)
                 .padding(.horizontal, DS.spacingSM)
-                .padding(.vertical, DS.spacingXS)
-                .contentShape(Rectangle())
+                .padding(.vertical, DS.togglePaddingV)
+                .background(DS.neonTurquesa.opacity(0.12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.radiusSM)
+                        .stroke(DS.neonTurquesa.opacity(0.4), lineWidth: 1)
+                )
+                .cornerRadius(DS.radiusSM)
             }
             .buttonStyle(.plain)
-            .animation(DS.stateTransition, value: engine.isMasterRecording)
-            .help("Master record -- capture the combined output of all lanes to a WAV file (R)")
+            .help("Load or save topology from RESERVOIR")
+
+            Button(action: { showMacroBindings = true }) {
+                Text("MACROS")
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(DS.neonAmbar)
+                    .padding(.horizontal, DS.spacingSM)
+                    .padding(.vertical, DS.togglePaddingV)
+                    .background(DS.neonAmbar.opacity(0.12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DS.radiusSM)
+                            .stroke(DS.neonAmbar.opacity(0.4), lineWidth: 1)
+                    )
+                    .cornerRadius(DS.radiusSM)
+            }
+            .buttonStyle(.plain)
+            .help("Map exposed controls to multiple parameters")
+
+            LRToggle(
+                label: engine.isMasterRecording ? "REC ●" : "REC",
+                isActive: engine.isMasterRecording,
+                activeColor: DS.danger,
+                helpText: "Master record — capture output to WAV (R)"
+            ) {
+                engine.toggleMasterRecording()
+            }
         }
         .padding(.horizontal, DS.spacingXL)
         .padding(.vertical, DS.spacingSM)
     }
 
-    // MARK: - Master XY (Focus Lane) -- Configurable Axes
+    /// Collapsed-by-default section affordance — keeps Elektron theater out of the way.
+    private func performSectionToggle(title: String, isExpanded: Binding<Bool>, hint: String) -> some View {
+        Button(action: { isExpanded.wrappedValue.toggle() }) {
+            HStack(spacing: DS.spacingSM) {
+                Image(systemName: isExpanded.wrappedValue ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(DS.textTertiary)
+                    .frame(width: 12)
+                Text(title)
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(DS.textSecondary)
+                Text(hint)
+                    .font(DS.font(DS.fontCaption2))
+                    .foregroundColor(DS.textDisabled)
+                    .lineLimit(1)
+                Spacer()
+            }
+            .padding(.horizontal, DS.spacingXL)
+            .padding(.vertical, DS.spacingXS)
+        }
+        .buttonStyle(.plain)
+    }
 
-    private var masterXYSection: some View {
+    // MARK: - Stage Controls (Envion §3.1 + §3.5)
+
+    private var scopedExposedControls: [ExposedControl] {
+        if let macro = engine.focusMacro {
+            return engine.nodeGraph.exposedControls.filter { control in
+                control.nodeId == macro.id || macro.internalGraph.nodes.keys.contains(control.nodeId)
+            }
+        }
+        return engine.nodeGraph.exposedControls
+    }
+
+    private var metaParameterNodes: [MetaParameterNode] {
+        engine.nodeGraph.nodes.values.compactMap { $0 as? MetaParameterNode }
+    }
+
+    private var pagedLayouts: [PerformLayout] {
+        PerformLayoutEngine.computePages(for: scopedExposedControls)
+    }
+
+    private var hasGestureRecorderNodes: Bool {
+        engine.nodeGraph.nodes.values.contains { $0 as? GestureRecorderNode != nil }
+    }
+
+    // MARK: - Fixed Exposed-Controls Region (Wave C C3)
+
+    /// Paginated, fixed-region control surface. No ScrollView — overflow is
+    /// handled by page buttons, keeping the instrument as one dense panel.
+    private var exposedControlsRegion: some View {
         VStack(spacing: DS.spacingSM) {
-            HStack(spacing: 0) {
-                Group {
-                    Text("DRIFT")
-                        .font(DS.font(DS.fontCaption, weight: .bold))
-                        .foregroundColor(DS.neonTurquesa.opacity(0.65))
-                    if let lane = engine.focusLane {
-                        Text(" // \(lane.name)")
-                            .font(DS.font(DS.fontCaption, weight: .bold))
-                            .foregroundColor(DS.accentColor(for: lane.accentColorName))
-                    } else {
-                        Text(" // NO LANE")
-                            .font(DS.font(DS.fontCaption, weight: .bold))
+            if pagedLayouts.isEmpty {
+                emptyControlsPlaceholder
+                    .padding(.horizontal, DS.spacingXL)
+            } else {
+                let layouts = pagedLayouts
+                let page = max(0, min(exposedControlsPage, layouts.count - 1))
+                let activeLayout = layouts.isEmpty ? nil : layouts[page]
+
+                if layouts.count > 1 {
+                    HStack(spacing: DS.spacingSM) {
+                        Text("PAGE")
+                            .font(DS.font(DS.fontCaption2, weight: .bold))
+                            .foregroundColor(DS.textTertiary)
+                        ForEach(0..<layouts.count, id: \.self) { idx in
+                            Button {
+                                exposedControlsPage = idx
+                            } label: {
+                                Text("\(idx + 1)")
+                                    .font(DS.font(DS.fontCaption2, weight: .bold))
+                                    .foregroundColor(idx == page ? .black : DS.textTertiary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(idx == page ? DS.neonAmbar : DS.surfaceSubtle)
+                                    .cornerRadius(2)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        Spacer()
+                        Text("\(scopedExposedControls.count) CTRL")
+                            .font(DS.font(DS.fontCaption2, weight: .bold))
                             .foregroundColor(DS.textTertiary)
                     }
+                    .padding(.horizontal, DS.spacingXL)
                 }
-                Spacer()
-                xyAxisModePicker
-            }
-            if let lane = engine.focusLane {
-                MasterXYPadView(lane: lane, engine: engine, xyAxisMode: xyAxisMode,
-                    xyBindingX: xyBindingX, xyBindingY: xyBindingY,
-                    xyRangeX: xyRangeX, xyRangeY: xyRangeY,
-                    xyLabelX: xyLabelX, xyLabelY: xyLabelY)
-            } else {
-                RoundedRectangle(cornerRadius: DS.radiusSM)
-                    .fill(DS.panelHollow)
-                    .frame(height: LRConstants.xyPadHeight)
-                    .overlay(Text("NO LANE").font(DS.font(DS.fontBody)).foregroundColor(DS.textTertiary))
-            }
-        }
-        .padding(.horizontal, DS.spacingXL)
-        .padding(.vertical, DS.spacingSM)
-    }
 
-    private var xyAxisModePicker: some View {
-        LRSegmentPicker(
-            items: XYAxisMode.allCases,
-            selected: xyAxisMode,
-            color: DS.neonTurquesa,
-            labelForItem: { $0.rawValue },
-            onSelect: { xyAxisMode = $0 }
-        )
-        .frame(width: 200)
-        .help(
-            "Choose which parameters the XY pad controls. TXT/CHS = macros, CFG/FBK = neural, "
-            + "CUT/RES = filter, CNT/FLAT = read-only spectral analysis"
-        )
-    }
-
-    private func xyBindingX(lane: ResonatorLane) -> Binding<Float> {
-        switch xyAxisMode {
-        case .txtChs: return pLockBinding(lane: lane, stepIndex: engine.pLockEditingStepIndex,
-                                          laneGet: { lane.texture }, laneSet: { lane.texture = $0 },
-                                          lockKeyPath: \.texture)
-        case .cfgFbk: return pLockBinding(lane: lane, stepIndex: engine.pLockEditingStepIndex,
-                                          laneGet: { lane.guidanceScale }, laneSet: { lane.guidanceScale = $0 },
-                                          lockKeyPath: \.cfg)
-        case .cutRes: return pLockBinding(lane: lane, stepIndex: engine.pLockEditingStepIndex,
-                                          laneGet: { lane.filterCutoff }, laneSet: { lane.filterCutoff = $0 },
-                                          lockKeyPath: \.filterCutoff)
-        case .cntFlat: return Binding(get: { lane.spectralCentroidNormalized }, set: { _ in })
-        }
-    }
-
-    private func xyBindingY(lane: ResonatorLane) -> Binding<Float> {
-        switch xyAxisMode {
-        case .txtChs: return pLockBinding(lane: lane, stepIndex: engine.pLockEditingStepIndex,
-                                          laneGet: { lane.chaos }, laneSet: { lane.chaos = $0 },
-                                          lockKeyPath: \.chaos)
-        case .cfgFbk: return pLockBinding(lane: lane, stepIndex: engine.pLockEditingStepIndex,
-                                          laneGet: { lane.feedbackAmount }, laneSet: { lane.feedbackAmount = $0 },
-                                          lockKeyPath: \.feedback)
-        case .cutRes: return pLockBinding(lane: lane, stepIndex: engine.pLockEditingStepIndex,
-                                          laneGet: { lane.filterResonance }, laneSet: { lane.filterResonance = $0 },
-                                          lockKeyPath: \.filterResonance)
-        case .cntFlat: return Binding(get: { lane.spectralFlatnessNormalized }, set: { _ in })
-        }
-    }
-
-    private var xyRangeX: ClosedRange<Float> {
-        switch xyAxisMode {
-        case .txtChs: return LRConstants.macroRange
-        case .cfgFbk: return LRConstants.cfgScaleRange
-        case .cutRes: return LRConstants.filterCutoffRange
-        case .cntFlat: return 0.0...1.0
-        }
-    }
-
-    private var xyRangeY: ClosedRange<Float> {
-        switch xyAxisMode {
-        case .txtChs: return LRConstants.macroRange
-        case .cfgFbk: return LRConstants.feedbackRange
-        case .cutRes: return LRConstants.filterResonanceRange
-        case .cntFlat: return 0.0...1.0
-        }
-    }
-
-    private var xyLabelX: String {
-        switch xyAxisMode {
-        case .txtChs: return "TXT"
-        case .cfgFbk: return "CFG"
-        case .cutRes: return "CUT"
-        case .cntFlat: return "CNT"
-        }
-    }
-
-    private var xyLabelY: String {
-        switch xyAxisMode {
-        case .txtChs: return "CHS"
-        case .cfgFbk: return "FBK"
-        case .cutRes: return "RES"
-        case .cntFlat: return "FLAT"
-        }
-    }
-
-    /// Creates a binding that reads/writes from a step lock when editing, or from the lane directly otherwise.
-    /// When 2+ steps are selected, set applies the lock to all selected steps (drift pad batch apply).
-    private func pLockBinding(
-        lane: ResonatorLane,
-        stepIndex: Int?,
-        laneGet: @escaping () -> Float,
-        laneSet: @escaping (Float) -> Void,
-        lockKeyPath: WritableKeyPath<PerformanceStep, Float?>
-    ) -> Binding<Float> {
-        if let idx = stepIndex {
-            return Binding(
-                get: { lane.stepGrid.step(at: idx)?[keyPath: lockKeyPath] ?? laneGet() },
-                set: { val in
-                    if engine.selectedStepIndices.count >= 2 {
-                        engine.setStepLockForSelected(lockKeyPath, value: val)
-                    } else {
-                        engine.setStepLock(at: idx, lockKeyPath, value: val)
+                if let activeLayout = activeLayout {
+                    VStack(spacing: DS.spacingSM) {
+                        ForEach(activeLayout.rows) { row in
+                            HStack(spacing: DS.spacingSM) {
+                                ForEach(row.items) { item in
+                                    layoutItemView(item, knobSize: activeLayout.knobSize)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                        }
                     }
+                    .padding(.horizontal, DS.spacingXL)
+                    .padding(.vertical, DS.spacingXS)
+                    .background(DS.surfaceElevated.opacity(0.2))
+                    .cornerRadius(DS.radiusSM)
+                }
+            }
+        }
+    }
+
+    // MARK: - Gesture Recorder XY Region (Wave C C4)
+
+    /// Dedicated compact XY pad that feeds any recording GestureRecorderNode.
+    /// Collapses to zero size when no gesture recorder exists in the graph.
+    private var gestureRecorderRegion: some View {
+        VStack(spacing: DS.spacingSM) {
+            HStack(spacing: DS.spacingSM) {
+                Rectangle()
+                    .fill(DS.neonTurquesa)
+                    .frame(width: 3, height: 14)
+                Text("GESTURE")
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(DS.neonTurquesa)
+                Spacer()
+            }
+            .padding(.horizontal, DS.spacingXL)
+
+            let xBinding = Binding<Float>(
+                get: { gestureX },
+                set: { gestureX = $0 }
+            )
+            let yBinding = Binding<Float>(
+                get: { gestureY },
+                set: { gestureY = $0 }
+            )
+
+            LatentXYPad(
+                x: xBinding,
+                y: yBinding,
+                xRange: 0.0...1.0,
+                yRange: 0.0...1.0,
+                xLabel: "X",
+                yLabel: "Y",
+                onCommit: {
+                    feedRecordingGestureNodes(x: gestureX, y: gestureY, pressure: 1.0)
+                },
+                onDragEnded: {
+                    feedRecordingGestureNodes(x: gestureX, y: gestureY, pressure: 0.0)
                 }
             )
+            .frame(height: PerformMetrics.gesturePadHeight)
+            .padding(.horizontal, DS.spacingXL)
         }
-        return Binding(get: laneGet, set: laneSet)
+        .padding(.vertical, DS.spacingXS)
+        .background(DS.surfaceElevated.opacity(0.2))
+        .cornerRadius(DS.radiusSM)
     }
 
-    // MARK: - Step Grid -- Trig-Coded Pads + P-Lock Header (Focus Lane UX)
+    /// Breakpoint envelope editor for MetaParameter nodes (§3.4 — D3).
+    private var envelopeEditorSection: some View {
+        VStack(alignment: .leading, spacing: DS.spacingSM) {
+            HStack {
+                LRSectionHeader(title: "ENVELOPES", color: DS.stageNeural.opacity(0.7))
+                Spacer()
+                Text("\(metaParameterNodes.count) active")
+                    .font(DS.font(DS.fontCaption2, weight: .bold))
+                    .foregroundColor(DS.textTertiary)
+            }
+            .padding(.horizontal, DS.spacingXL)
 
-    /// Shows the focused lane's step grid, or a placeholder when no lane is focused.
-    private var stepGridSectionOrPlaceholder: some View {
-        Group {
-            if let lane = engine.focusLane {
-                StepGridSectionView(lane: lane, engine: engine, clipboardStep: $clipboardStep)
-            } else {
-                stepGridPlaceholder
+            ForEach(metaParameterNodes, id: \.id) { node in
+                envelopeEditorRow(node: node)
+            }
+        }
+        .padding(.vertical, DS.spacingXS)
+        .background(DS.surfaceElevated.opacity(0.15))
+    }
+
+    private func envelopeEditorRow(node: MetaParameterNode) -> some View {
+        let isOpen = selectedEnvelopeId == node.id
+        return VStack(alignment: .leading, spacing: DS.spacingXS) {
+            Button(action: {
+                selectedEnvelopeId = isOpen ? nil : node.id
+            }) {
+                HStack(spacing: DS.spacingMD) {
+                    Text(node.name.uppercased())
+                        .font(DS.font(DS.fontCaption2, weight: .bold))
+                        .foregroundColor(DS.textSecondary)
+                        .frame(width: 100, alignment: .leading)
+                    Text(String(format: "%.1fs", node.duration))
+                        .font(DS.font(DS.fontCaption2, weight: .medium))
+                        .foregroundColor(DS.neonTurquesa.opacity(0.8))
+                    Text(node.loopMode ? "LOOP" : "ONE-SHOT")
+                        .font(DS.font(DS.fontCaption2, weight: .bold))
+                        .foregroundColor(DS.textTertiary)
+                    Text("\(node.breakpoints.count) BP")
+                        .font(DS.font(DS.fontCaption2))
+                        .foregroundColor(DS.textDisabled)
+                    Spacer()
+                    Image(systemName: isOpen ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(DS.textTertiary)
+                }
+                .padding(.horizontal, DS.spacingXL)
+                .padding(.vertical, DS.spacingXS)
+            }
+            .buttonStyle(.plain)
+
+            if isOpen {
+                VStack(alignment: .leading, spacing: DS.spacingSM) {
+                    // P5 Slice 1 + Slice 2 — envelope visualization + drag-to-edit.
+                    // The curve is the interface: live breakpoint shape
+                    // (honoring each segment's CurveType) + a vertical
+                    // playhead driven by the node's live `phase`. Slice 2
+                    // layers drag-to-edit on top: drag a vertex to move it,
+                    // drag the curve body to insert a new breakpoint,
+                    // double-click a vertex to delete it. Edits route through
+                    // the MetaParameterNode public mutation API and trigger
+                    // `objectWillChange.send()` on the node graph — the same
+                    // pattern the slider row below uses. The view polls
+                    // `node.phase` at 60Hz inside its own TimelineView, so
+                    // re-renders stay confined to the leaf (no whole-body
+                    // 60Hz invalidation — Engineer P1 #3 / Programmer P2 #4).
+                    EnvelopeCurveView(
+                        breakpoints: node.breakpoints,
+                        node: node,
+                        duration: node.duration,
+                        loopMode: node.loopMode,
+                        onEdit: { edit in
+                            switch edit {
+                            case .move(let id, let t, let v):
+                                node.updateBreakpoint(id: id, time: t, value: v)
+                            case .insert(let t, let v):
+                                _ = node.addBreakpoint(time: t, value: v)
+                            case .delete(let id):
+                                node.removeBreakpoint(id: id)
+                            }
+                            engine.nodeGraph.objectWillChange.send()
+                        }
+                    )
+                    .padding(.horizontal, DS.spacingXL)
+
+                    HStack(spacing: DS.spacingMD) {
+                        Toggle("Loop", isOn: Binding(
+                            get: { node.loopMode },
+                            set: { node.loopMode = $0; engine.nodeGraph.objectWillChange.send() }
+                        ))
+                        .toggleStyle(.switch)
+                        .font(DS.font(DS.fontCaption2))
+                        LRParamSlider(
+                            label: "DUR",
+                            value: Binding(
+                                get: { node.duration },
+                                set: { node.duration = $0; engine.nodeGraph.objectWillChange.send() }
+                            ),
+                            range: 0.1...16.0,
+                            format: "%.1fs"
+                        )
+                        Button("TRIG") { node.trigger() }
+                            .font(DS.font(DS.fontCaption2, weight: .bold))
+                            .foregroundColor(DS.neonTurquesa)
+                            .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, DS.spacingXL)
+
+                    ForEach(node.breakpoints, id: \.id) { bp in
+                        HStack(spacing: DS.spacingSM) {
+                            Text(String(format: "t=%.2f", bp.time))
+                                .font(DS.font(DS.fontCaption2))
+                                .foregroundColor(DS.textTertiary)
+                                .frame(width: 52, alignment: .leading)
+                            Slider(
+                                value: Binding(
+                                    get: { bp.value },
+                                    set: { newVal in
+                                        node.updateBreakpoint(id: bp.id, value: newVal)
+                                        engine.nodeGraph.objectWillChange.send()
+                                    }
+                                ),
+                                in: 0...1
+                            )
+                            // Musician P1.3 — per-breakpoint CurveType picker
+                            // (LIN/EXP/LOG/SCRV/STEP). Bound to `bp.curve` via
+                            // the public `updateBreakpoint(id:curve:)` API
+                            // (ControlNodes.swift:458). 5-segment strip,
+                            // reuses LRSegmentPicker styling.
+                            LRSegmentPicker(
+                                items: CurveType.allCases,
+                                selected: bp.curve,
+                                color: DS.neonTurquesa,
+                                labelForItem: { curveType in
+                                    switch curveType {
+                                    case .linear:      return "LIN"
+                                    case .exponential: return "EXP"
+                                    case .logarithmic: return "LOG"
+                                    case .sCurve:      return "SCRV"
+                                    case .step:        return "STEP"
+                                    }
+                                },
+                                onSelect: { newCurve in
+                                    node.updateBreakpoint(id: bp.id, curve: newCurve)
+                                    engine.nodeGraph.objectWillChange.send()
+                                }
+                            )
+                            .frame(width: 168)
+                            Button("✕") {
+                                node.removeBreakpoint(id: bp.id)
+                                engine.nodeGraph.objectWillChange.send()
+                            }
+                            .font(DS.font(DS.fontCaption2, weight: .bold))
+                            .foregroundColor(DS.danger)
+                            .buttonStyle(.plain)
+                            .disabled(node.breakpoints.count <= 2)
+                        }
+                        .padding(.horizontal, DS.spacingXL)
+                    }
+
+                    Button("+ BREAKPOINT") {
+                        let t = Float(node.breakpoints.count) / Float(max(node.breakpoints.count, 1))
+                        _ = node.addBreakpoint(time: min(t, 1.0), value: 0.5)
+                        engine.nodeGraph.objectWillChange.send()
+                    }
+                    .font(DS.font(DS.fontCaption2, weight: .bold))
+                    .foregroundColor(DS.neonAmbar)
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, DS.spacingXL)
+                }
+                .padding(.bottom, DS.spacingSM)
             }
         }
     }
 
-    private var stepGridPlaceholder: some View {
+    /// Macro mute/solo when a macro topology is loaded (flat graphs have none).
+    private var macroMixerSection: some View {
+        VStack(alignment: .leading, spacing: DS.spacingSM) {
+            LRSectionHeader(title: "MACRO MIXER", color: DS.neonAmbar.opacity(0.7))
+                .padding(.horizontal, DS.spacingXL)
+
+            ForEach(engine.macroNodes, id: \.id) { macro in
+                HStack(spacing: DS.spacingMD) {
+                    Text(macro.name.uppercased())
+                        .font(DS.font(DS.fontCaption2, weight: .bold))
+                        .foregroundColor(DS.textSecondary)
+                        .frame(width: 120, alignment: .leading)
+
+                    LRToggle(
+                        label: "M",
+                        isActive: macro.getParam("isMuted", default: false),
+                        activeColor: DS.danger,
+                        helpText: "Mute macro"
+                    ) {
+                        let next = !macro.getParam("isMuted", default: false)
+                        macro.setParam("isMuted", value: next)
+                        engine.updateMacroMixerState()
+                    }
+
+                    LRToggle(
+                        label: "S",
+                        isActive: macro.getParam("isSoloed", default: false),
+                        activeColor: DS.neonTurquesa,
+                        helpText: "Solo macro"
+                    ) {
+                        let next = !macro.getParam("isSoloed", default: false)
+                        macro.setParam("isSoloed", value: next)
+                        engine.updateMacroMixerState()
+                    }
+
+                    // P4 — stereo VU meter. Polls `macro.telemetrySnapshot`
+                    // (audio-thread-derived peak/RMS, never blocks the UI)
+                    // at 30 Hz via an internal TimelineView. The bars are
+                    // the meter: no labels, no grid. Sits beside M/S so the
+                    // performer sees level next to the mute/solo state.
+                    // Musician P1.4: `isProcessing` gates the bars — when
+                    // audio is stopped the bars zero + dim so the meter
+                    // reads "silent" instead of freezing at its last live
+                    // value (false "signal").
+                    MacroVUMeter(macro: macro, isProcessing: engine.isProcessing)
+
+                    Spacer()
+                }
+                .padding(.horizontal, DS.spacingXL)
+                .padding(.vertical, DS.spacingXS)
+            }
+        }
+        .padding(.vertical, DS.spacingXS)
+        .background(DS.surfaceElevated.opacity(0.12))
+    }
+
+    // MARK: - Scene Crossfader Section
+
+    private var sceneCrossfaderSection: some View {
         VStack(spacing: DS.spacingSM) {
-            LRSectionHeader(title: "STEP GRID", color: DS.neonTurquesa.opacity(0.6))
-            RoundedRectangle(cornerRadius: DS.radiusSM)
-                .fill(DS.panelHollow)
-                .frame(height: 120)
-                .overlay(Text("SELECT A LANE").font(DS.font(DS.fontBody)).foregroundColor(DS.textTertiary))
+            HStack {
+                LRSectionHeader(title: "SCENE MORPH", color: DS.neonTurquesa.opacity(0.6))
+                Spacer()
+                if let feedback = sceneSavedFeedback {
+                    Text(feedback.uppercased())
+                        .font(DS.font(DS.fontCaption2, weight: .bold))
+                        .foregroundColor(DS.success)
+                        .task(id: feedback) {
+                            try? await Task.sleep(nanoseconds: 2_000_000_000)
+                            sceneSavedFeedback = nil
+                        }
+                }
+                Text("A→B")
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(DS.textTertiary)
+            }
+
+            // Scene A/B Selectors
+            HStack(spacing: DS.spacingMD) {
+                sceneSelector(label: "A", index: $engine.crossfaderSceneAIndex)
+                crossfaderSlider
+                sceneSelector(label: "B", index: $engine.crossfaderSceneBIndex)
+            }
+
+            // Scene Grid
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: DS.spacingSM) {
+                ForEach(0..<min(8, engine.sceneBank.scenes.count), id: \.self) { idx in
+                    sceneButton(index: idx)
+                }
+            }
+
+            crossfadeDurationRow
         }
         .padding(.horizontal, DS.spacingXL)
         .padding(.vertical, DS.spacingSM)
     }
 
-    // MARK: - Lane Tabs + Focus Lane Strip
+    private var crossfadeDurationRow: some View {
+        HStack(spacing: DS.spacingMD) {
+            Text("XFADE DUR")
+                .font(DS.font(DS.fontCaption2, weight: .bold))
+                .foregroundColor(DS.textTertiary)
+            Slider(
+                value: Binding(
+                    get: { engine.sceneBank.crossfadeDuration },
+                    set: { val in
+                        var bank = engine.sceneBank
+                        bank.crossfadeDuration = val
+                        engine.sceneBank = bank
+                    }
+                ),
+                in: 0.1...10.0
+            )
+            .accentColor(DS.neonTurquesa.opacity(0.7))
+            Text(String(format: "%.1fs", engine.sceneBank.crossfadeDuration))
+                .font(DS.font(DS.fontCaption2, weight: .medium))
+                .foregroundColor(DS.textSecondary)
+                .frame(width: 36, alignment: .trailing)
+        }
+    }
 
-    private var laneTabsSection: some View {
-        VStack(spacing: DS.spacingMD) {
+    private var crossfaderSlider: some View {
+        VStack(spacing: DS.spacingXS) {
             HStack {
-                Text("CHANNELS")
+                Text("MIX")
+                    .font(DS.font(DS.fontCaption2, weight: .bold))
+                    .foregroundColor(DS.textTertiary)
+                Spacer()
+                Text(String(format: "%.0f%%", engine.crossfaderPosition * 100))
+                    .font(DS.font(DS.fontCaption, weight: .medium))
+                    .foregroundColor(DS.neonTurquesa)
+            }
+
+            Slider(
+                value: Binding(
+                    get: { Double(engine.crossfaderPosition) },
+                    set: { engine.crossfaderPosition = Float($0) }
+                ),
+                in: 0...1
+            )
+            .accentColor(DS.neonTurquesa)
+            .scrollableSlider(
+                value: Binding(
+                    get: { Double(engine.crossfaderPosition) },
+                    set: { engine.crossfaderPosition = Float($0) }
+                ),
+                range: 0...1
+            )
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func sceneSelector(label: String, index: Binding<Int>) -> some View {
+        VStack(spacing: DS.spacingXS) {
+            Text(label)
+                .font(DS.font(DS.fontCaption, weight: .bold))
+                .foregroundColor(label == "A" ? DS.neonTurquesa : DS.neonAmbar)
+
+            Picker("Scene \(label)", selection: index) {
+                ForEach(0..<engine.sceneBank.scenes.count, id: \.self) { idx in
+                    Text("\(idx + 1): \(engine.sceneBank.scenes[idx].name)")
+                        .font(DS.font(DS.fontCaption))
+                        .tag(idx)
+                }
+            }
+            .pickerStyle(MenuPickerStyle())
+            .labelsHidden()
+            .frame(width: 140)
+        }
+    }
+
+    private func sceneButton(index: Int) -> some View {
+        let scene = engine.sceneBank.scenes[index]
+        let isCurrentA = index == engine.crossfaderSceneAIndex
+        let isCurrentB = index == engine.crossfaderSceneBIndex
+
+        return HStack(spacing: DS.spacingXS) {
+            if isCurrentA {
+                Text("A")
+                    .font(DS.font(DS.fontCaption2, weight: .bold))
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 4)
+                    .background(DS.neonTurquesa)
+                    .cornerRadius(2)
+            }
+            if isCurrentB {
+                Text("B")
+                    .font(DS.font(DS.fontCaption2, weight: .bold))
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 4)
+                    .background(DS.neonAmbar)
+                    .cornerRadius(2)
+            }
+
+            Text(scene.name)
+                .font(DS.font(DS.fontCaption, weight: .bold))
+                .foregroundColor(isCurrentA || isCurrentB ? .white : DS.textSecondary)
+                .lineLimit(1)
+
+            Spacer()
+
+            // Save button: separated from the row tap so tapping the arrow no
+            // longer ambiguously loads the scene first.
+            Button(action: {
+                engine.sceneManager.captureScene(at: index, from: engine.nodeGraph)
+                engine.savePerformanceState()
+                sceneSavedFeedback = "Scenes saved"
+            }) {
+                Image(systemName: "arrow.down.circle")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.textTertiary)
+            }
+            .buttonStyle(.plain)
+            .help("Capture current state to scene \(index + 1)")
+        }
+        .padding(.horizontal, DS.spacingSM)
+        .padding(.vertical, DS.spacingXS)
+        .background(
+            isCurrentA ? DS.neonTurquesa.opacity(0.3) :
+            isCurrentB ? DS.neonAmbar.opacity(0.3) :
+            DS.surfaceSubtle
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.radiusSM)
+                .stroke(
+                    isCurrentA ? DS.neonTurquesa :
+                    isCurrentB ? DS.neonAmbar :
+                    DS.border,
+                    lineWidth: isCurrentA || isCurrentB ? 2 : 1
+                )
+        )
+        .cornerRadius(DS.radiusSM)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            engine.sceneManager.applyScene(at: index, to: engine.nodeGraph)
+        }
+        .help("Tap to load scene \(index + 1); tap the arrow to save")
+    }
+
+    // MARK: - Step Grid Section
+
+    private var stepGridSection: some View {
+        VStack(spacing: DS.spacingSM) {
+            HStack {
+                LRSectionHeader(title: "STEP SEQUENCER", color: DS.neonTurquesa.opacity(0.6))
+                Spacer()
+                stepAdvanceControls
+            }
+
+            if engine.focusMacro == nil {
+                inactiveNotice(
+                    message: "The step grid needs a focused Macro node.",
+                    hint: "Add a Macro node (right-click canvas → MACRO) and focus it to drive the 16 pads, p-locks, and advance modes."
+                )
+            } else {
+                stepGridPads
+
+                if engine.selectedStepIndices.count > 1 {
+                    batchSelectionBar
+                } else if let stepIdx = engine.pLockEditingStepIndex {
+                    stepEditBar(stepIndex: stepIdx)
+                } else {
+                    Text("TAP a step to edit · SHIFT+TAP to multi-select")
+                        .font(DS.font(DS.fontCaption2))
+                        .foregroundColor(DS.textTertiary.opacity(0.5))
+                        .padding(.top, DS.spacingXS)
+                }
+            }
+        }
+        .padding(.horizontal, DS.spacingXL)
+        .padding(.vertical, DS.spacingSM)
+    }
+
+    private var stepAdvanceControls: some View {
+        HStack(spacing: DS.spacingXS) {
+            if let stepGrid = engine.focusStepGrid {
+                LRSegmentPicker(
+                    items: StepGrid.StepAdvanceMode.allCases,
+                    selected: stepGrid.advanceMode,
+                    color: DS.neonTurquesa,
+                    labelForItem: { $0.rawValue.uppercased() },
+                    onSelect: { mode in
+                        // Update through the sequencer node
+                        if let sequencer = engine.focusSequencerNode {
+                            sequencer.stepGrid.advanceMode = mode
+                            engine.syncStepTimer()
+                        }
+                    }
+                )
+                .help("How steps advance: MANUAL = tap, TIME = BPM, ITERATION = cycles")
+
+                if stepGrid.advanceMode == .manual {
+                    LRToggle(
+                        label: "TAP",
+                        isActive: true,
+                        activeColor: DS.neonAmbar,
+                        helpText: "Advance to next step"
+                    ) {
+                        if let macro = engine.focusMacro {
+                            engine.advanceLaneManually(lane: macro)
+                        }
+                    }
+                }
+
+                // C.1 — Advance-rate / BPM / chain-length controls bound
+                // directly to the focus SequencerNode parameters.
+                sequencerRateControls(stepGrid: stepGrid)
+            }
+        }
+    }
+
+    /// C.1 — Numeric controls for the SequencerNode's `chainLength`,
+    /// `stepTimeBPM` and `stepAdvanceDivisor`. The controls always reflect
+    /// the focus macro's sequencer; mutations go through the node so the
+    /// engine timer resyncs immediately.
+    @ViewBuilder
+    private func sequencerRateControls(stepGrid: StepGrid) -> some View {
+        HStack(spacing: DS.spacingSM) {
+            stepperReadout(
+                label: "LEN",
+                value: stepGrid.chainLength,
+                range: 1...StepGrid.maxSteps,
+                color: DS.neonTurquesa,
+                help: "Active step count (1...\(StepGrid.maxSteps)). Pattern loops over this many steps."
+            ) { newValue in
+                guard let sequencer = engine.focusSequencerNode else { return }
+                sequencer.stepGrid.chainLength = newValue
+                sequencer.parameters["chainLength"] = newValue
+            }
+
+            if stepGrid.advanceMode == .time {
+                stepperReadout(
+                    label: "BPM",
+                    value: stepGrid.stepTimeBPM,
+                    range: LRConstants.stepTimeBPMRange.lowerBound...LRConstants.stepTimeBPMRange.upperBound,
+                    color: DS.neonAmbar,
+                    help: "Beats per minute for TIME advance mode."
+                ) { newValue in
+                    guard let sequencer = engine.focusSequencerNode else { return }
+                    sequencer.stepGrid.stepTimeBPM = newValue
+                    sequencer.parameters["stepTimeBPM"] = newValue
+                    engine.syncStepTimer()
+                }
+            }
+
+            if stepGrid.advanceMode == .iteration {
+                stepperReadout(
+                    label: "÷",
+                    value: stepGrid.stepAdvanceDivisor,
+                    range: 1...32,
+                    color: DS.neonAmbar,
+                    help: "Advance one step every N feedback iterations."
+                ) { newValue in
+                    guard let sequencer = engine.focusSequencerNode else { return }
+                    sequencer.stepGrid.stepAdvanceDivisor = max(1, newValue)
+                    sequencer.parameters["stepAdvanceDivisor"] = max(1, newValue)
+                }
+            }
+        }
+    }
+
+    /// Compact `-/+` stepper readout used by `sequencerRateControls`.
+    @ViewBuilder
+    private func stepperReadout(
+        label: String,
+        value: Int,
+        range: ClosedRange<Int>,
+        color: Color,
+        help: String,
+        onChange: @escaping (Int) -> Void
+    ) -> some View {
+        HStack(spacing: 2) {
+            Text(label)
+                .font(DS.font(DS.fontCaption2, weight: .bold))
+                .foregroundColor(color.opacity(0.8))
+
+            Button(action: {
+                let next = max(range.lowerBound, value - 1)
+                if next != value { onChange(next) }
+            }) {
+                Text("−")
                     .font(DS.font(DS.fontCaption, weight: .bold))
-                    .foregroundColor(DS.neonTurquesa.opacity(0.6))
-                if let lane = engine.focusLane {
-                    Text("→")
+                    .foregroundColor(color)
+                    .frame(width: 16, height: 16)
+                    .background(color.opacity(0.12))
+                    .cornerRadius(2)
+            }
+            .buttonStyle(.plain)
+
+            Text("\(value)")
+                .font(DS.font(DS.fontCaption, weight: .bold))
+                .foregroundColor(.white)
+                .frame(minWidth: 28)
+
+            Button(action: {
+                let next = min(range.upperBound, value + 1)
+                if next != value { onChange(next) }
+            }) {
+                Text("+")
+                    .font(DS.font(DS.fontCaption, weight: .bold))
+                    .foregroundColor(color)
+                    .frame(width: 16, height: 16)
+                    .background(color.opacity(0.12))
+                    .cornerRadius(2)
+            }
+            .buttonStyle(.plain)
+        }
+        .help(help)
+    }
+
+    @State private var pressedStepIndex: Int? = nil
+
+    private var stepGridPads: some View {
+        let columns = Array(
+            repeating: GridItem(.fixed(LRConstants.performanceStepPadSize), spacing: DS.spacingSM),
+            count: LRConstants.performanceStepGridColumns
+        )
+
+        let stepCount = engine.focusStepGrid?.steps.count ?? 16
+        let chainLength = engine.focusStepGrid?.chainLength ?? 16
+
+        return LazyVGrid(columns: columns, spacing: DS.spacingSM) {
+            ForEach(0..<stepCount, id: \.self) { index in
+                instantStepPad(index: index, chainLength: chainLength)
+            }
+        }
+        // REMOVED: .drawingGroup(opaque: false) -- causes massive input lag
+    }
+
+    /// Instant-response step pad using DragGesture (Button has 0.25s delay)
+    @ViewBuilder
+    private func instantStepPad(index: Int, chainLength: Int) -> some View {
+        let step = engine.focusStepGrid?.step(at: index)
+        let currentStep = engine.focusStepGrid?.currentStepIndex ?? 0
+        let isCurrent = index == currentStep
+        let isSelected = engine.selectedStepIndices.contains(index)
+        let isPressed = pressedStepIndex == index
+        let color = stepColor(for: step?.trigType ?? .note)
+        let isActive = index < chainLength
+
+        ZStack {
+            // Background with immediate press feedback
+            RoundedRectangle(cornerRadius: DS.radiusSM)
+                .fill(isPressed ? color.opacity(0.7) :
+                      (isCurrent ? color.opacity(0.5) :
+                       (isSelected ? color.opacity(0.25) : color.opacity(0.1))))
+
+            Text("\(index + 1)")
+                .font(DS.font(DS.fontCaption, weight: .bold))
+                .foregroundColor(isCurrent || isPressed ? .white : DS.textSecondary)
+
+            // Lock indicator
+            if step?.hasLock == true {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(DS.neonAmbar)
+                    .frame(width: 2, height: 8)
+                    .offset(x: 14, y: 12)
+            }
+
+            // Inactive overlay
+            if !isActive {
+                RoundedRectangle(cornerRadius: DS.radiusSM)
+                    .fill(DS.panelHollow.opacity(0.7))
+            }
+        }
+        .frame(width: LRConstants.performanceStepPadSize, height: LRConstants.performanceStepPadSize)
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.radiusSM)
+                .stroke(isPressed ? .white :
+                        (isCurrent ? color : (isSelected ? DS.warning : DS.border)),
+                        lineWidth: isPressed ? 2 : 1)
+        )
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    if pressedStepIndex != index && isActive {
+                        // Instant animation for immediate feedback
+                        withAnimation(.linear(duration: 0.001)) {
+                            pressedStepIndex = index
+                        }
+                    }
+                }
+                .onEnded { _ in
+                    if isActive {
+                        pressedStepIndex = nil
+                        #if os(macOS)
+                        let shift = NSEvent.modifierFlags.contains(.shift)
+                        #else
+                        let shift = false
+                        #endif
+                        // C.1 — plain (non-shift) tap toggles the step's
+                        // active flag (.skip <-> .note) directly on the
+                        // SequencerNode, in addition to focusing it for
+                        // p-lock editing. Shift+tap keeps the multi-select
+                        // behaviour for batch editing.
+                        if !shift {
+                            engine.toggleStepActive(at: index)
+                        }
+                        engine.handleStepTap(index: index, shiftPressed: shift, chainLength: chainLength)
+                    }
+                }
+        )
+        .opacity(isActive ? 1.0 : 0.4)
+        .help("Step \(index + 1). Tap to edit, SHIFT+tap to multi-select")
+        .contextMenu {
+            if isActive {
+                ForEach(TrigType.allCases, id: \.self) { trig in
+                    Button(action: { engine.setStepTrigType(at: index, trig) }) {
+                        HStack {
+                            Text(trigLabel(trig))
+                            if step?.trigType == trig {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func stepColor(for trig: TrigType) -> Color {
+        switch trig {
+        case .note:    return DS.trigNote
+        case .lock:    return DS.trigLock
+        case .oneShot: return DS.trigOneShot
+        case .skip:    return DS.trigSkip
+        }
+    }
+
+    private func trigLabel(_ trig: TrigType) -> String {
+        switch trig {
+        case .note:    return "NOTE (N)"
+        case .lock:    return "LOCK (L)"
+        case .oneShot: return "ONE-SHOT (1x)"
+        case .skip:    return "SKIP (-)"
+        }
+    }
+
+    private var batchSelectionBar: some View {
+        let count = engine.selectedStepIndices.count
+        return VStack(spacing: DS.spacingSM) {
+            HStack(spacing: DS.spacingMD) {
+                Text("\(count) STEPS SELECTED")
+                    .font(DS.font(DS.fontCaption2, weight: .bold))
+                    .foregroundColor(DS.info)
+
+                Text("TRIG:")
+                    .font(DS.font(DS.fontCaption2, weight: .bold))
+                    .foregroundColor(DS.textTertiary)
+
+                ForEach(TrigType.allCases, id: \.self) { trig in
+                    Button(action: { engine.applyTrigTypeToSelected(trig) }) {
+                        Text(trigLabel(trig))
+                            .font(DS.font(DS.fontCaption2, weight: .bold))
+                            .foregroundColor(DS.info)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(DS.surfaceElevated)
+                            .cornerRadius(DS.radiusSM)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Spacer()
+
+                Button(action: { engine.clearSelectedSteps() }) {
+                    Text("CLEAR ALL")
+                        .font(DS.font(DS.fontCaption2, weight: .bold))
+                        .foregroundColor(DS.danger)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(DS.danger.opacity(0.2))
+                        .cornerRadius(DS.radiusSM)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(DS.spacingSM)
+        .background(DS.info.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: DS.radiusSM).stroke(DS.info.opacity(0.3), lineWidth: 1))
+        .padding(.top, DS.spacingSM)
+    }
+
+    private func stepEditBar(stepIndex: Int) -> some View {
+        let step = engine.focusStepGrid?.step(at: stepIndex)
+        return VStack(spacing: DS.spacingSM) {
+            HStack(spacing: DS.spacingMD) {
+                Text("STEP \(stepIndex + 1) P-LOCK")
+                    .font(DS.font(DS.fontCaption2, weight: .bold))
+                    .foregroundColor(DS.warning)
+
+                // Trig type picker
+                HStack(spacing: 2) {
+                    ForEach(TrigType.allCases, id: \.self) { trig in
+                        Button(action: { engine.setStepTrigType(at: stepIndex, trig) }) {
+                            Text(String(trigLabel(trig).prefix(1)))
+                                .font(DS.font(DS.fontCaption2, weight: .bold))
+                                .foregroundColor(step?.trigType == trig ? .black : stepColor(for: trig))
+                                .frame(width: 20, height: 18)
+                                .background(step?.trigType == trig ? stepColor(for: trig) : Color.clear)
+                                .overlay(RoundedRectangle(cornerRadius: 2).stroke(stepColor(for: trig).opacity(0.4), lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                // Probability control
+                if step?.trigType != .skip {
+                    HStack(spacing: 3) {
+                        Text("PROB:")
+                            .font(DS.font(DS.fontCaption2, weight: .bold))
+                            .foregroundColor(DS.textTertiary)
+                        Slider(
+                            value: Binding(
+                                get: { Double(step?.probability ?? 1.0) },
+                                set: { engine.setStepProbability(at: stepIndex, probability: Float($0)) }
+                            ),
+                            in: 0...1
+                        )
+                        .accentColor(DS.warning)
+                        .frame(width: 60)
+                    }
+                }
+
+                Spacer()
+
+                LRToggle(
+                    label: "CLEAR",
+                    isActive: false,
+                    activeColor: DS.danger,
+                    helpText: "Reset this step"
+                ) {
+                    engine.clearStep(at: stepIndex)
+                    armedPLockControls.removeAll()
+                }
+            }
+
+            // Musician P0.1 — p-lock strip: one mini-slider + ARM toggle per
+            // mappable exposed control of the focus macro.
+            pLockStrip(stepIndex: stepIndex)
+        }
+        .padding(DS.spacingSM)
+        .background(DS.warning.opacity(0.05))
+        .overlay(RoundedRectangle(cornerRadius: DS.radiusSM).stroke(DS.warning.opacity(0.2), lineWidth: 1))
+        .padding(.top, DS.spacingSM)
+    }
+
+    /// Musician P0.1 — maps an `ExposedControl.paramId` to the corresponding
+    /// `Float?` p-lock field on `PerformanceStep`. Exposed controls whose
+    /// paramId is not in this map are silently skipped (no p-lock widget).
+    /// The map covers the 11+ per-step locks carried by `PerformanceStep`
+    /// (cfg, feedback, denoiseStrength, texture, chaos, warmth, filterCutoff,
+    /// filterResonance, delayMix, bitCrushDepth) under all common paramId
+    /// aliases emitted by `NodeGraph.autoGenerateExposedControls`.
+    private static let pLockKeyPaths: [String: WritableKeyPath<PerformanceStep, Float?>] = [
+        "cfg":              \PerformanceStep.cfg,
+        "guidanceScale":    \PerformanceStep.cfg,
+        "feedback":         \PerformanceStep.feedback,
+        "denoiseStrength":  \PerformanceStep.denoiseStrength,
+        "texture":          \PerformanceStep.texture,
+        "chaos":            \PerformanceStep.chaos,
+        "warmth":           \PerformanceStep.warmth,
+        "filterCutoff":     \PerformanceStep.filterCutoff,
+        "cutoff":           \PerformanceStep.filterCutoff,
+        "frequency":        \PerformanceStep.filterCutoff,
+        "filterResonance":  \PerformanceStep.filterResonance,
+        "resonance":        \PerformanceStep.filterResonance,
+        "delayMix":         \PerformanceStep.delayMix,
+        "mix":              \PerformanceStep.delayMix,
+        "bitCrushDepth":    \PerformanceStep.bitCrushDepth
+    ]
+
+    /// Generic p-lock strip — one mini-slider + ARM toggle per exposed control
+    /// of the focus macro. Armed slider changes dispatch view-side to the
+    /// generic `setStepLock(controlId:)` path (Wave C C2). Disarming clears
+    /// the lock (writes `nil`).
+    @ViewBuilder
+    private func pLockStrip(stepIndex: Int) -> some View {
+        let mappable = scopedExposedControls
+        if !mappable.isEmpty {
+            VStack(alignment: .leading, spacing: DS.spacingXS) {
+                HStack(spacing: DS.spacingXS) {
+                    Text("P-LOCKS")
+                        .font(DS.font(DS.fontCaption2, weight: .bold))
+                        .foregroundColor(DS.neonAmbar.opacity(0.8))
+                        .tracking(DS.trackingLab)
+                    Text("\(mappable.count) PARAMS")
+                        .font(DS.font(DS.fontCaption2))
+                        .foregroundColor(DS.textTertiary.opacity(0.6))
+                    Spacer()
+                }
+                let columns = Array(
+                    repeating: GridItem(.flexible(), spacing: DS.spacingSM),
+                    count: 4
+                )
+                LazyVGrid(columns: columns, spacing: DS.spacingXS) {
+                    ForEach(mappable) { control in
+                        pLockCell(control: control, stepIndex: stepIndex)
+                    }
+                }
+            }
+            .padding(DS.spacingSM)
+            .background(DS.surfaceElevated.opacity(0.15))
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.radiusSM)
+                    .stroke(DS.border.opacity(0.4), lineWidth: 1)
+            )
+        }
+    }
+
+    /// One generic p-lock cell: label + ARM toggle + mini slider. When armed,
+    /// the slider reads the step's generic lock value (or the control default
+    /// when the lock is nil) and writes through `engine.setStepLock(controlId:)`.
+    /// Disarming clears the generic lock.
+    @ViewBuilder
+    private func pLockCell(control: ExposedControl, stepIndex: Int) -> some View {
+        let isArmed = armedPLockControls.contains(control.id)
+        let step = engine.focusStepGrid?.step(at: stepIndex)
+        let lockedValue = step?.genericLocks[control.id]
+        let range = control.range
+
+        VStack(spacing: 3) {
+            HStack(spacing: 4) {
+                Text(String(control.label.prefix(4).uppercased()))
+                    .font(DS.font(DS.fontCaption2, weight: .bold))
+                    .foregroundColor(isArmed ? DS.neonAmbar : DS.textTertiary)
+                    .lineLimit(1)
+                Spacer()
+                Button(action: {
+                    if isArmed {
+                        armedPLockControls.remove(control.id)
+                        engine.setStepLock(at: stepIndex, controlId: control.id, value: nil)
+                        engine.objectWillChange.send()
+                    } else {
+                        armedPLockControls.insert(control.id)
+                    }
+                }) {
+                    Text(isArmed ? "ARM" : "—")
+                        .font(DS.font(DS.fontCaption2, weight: .bold))
+                        .foregroundColor(isArmed ? .black : DS.textTertiary)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(isArmed ? DS.neonAmbar : DS.surfaceSubtle)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 2)
+                                .stroke(DS.border.opacity(0.5), lineWidth: 1)
+                        )
+                        .cornerRadius(2)
+                }
+                .buttonStyle(.plain)
+                .help(isArmed ? "Disarm and clear this p-lock" : "Arm to write this p-lock on next change")
+            }
+
+            Slider(
+                value: Binding(
+                    get: {
+                        if isArmed { return Double(lockedValue ?? control.defaultValue) }
+                        return Double(control.defaultValue)
+                    },
+                    set: { newVal in
+                        guard isArmed else { return }
+                        engine.setStepLock(at: stepIndex, controlId: control.id, value: Float(newVal))
+                        engine.objectWillChange.send()
+                    }
+                ),
+                in: Double(range.lowerBound)...Double(range.upperBound)
+            )
+            .accentColor(isArmed ? DS.neonAmbar : DS.textTertiary.opacity(0.4))
+            .disabled(!isArmed)
+        }
+    }
+
+    // MARK: - Control Widgets
+
+    private var emptyControlsPlaceholder: some View {
+        RoundedRectangle(cornerRadius: DS.radiusSM)
+            .fill(DS.panelHollow)
+            .frame(height: 80)
+            .overlay(
+                VStack(spacing: DS.spacingXS) {
+                    Text("NO EXPOSED CONTROLS")
                         .font(DS.font(DS.fontCaption, weight: .bold))
                         .foregroundColor(DS.textTertiary)
-                    Text("CONTROLLING: \(lane.name)")
-                        .font(DS.font(DS.fontCaption, weight: .bold))
-                        .foregroundColor(DS.accentColor(for: lane.accentColorName))
+                    Text("Right-click a parameter in STAGES and select 'Expose to Perform'.")
+                        .font(DS.font(DS.fontCaption2))
+                        .foregroundColor(DS.textDisabled)
                 }
-                Spacer()
-            }
-            laneTabRow
-            if let lane = engine.focusLane {
-                FocusLaneStripView(lane: lane, engine: engine)
-            }
-        }
-        .padding(.horizontal, DS.spacingXL)
-        .padding(.vertical, DS.spacingSM)
+            )
     }
 
-    private var laneTabRow: some View {
-        HStack(spacing: DS.spacingSM) {
-            ForEach(engine.lanes) { lane in
-                LaneTabView(lane: lane, engine: engine)
+    @ViewBuilder
+    private func layoutItemView(_ item: LayoutItem, knobSize: CGFloat) -> some View {
+        if item.controlType == .xyPad, let xControl = item.xControl, let yControl = item.yControl {
+            // XY Pad control
+            let xBinding = controlBinding(for: xControl)
+            let yBinding = controlBinding(for: yControl)
+            VStack(spacing: 2) {
+                Text("\(xControl.label) / \(yControl.label)")
+                    .font(DS.font(DS.fontCaption2))
+                    .foregroundColor(DS.textTertiary)
+                LatentXYPad(
+                    x: xBinding,
+                    y: yBinding,
+                    xRange: xControl.range,
+                    yRange: yControl.range,
+                    xLabel: xControl.label.prefix(3).uppercased(),
+                    yLabel: yControl.label.prefix(3).uppercased(),
+                    onCommit: {
+                        feedRecordingGestureNodes(
+                            x: xBinding.wrappedValue,
+                            y: yBinding.wrappedValue,
+                            pressure: 1.0
+                        )
+                    },
+                    onDragEnded: {
+                        feedRecordingGestureNodes(
+                            x: xBinding.wrappedValue,
+                            y: yBinding.wrappedValue,
+                            pressure: 0.0
+                        )
+                    }
+                )
+                .frame(width: knobSize * 2, height: knobSize)
             }
-            Spacer()
+        } else if item.controlType == .fader {
+            // Horizontal fader for parameters inferred as faders.
+            VStack(spacing: 2) {
+                Text(item.control.label)
+                    .font(DS.font(DS.fontCaption2))
+                    .foregroundColor(DS.textTertiary)
+                    .lineLimit(1)
+                Slider(value: controlBinding(for: item.control), in: item.control.range)
+                    .accentColor(DS.neonTurquesa)
+                    .frame(width: knobSize * 2, height: knobSize)
+            }
+        } else if item.controlType == .toggle {
+            // Toggle switch for boolean-style parameters.
+            VStack(spacing: 2) {
+                Toggle("", isOn: controlBoolBinding(for: item.control))
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
+                    .frame(width: knobSize, height: knobSize)
+                Text(item.control.label)
+                    .font(DS.font(DS.fontCaption2))
+                    .foregroundColor(DS.textTertiary)
+                    .lineLimit(1)
+            }
+        } else if item.controlType == .dropdown {
+            // Dropdown / menu for enum-style parameters.
+            let options = dropdownOptions(for: item.control)
+            VStack(spacing: 2) {
+                if options.isEmpty {
+                    Text(item.control.label)
+                        .font(DS.font(DS.fontCaption2))
+                        .foregroundColor(DS.textTertiary)
+                        .lineLimit(1)
+                    Text("—")
+                        .font(DS.font(DS.fontCaption2, weight: .bold))
+                        .foregroundColor(DS.textSecondary)
+                } else {
+                    Picker(item.control.label, selection: dropdownBinding(for: item.control)) {
+                        ForEach(options, id: \.self) { option in
+                            Text(option).tag(option)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: knobSize * 2, height: knobSize)
+                    Text(item.control.label)
+                        .font(DS.font(DS.fontCaption2))
+                        .foregroundColor(DS.textTertiary)
+                        .lineLimit(1)
+                }
+            }
+        } else {
+            // Knob control
+            VStack(spacing: 2) {
+                RetroKnob(
+                    label: item.control.label,
+                    value: controlBinding(for: item.control),
+                    range: item.control.range
+                )
+                .frame(width: knobSize, height: knobSize)
+
+                Text(item.control.label)
+                    .font(DS.font(DS.fontCaption2))
+                    .foregroundColor(DS.textTertiary)
+                    .lineLimit(1)
+            }
         }
     }
 
-    // MARK: Focus Lane Performance Strip (Context-Aware P-Lock Knobs)
+    private func controlBoolBinding(for control: ExposedControl) -> Binding<Bool> {
+        Binding(
+            get: {
+                if let boolValue = engine.nodeGraph.getParameterValue(nodeId: control.nodeId, key: control.paramId) as? Bool {
+                    return boolValue
+                }
+                if let floatValue = engine.nodeGraph.getParameter(nodeId: control.nodeId, key: control.paramId) {
+                    return floatValue > 0.5
+                }
+                return control.defaultValue > 0.5
+            },
+            set: { newValue in
+                if engine.nodeGraph.getParameterValue(nodeId: control.nodeId, key: control.paramId) is Bool {
+                    engine.nodeGraph.setNodeParameter(nodeId: control.nodeId, paramId: control.paramId, value: newValue)
+                } else {
+                    engine.nodeGraph.setParameter(nodeId: control.nodeId, key: control.paramId, value: newValue ? Float(1) : Float(0))
+                }
+                engine.focusMacro?.setParam(control.paramId, value: newValue ? Float(1) : Float(0))
+            }
+        )
+    }
 
-    // MARK: - Trigger + Status
+    private func dropdownBinding(for control: ExposedControl) -> Binding<String> {
+        Binding(
+            get: {
+                guard let value = engine.nodeGraph.getParameterValue(nodeId: control.nodeId, key: control.paramId) else { return "" }
+                if let mode = value as? FilterMode { return mode.rawValue }
+                if let mode = value as? SaturationMode { return mode.rawValue }
+                return value as? String ?? ""
+            },
+            set: { newValue in
+                guard let node = engine.nodeGraph.nodes[control.nodeId] else { return }
+                switch (node.nodeType, control.paramId) {
+                case ("ladder_filter", "mode"):
+                    if let mode = FilterMode(rawValue: newValue) {
+                        engine.nodeGraph.setNodeParameter(nodeId: control.nodeId, paramId: control.paramId, value: mode)
+                    }
+                case ("waveshaper", "mode"):
+                    if let mode = SaturationMode(rawValue: newValue) {
+                        engine.nodeGraph.setNodeParameter(nodeId: control.nodeId, paramId: control.paramId, value: mode)
+                    }
+                default:
+                    engine.nodeGraph.setNodeParameter(nodeId: control.nodeId, paramId: control.paramId, value: newValue)
+                }
+            }
+        )
+    }
+
+    private func dropdownOptions(for control: ExposedControl) -> [String] {
+        guard let node = engine.nodeGraph.nodes[control.nodeId] else { return [] }
+        switch (node.nodeType, control.paramId) {
+        case ("ladder_filter", "mode"):
+            return FilterMode.allCases.map { $0.rawValue }
+        case ("waveshaper", "mode"):
+            return SaturationMode.allCases.map { $0.rawValue }
+        case ("oscillator", "waveform"):
+            return ["sine", "saw", "square", "triangle"]
+        default:
+            return []
+        }
+    }
+
+    private func controlBinding(for control: ExposedControl) -> Binding<Float> {
+        Binding(
+            get: {
+                // First try to get from node directly (works with or without macros)
+                if let nodeValue = engine.nodeGraph.getParameter(nodeId: control.nodeId, key: control.paramId) {
+                    return nodeValue
+                }
+                // Fallback to macro if exists
+                if let macro = engine.focusMacro {
+                    return macro.getParam(control.paramId, default: control.defaultValue)
+                }
+                return control.defaultValue
+            },
+            set: { newValue in
+                // Update node graph parameter directly (always works)
+                engine.nodeGraph.setParameter(
+                    nodeId: control.nodeId,
+                    key: control.paramId,
+                    value: newValue
+                )
+
+                // Also update macro if one is focused (for macro-based graphs)
+                engine.focusMacro?.setParam(control.paramId, value: newValue)
+            }
+        )
+    }
+
+    // MARK: - Gesture Recorder XY Binding (G6)
+
+    /// Feeds any currently-recording `GestureRecorderNode` with the XY pad's
+    /// live coordinates. Called on the main thread at the XY pad's throttled
+    /// commit rate (~33 Hz) and when the drag ends.
+    private func feedRecordingGestureNodes(x: Float, y: Float, pressure: Float) {
+        for node in engine.nodeGraph.nodes.values.compactMap({ $0 as? GestureRecorderNode }) {
+            guard node.state == .recording else { continue }
+            node.inputX = x
+            node.inputY = y
+            node.inputPressure = pressure
+        }
+    }
+
+    // MARK: - Trigger Button
 
     private var triggerButton: some View {
         Group {
             if engine.isProcessing {
                 if engine.canAbort {
-                    LRActionButton(label: "ABORT", icon: "stop.fill", color: DS.danger, style: .primary) {
+                    LRActionButton(
+                        label: "ABORT",
+                        icon: "stop.fill",
+                        color: DS.danger,
+                        style: .primary
+                    ) {
                         engine.toggleProcessing(initiatedFromPerformMode: true)
                     }
                 } else {
                     HStack(spacing: 10) {
-                        ProgressView().scaleEffect(0.7).progressViewStyle(CircularProgressViewStyle(tint: .white))
+                        ProgressView()
+                            .scaleEffect(0.7)
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
                         Text("INITIATING")
                             .font(DS.font(DS.fontHeadline, weight: .bold))
                             .foregroundColor(.black)
@@ -358,7 +1545,12 @@ struct PerformanceMotherbaseView: View {
                     .allowsHitTesting(false)
                 }
             } else if engine.bridgeProcess.state == .running {
-                LRActionButton(label: "START", icon: "waveform.path", color: DS.danger, style: .destructive) {
+                LRActionButton(
+                    label: "INITIATE",
+                    icon: "waveform.path",
+                    color: DS.danger,
+                    style: .destructive
+                ) {
                     engine.toggleProcessing(initiatedFromPerformMode: true)
                 }
             } else {
@@ -370,13 +1562,36 @@ struct PerformanceMotherbaseView: View {
     }
 
     private var bridgeStatusPanel: some View {
-        HStack(spacing: 10) {
+        let canRetry = engine.bridgeProcess.state == .error || engine.bridgeProcess.state == .idle
+        return HStack(spacing: 10) {
             ProgressView()
                 .scaleEffect(0.8)
                 .progressViewStyle(CircularProgressViewStyle(tint: DS.neonAmbar))
+
             Text(bridgeStatusMessage)
                 .font(DS.font(DS.fontCaption, weight: .medium))
                 .foregroundColor(DS.neonAmbar.opacity(0.9))
+
+            Spacer(minLength: DS.spacingMD)
+
+            if canRetry {
+                Button(action: { engine.bridgeProcess.launchServer() }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("RETRY")
+                            .font(DS.font(DS.fontCaption2, weight: .bold))
+                            .tracking(DS.trackingLab)
+                    }
+                    .foregroundColor(.black)
+                    .padding(.horizontal, DS.spacingMD)
+                    .padding(.vertical, DS.spacingXS)
+                    .background(DS.neonAmbar)
+                    .cornerRadius(DS.radiusSM)
+                }
+                .buttonStyle(.plain)
+                .help("Relaunch the ACE-Step bridge server")
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, DS.spacingLG)
@@ -396,878 +1611,150 @@ struct PerformanceMotherbaseView: View {
         }
     }
 
+    // MARK: - Status Bar (B.1.2)
+
+    /// Bottom status strip showing: bridge process state, current BPM (from
+    /// the focus sequencer when present), the focus macro's name, and
+    /// whether audio processing is on. Updates live via SwiftUI observation
+    /// of `@Published` properties on `engine`.
     private var statusBar: some View {
         HStack(spacing: DS.spacingMD) {
-            Text("[ U N B R A N D E D ]")
+            // Bridge process state (with colored dot)
+            Circle()
+                .fill(bridgeStatusColor)
+                .frame(width: DS.dotSM, height: DS.dotSM)
+            Text("BRIDGE: \(bridgeStatusMessage)")
                 .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(DS.textDisabled)
+                .foregroundColor(DS.textTertiary)
+
+            // BPM, read from the focus sequencer (if any) — otherwise the
+            // global default. Acts as a live readout, not a control.
+            Text("BPM: \(currentBPM)")
+                .font(DS.font(DS.fontCaption2, weight: .bold))
+                .foregroundColor(DS.neonTurquesa.opacity(0.7))
+
+            // Focus macro name (or — if none)
+            Text("MACRO: \(engine.focusMacro?.name.uppercased() ?? "—")")
+                .font(DS.font(DS.fontCaption2, weight: .bold))
+                .foregroundColor(DS.textSecondary)
+                .lineLimit(1)
+
+            // Musician P1.2 — seed-armed indicator. One segment next to
+            // MACRO; amber when any KoenigSeedNode / koenigSeed OscillatorNode
+            // is armed, tertiary gray otherwise. Driven by `engine.anySeedArmed`.
+            Text(engine.anySeedArmed ? "SEED: ARMED" : "SEED: —")
+                .font(DS.font(DS.fontCaption2, weight: .bold))
+                .foregroundColor(engine.anySeedArmed ? DS.neonAmbar : DS.textTertiary)
+                .tracking(DS.trackingLab)
 
             Spacer()
 
+            // Processing state -- 3-way: OFF (not started) / SILENT (started
+            // but verifyAudioPipeline() found nothing audible, e.g. amp=0
+            // survived the one-shot auto-restore) / ON.
+            HStack(spacing: DS.spacingXS) {
+                Circle()
+                    .fill(processingStateColor)
+                    .frame(width: DS.dotSM, height: DS.dotSM)
+                Text(processingStateLabel)
+                    .font(DS.font(DS.fontCaption2, weight: .bold))
+                    .foregroundColor(processingStateColor)
+            }
+
             Text("CYCLES: \(engine.globalCycleCount)")
-                .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(DS.neonTurquesa.opacity(0.6))
-            Text("STEP: \(engine.focusStepGrid.map { "\($0.currentStepIndex + 1)/\($0.chainLength)" } ?? "--")")
                 .font(DS.font(DS.fontCaption2))
-                .foregroundColor(DS.textTertiary)
-            Text("MODE: \(engine.focusStepGrid?.advanceMode.rawValue.uppercased() ?? "--")")
+                .foregroundColor(DS.textTertiary.opacity(0.6))
+
+            let currentStep = (engine.focusStepGrid?.currentStepIndex ?? 0) + 1
+            let totalSteps = engine.focusStepGrid?.chainLength ?? 16
+            Text("STEP: \(currentStep)/\(totalSteps)")
                 .font(DS.font(DS.fontCaption2))
-                .foregroundColor(DS.textTertiary)
+                .foregroundColor(DS.textTertiary.opacity(0.6))
         }
         .padding(.horizontal, DS.spacingXL)
         .padding(.bottom, DS.spacingMD)
     }
-}
 
-// MARK: - Lane Tab (Observes Lane for Mute/Solo Visual State)
+    /// A.8: Label for the DSP processing-state dot -- see call site comment.
+    private var processingStateLabel: String {
+        guard engine.isProcessing else { return "DSP: OFF" }
+        if let reason = engine.lastPipelineStatus.silenceReason { return "DSP: SILENT · \(reason)" }
+        return "DSP: ON"
+    }
 
-/// Wraps lane tab with @ObservedObject lane so M/S buttons update when toggled.
-/// Without this, the parent only observes engine and misses lane.objectWillChange.
-private struct LaneTabView: View {
-    @ObservedObject var lane: ResonatorLane
-    @ObservedObject var engine: NeuralEngine
+    /// A.8: Color for the DSP processing-state dot -- matches `RootView`'s
+    /// `silenceBadge` palette (danger red for silent, success green for
+    /// audible, tertiary gray for not-yet-started).
+    private var processingStateColor: Color {
+        guard engine.isProcessing else { return DS.textTertiary }
+        if engine.lastPipelineStatus.silenceReason != nil { return DS.danger }
+        return DS.success
+    }
 
-    private var accent: Color { DS.accentColor(for: lane.accentColorName) }
-
-    var body: some View {
-        let isFocus = engine.focusLaneId == lane.id
-        return Button(action: { engine.focusLaneId = lane.id }) {
-            VStack(spacing: DS.spacingXS) {
-                HStack(spacing: 3) {
-                    if isFocus {
-                        Text("ACTIVE")
-                            .font(DS.font(DS.fontCaption2, weight: .bold))
-                            .foregroundColor(.black)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(DS.neonTurquesa.opacity(DS.activeOpacity))
-                            .cornerRadius(2)
-                    }
-                    Text(lane.name)
-                        .font(DS.font(DS.fontCaption, weight: .bold))
-                        .foregroundColor(isFocus ? .black : (lane.isMuted ? DS.textTertiary : accent))
-                        .opacity(lane.isMuted && !isFocus ? 0.6 : 1)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    Text("i\(lane.iterationCount)")
-                        .font(DS.font(DS.fontCaption2, weight: .medium))
-                        .foregroundColor(isFocus ? .black.opacity(0.6) : DS.textTertiary)
-                }
-                HStack(spacing: DS.spacingXS) {
-                    Button(action: { lane.isMuted.toggle(); engine.updateLaneMixerState() }) {
-                        Text("M")
-                            .font(DS.font(DS.fontCaption2, weight: .bold))
-                            .foregroundColor(lane.isMuted ? DS.danger : DS.textTertiary)
-                            .frame(width: 20, height: 20)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Mute this lane (M)")
-                    Button(action: { lane.isSoloed.toggle(); engine.updateLaneMixerState() }) {
-                        Text("S")
-                            .font(DS.font(DS.fontCaption2, weight: .bold))
-                            .foregroundColor(lane.isSoloed ? DS.warning : DS.textTertiary)
-                            .frame(width: 20, height: 20)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Solo this lane (S)")
-                }
-            }
-            .padding(.horizontal, DS.spacingMD)
-            .padding(.vertical, DS.spacingSM)
-            .frame(minWidth: 72)
-            .background(
-                isFocus ? DS.neonTurquesa.opacity(DS.activeOpacity)
-                : (lane.isMuted ? DS.surfaceSubtle.opacity(0.7) : DS.surfaceSubtle)
-            )
-            .cornerRadius(3)
-            .overlay(
-                RoundedRectangle(cornerRadius: 3)
-                    .stroke(
-                        isFocus ? DS.neonTurquesa.opacity(0.8)
-                        : (lane.isSoloed ? DS.neonAmbar.opacity(0.6) : DS.border),
-                        lineWidth: isFocus ? 2 : 1
-                    )
-            )
-            .contentShape(Rectangle())
+    /// Color for the bridge status dot, derived from `engine.bridgeProcess.state`.
+    private var bridgeStatusColor: Color {
+        switch engine.bridgeProcess.state {
+        case .running:    return DS.success
+        case .launching, .installing, .settingUp, .stopping: return DS.warning
+        case .error:      return DS.danger
+        case .idle:       return DS.textTertiary
         }
-        .buttonStyle(.plain)
-        .animation(DS.stateTransition, value: isFocus)
-        .animation(DS.stateTransition, value: lane.isMuted)
-        .animation(DS.stateTransition, value: lane.isSoloed)
-        .help(isFocus ? "Drift Pad drives this lane ([ ] to change)" : "Tap to focus — Drift Pad will drive this lane")
-    }
-}
-
-// MARK: - Master XY Pad (Observes Lane for CNT/FLAT Live Updates)
-
-/// Wraps LatentXYPad with @ObservedObject lane so CNT/FLAT mode (spectral centroid/flatness)
-/// updates live. Without this, the parent only observes engine and the pad stays frozen.
-private struct MasterXYPadView: View {
-    @ObservedObject var lane: ResonatorLane
-    @ObservedObject var engine: NeuralEngine
-    let xyAxisMode: PerformanceMotherbaseView.XYAxisMode
-    let xyBindingX: (ResonatorLane) -> Binding<Float>
-    let xyBindingY: (ResonatorLane) -> Binding<Float>
-    let xyRangeX: ClosedRange<Float>
-    let xyRangeY: ClosedRange<Float>
-    let xyLabelX: String
-    let xyLabelY: String
-
-    var body: some View {
-        LatentXYPad(
-            x: xyBindingX(lane),
-            y: xyBindingY(lane),
-            xRange: xyRangeX,
-            yRange: xyRangeY,
-            xLabel: xyLabelX,
-            yLabel: xyLabelY,
-            isReadOnly: xyAxisMode == .cntFlat,
-            onDragStarted: xyAxisMode == .txtChs ? { lane.suppressMacroApplication = true } : nil,
-            onCommit: xyAxisMode == .txtChs ? {
-                lane.applyMacroTexture()
-                lane.applyMacroChaos()
-            } : nil,
-            onDragEnded: xyAxisMode == .txtChs ? {
-                lane.suppressMacroApplication = false
-                lane.applyMacroTexture()
-                lane.applyMacroChaos()
-            } : nil
-        )
-    }
-}
-
-// MARK: - Focus Lane Strip (Observes Lane for XY Pad → Knob Sync)
-
-/// Wraps the knob strip with @ObservedObject lane so knobs update when the XY pad
-/// (or any source) changes lane parameters. Without this, the parent only observes
-/// the engine and misses lane.objectWillChange.
-private struct FocusLaneStripView: View {
-    @ObservedObject var lane: ResonatorLane
-    @ObservedObject var engine: NeuralEngine
-
-    var body: some View {
-        let editIdx = engine.pLockEditingStepIndex
-        let isEditing = editIdx != nil
-        let knobSize: CGFloat = 48
-
-        return VStack(spacing: DS.spacingSM) {
-            HStack(spacing: DS.spacingSM) {
-                RetroKnob(
-                    label: isEditing ? "CFG [L]" : "CFG",
-                    value: pLockBinding(stepIndex: editIdx, laneGet: { lane.guidanceScale },
-                        laneSet: { lane.guidanceScale = $0 }, lockKeyPath: \.cfg),
-                    range: LRConstants.cfgScaleRange, accentColor: isEditing ? .orange.opacity(0.7) : .orange,
-                    size: knobSize, helpText: "Guidance -- model prompt strength")
-                RetroKnob(
-                    label: isEditing ? "FBK [L]" : "FBK",
-                    value: pLockBinding(stepIndex: editIdx, laneGet: { lane.feedbackAmount },
-                        laneSet: { lane.feedbackAmount = $0 }, lockKeyPath: \.feedback),
-                    range: LRConstants.feedbackRange, accentColor: isEditing ? .cyan.opacity(0.7) : .cyan,
-                    size: knobSize, helpText: "Feedback -- output fed back as input")
-                RetroKnob(
-                    label: isEditing ? "CUT [L]" : "CUT",
-                    value: pLockBinding(stepIndex: editIdx, laneGet: { lane.filterCutoff },
-                        laneSet: { lane.filterCutoff = $0 }, lockKeyPath: \.filterCutoff),
-                    range: LRConstants.filterCutoffRange, accentColor: isEditing ? DS.warning.opacity(0.7) : DS.warning,
-                    size: knobSize, helpText: "Filter cutoff frequency")
-                RetroKnob(
-                    label: isEditing ? "RES [L]" : "RES",
-                    value: pLockBinding(stepIndex: editIdx, laneGet: { lane.filterResonance },
-                        laneSet: { lane.filterResonance = $0 }, lockKeyPath: \.filterResonance),
-                    range: LRConstants.filterResonanceRange,
-                    accentColor: isEditing ? DS.warning.opacity(0.7) : DS.warning.opacity(0.8),
-                    size: knobSize, helpText: "Filter resonance")
-                RetroKnob(
-                    label: isEditing ? "TXT [L]" : "TXT",
-                    value: pLockBinding(stepIndex: editIdx, laneGet: { lane.texture },
-                        laneSet: { lane.texture = $0 }, lockKeyPath: \.texture),
-                    range: LRConstants.macroRange, accentColor: isEditing ? .orange.opacity(0.6) : .orange.opacity(0.8),
-                    size: knobSize, helpText: "Texture -- spectral density")
-                RetroKnob(
-                    label: isEditing ? "CHS [L]" : "CHS",
-                    value: pLockBinding(stepIndex: editIdx, laneGet: { lane.chaos },
-                        laneSet: { lane.chaos = $0 }, lockKeyPath: \.chaos),
-                    range: LRConstants.macroRange, accentColor: isEditing ? .cyan.opacity(0.6) : .cyan.opacity(0.8),
-                    size: knobSize, helpText: "Chaos -- randomness")
-                RetroKnob(
-                    label: isEditing ? "WRM [L]" : "WRM",
-                    value: pLockBinding(stepIndex: editIdx, laneGet: { lane.warmth },
-                        laneSet: { lane.warmth = $0 }, lockKeyPath: \.warmth),
-                    range: LRConstants.macroRange, accentColor: isEditing ? .red.opacity(0.7) : .red.opacity(0.8),
-                    size: knobSize, helpText: "Warmth -- saturation")
-                VStack(spacing: DS.spacingXS) {
-                    Text("VOL").font(DS.font(DS.fontCaption2, weight: .bold)).foregroundColor(DS.textTertiary)
-                    Slider(value: Binding(get: { lane.volume }, set: { lane.volume = $0 }), in: 0...1)
-                        .accentColor(DS.neonTurquesa).scrollableSlider(value: Binding(get: { lane.volume }, set: { lane.volume = $0 }), range: 0...1)
-                        .frame(width: 60)
-                        .onChange(of: lane.volume) { _, _ in DispatchQueue.main.async { engine.updateLaneMixerState() } }
-                }.help("Output level")
-            }
-            HStack(spacing: DS.spacingSM) {
-                RetroKnob(
-                    label: isEditing ? "DLY [L]" : "DLY",
-                    value: pLockBinding(stepIndex: editIdx, laneGet: { lane.delayMix },
-                        laneSet: { lane.delayMix = $0 }, lockKeyPath: \.delayMix),
-                    range: LRConstants.delayMixRange,
-                    accentColor: isEditing ? DS.paramDelay.opacity(0.6) : DS.paramDelay.opacity(0.8),
-                    size: knobSize, helpText: "Delay wet/dry mix")
-                RetroKnob(
-                    label: isEditing ? "CRUSH [L]" : "CRUSH",
-                    value: pLockBinding(stepIndex: editIdx, laneGet: { lane.bitCrushDepth },
-                        laneSet: { lane.bitCrushDepth = $0 }, lockKeyPath: \.bitCrushDepth),
-                    range: LRConstants.bitCrushRange,
-                    accentColor: isEditing ? DS.paramCrush.opacity(0.6) : DS.paramCrush.opacity(0.8),
-                    size: knobSize, helpText: "Bit crush")
-                RetroKnob(label: "D.TIME", value: Binding(get: { lane.delayTime }, set: { lane.delayTime = $0 }),
-                    range: LRConstants.delayTimeRange, accentColor: DS.paramDelay.opacity(0.6), size: knobSize, helpText: "Delay time")
-                RetroKnob(label: "D.FBK", value: Binding(get: { lane.delayFeedback }, set: { lane.delayFeedback = $0 }),
-                    range: LRConstants.delayFeedbackRange, accentColor: DS.paramDelay.opacity(0.6), size: knobSize, helpText: "Delay feedback")
-                RetroKnob(label: "ENT", value: Binding(
-                    get: { lane.entropyLevel },
-                    set: { lane.entropyLevel = lane.isDrumLane ? min($0, LRConstants.drumLaneEntropyCap) : $0 }),
-                    range: lane.isDrumLane ? 0...LRConstants.drumLaneEntropyCap : LRConstants.entropyRange,
-                    accentColor: DS.info.opacity(0.7), size: knobSize, helpText: "Entropy")
-                RetroKnob(label: "GRAN", value: Binding(
-                    get: { lane.granularity },
-                    set: { lane.granularity = lane.isDrumLane ? min($0, LRConstants.drumLaneGranularityCap) : $0 }),
-                    range: lane.isDrumLane ? 0...LRConstants.drumLaneGranularityCap : LRConstants.granularityRange,
-                    accentColor: DS.info.opacity(0.7), size: knobSize, helpText: "Granularity")
-                Spacer()
-            }
-            HStack(spacing: DS.spacingMD) {
-                promptPhaseControl
-                Spacer()
-                LRToggle(label: "FREEZE", isActive: lane.spectralFreezeActive, activeColor: .blue, helpText: "Spectral freeze") {
-                    DispatchQueue.main.async { lane.spectralFreezeActive.toggle() }
-                }
-                LRToggle(label: lane.inferMethod.uppercased(), isActive: lane.inferMethod == "sde", activeColor: DS.warning, helpText: "ODE vs SDE") {
-                    DispatchQueue.main.async { lane.inferMethod = (lane.inferMethod == "ode") ? "sde" : "ode" }
-                }
-            }
-            ScrollView(.horizontal, showsIndicators: false) {
-                LRSegmentPicker(items: ExcitationMode.allCases, selected: lane.excitationMode, color: DS.neonTurquesa,
-                    labelForItem: { $0.rawValue }, onSelect: { mode in DispatchQueue.main.async { lane.excitationMode = mode } })
-                    .help("Excitation source")
-            }
-        }
-        .padding(DS.spacingMD)
-        .background(DS.surfaceSubtle)
-        .overlay(RoundedRectangle(cornerRadius: DS.radiusMD).stroke(isEditing ? DS.neonAmbar.opacity(0.5) : DS.neonTurquesa.opacity(0.4), lineWidth: 1))
     }
 
-    private func pLockBinding(
-        stepIndex: Int?,
-        laneGet: @escaping () -> Float,
-        laneSet: @escaping (Float) -> Void,
-        lockKeyPath: WritableKeyPath<PerformanceStep, Float?>
-    ) -> Binding<Float> {
-        if let idx = stepIndex {
-            return Binding(
-                get: { lane.stepGrid.step(at: idx)?[keyPath: lockKeyPath] ?? laneGet() },
-                set: { engine.setStepLock(at: idx, lockKeyPath, value: $0) }
-            )
-        }
-        return Binding(get: laneGet, set: laneSet)
+    /// Current BPM as read from the focus sequencer's `stepTimeBPM`, or the
+    /// global default when no sequencer is in focus.
+    private var currentBPM: Int {
+        engine.focusSequencerNode?.stepTimeBPM ?? LRConstants.stepTimeBPMDefault
     }
 
-    private var promptPhaseControl: some View {
-        let editIdx = engine.pLockEditingStepIndex
-        let effectivePhase: Int? = editIdx.flatMap { idx in
-            lane.stepGrid.step(at: idx)?.promptPhase
-        } ?? lane.promptPhaseOverride
-        return HStack(spacing: 3) {
-            Text("PHASE").font(DS.font(DS.fontCaption2, weight: .bold)).foregroundColor(DS.paramPhase.opacity(0.6))
-            ForEach(1...3, id: \.self) { phase in
-                LRToggle(label: "P\(phase)", isActive: effectivePhase == phase, activeColor: .purple, helpText: "Phase \(phase)") {
-                    DispatchQueue.main.async {
-                        let newVal = (effectivePhase == phase) ? nil : phase
-                        if let idx = editIdx {
-                            engine.setStepPromptPhase(at: idx, phase: newVal)
-                        }
-                        lane.promptPhaseOverride = newVal
-                    }
-                }
-            }
-        }.help("Prompt phase override. When editing a step, sets the step's P-lock")
-    }
-}
+    // MARK: - Inactive section notices
+    //
+    // Envion-aligned honesty (§3.6): when a PERFORM subsystem has no backing
+    // nodes in the current topology, we say so plainly instead of rendering
+    // dead controls. Each notice names what is missing and how to get it,
+    // so the performer is never left guessing why a section does not respond.
 
-// MARK: - Step Grid Section (Per-Lane, Focus Lane UX)
-
-private struct StepGridSectionView: View {
-    @ObservedObject var lane: ResonatorLane
-    @ObservedObject var engine: NeuralEngine
-    @Binding var clipboardStep: PerformanceStep?
-
-    var body: some View {
-        VStack(spacing: DS.spacingSM) {
+    private func inactiveSectionNotice(
+        title: String,
+        color: Color,
+        message: String,
+        hint: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: DS.spacingSM) {
             HStack {
-                LRSectionHeader(title: "STEP GRID · \(lane.name)", color: DS.neonTurquesa.opacity(0.6))
-                chainLengthControl
+                LRSectionHeader(title: title, color: color)
                 Spacer()
-                stepAdvanceModePicker
-            }
-
-            let columns = Array(
-                repeating: GridItem(.fixed(LRConstants.performanceStepPadSize), spacing: DS.spacingSM),
-                count: LRConstants.performanceStepGridColumns
-            )
-            LazyVGrid(columns: columns, spacing: DS.spacingSM) {
-                ForEach(0..<lane.stepGrid.steps.count, id: \.self) { index in
-                    stepPad(index: index)
-                }
-            }
-            .drawingGroup(opaque: false)
-
-            if engine.selectedStepIndices.count > 1 {
-                batchSelectionHeaderBar
-            } else if let idx = engine.pLockEditingStepIndex, idx >= 0, idx < lane.stepGrid.chainLength {
-                pLockHeaderBar(stepIndex: idx)
-            } else if sequencerIsBlank {
-                sequencerGuidanceBanner
-            } else {
-                Text("TAP a step to edit · SHIFT+TAP to multi-select · RIGHT-CLICK for trig type")
-                    .font(DS.font(DS.fontCaption2, weight: .medium))
-                    .foregroundColor(DS.textTertiary.opacity(0.5))
-                    .padding(.top, DS.spacingXS)
-            }
-        }
-        .padding(.horizontal, DS.spacingXL)
-        .padding(.vertical, DS.spacingMD)
-    }
-
-    private var sequencerIsBlank: Bool {
-        let active = lane.stepGrid.steps.prefix(lane.stepGrid.chainLength)
-        return !active.contains(where: { $0.hasLock || $0.trigType != .note })
-    }
-
-    private var sequencerGuidanceBanner: some View {
-        VStack(spacing: DS.spacingXS) {
-            Text("NO SEQUENCE PROGRAMMED")
-                .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(DS.neonAmbar.opacity(0.85))
-            Text(
-                "TAP a step to edit P-locks. SHIFT+TAP to multi-select for batch operations (trig, DrumVoice (Drum Lane only), clear). "
-                + "LONG-PRESS to capture live tweaks. RIGHT-CLICK for trig type. Press '.' to advance."
-            )
-                .font(DS.font(DS.fontCaption2, weight: .medium))
-                .foregroundColor(DS.textTertiary.opacity(0.7))
-                .multilineTextAlignment(.center)
-        }
-        .padding(.vertical, DS.spacingSM)
-        .padding(.horizontal, DS.spacingMD)
-    }
-
-    private var chainLengthControl: some View {
-        HStack(spacing: 3) {
-            Text("LEN:")
-                .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(DS.textTertiary)
-            Text("\(lane.stepGrid.chainLength)")
-                .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(DS.neonTurquesa)
-                .frame(width: 18)
-            Button(action: {
-                var grid = lane.stepGrid
-                grid.chainLength = max(LRConstants.chainLengthRange.lowerBound, grid.chainLength - 1)
-                lane.stepGrid = grid
-            }) {
-                Text("-")
-                    .font(DS.font(DS.fontCaption, weight: .bold))
-                    .foregroundColor(DS.textSecondary)
-                    .frame(width: 18, height: 18)
-                    .background(DS.surfaceSubtle)
-                    .cornerRadius(DS.radiusSM)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            Button(action: {
-                var grid = lane.stepGrid
-                grid.chainLength = min(LRConstants.chainLengthRange.upperBound, grid.chainLength + 1)
-                lane.stepGrid = grid
-            }) {
-                Text("+")
-                    .font(DS.font(DS.fontCaption, weight: .bold))
-                    .foregroundColor(DS.textSecondary)
-                    .frame(width: 18, height: 18)
-                    .background(DS.surfaceSubtle)
-                    .cornerRadius(DS.radiusSM)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        }
-        .help("Pattern chain length -- how many steps the sequence loops over (,/Shift+.)")
-    }
-
-    private var stepAdvanceModePicker: some View {
-        HStack(spacing: DS.spacingXS) {
-                LRSegmentPicker(
-                items: StepGrid.StepAdvanceMode.allCases,
-                selected: lane.stepGrid.advanceMode,
-                color: DS.neonTurquesa,
-                labelForItem: { $0.rawValue.uppercased() },
-                onSelect: { mode in
-                    var grid = lane.stepGrid
-                    grid.advanceMode = mode
-                    lane.stepGrid = grid
-                    engine.syncStepTimer()
-                }
-            )
-            .help("How steps advance: MANUAL = tap to advance, TIME = BPM clock, ITERATION = every N inference cycles")
-
-            if lane.stepGrid.advanceMode == .manual {
-                LRToggle(label: "TAP", isActive: true, activeColor: DS.neonAmbar, helpText: "Advance to the next step in the sequence (.)") {
-                    engine.advanceLaneManually(lane: lane)
-                }
-            }
-
-            if lane.stepGrid.advanceMode == .time {
-                bpmControl
-            }
-        }
-    }
-
-    private var bpmControl: some View {
-        HStack(spacing: 3) {
-            Text("BPM:")
-                .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(DS.textTertiary)
-            Button(action: {
-                var grid = lane.stepGrid
-                grid.stepTimeBPM = max(grid.stepTimeBPM - 10, LRConstants.stepTimeBPMRange.lowerBound)
-                lane.stepGrid = grid
-                engine.syncStepTimer()
-            }) {
-                Text("-")
-                    .font(DS.font(DS.fontCaption, weight: .bold))
-                    .foregroundColor(DS.textPrimary)
-                    .frame(width: 20, height: 20)
-                    .background(DS.surfaceElevated)
-                    .cornerRadius(DS.radiusSM)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            Text("\(lane.stepGrid.stepTimeBPM)")
-                .font(DS.font(DS.fontCaption, weight: .bold))
-                .foregroundColor(DS.neonTurquesa)
-                .frame(width: 36)
-            Button(action: {
-                var grid = lane.stepGrid
-                grid.stepTimeBPM = min(grid.stepTimeBPM + 10, LRConstants.stepTimeBPMRange.upperBound)
-                lane.stepGrid = grid
-                engine.syncStepTimer()
-            }) {
-                Text("+")
-                    .font(DS.font(DS.fontCaption, weight: .bold))
-                    .foregroundColor(DS.textPrimary)
-                    .frame(width: 20, height: 20)
-                    .background(DS.surfaceElevated)
-                    .cornerRadius(DS.radiusSM)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        }
-        .help("Step tempo in beats per minute. Controls how fast the sequence advances (Up/Down arrows)")
-    }
-
-    private func trigColor(for step: PerformanceStep, isActive: Bool) -> Color {
-        guard isActive else { return Color.gray }
-        switch step.trigType {
-        case .note:    return DS.trigNote
-        case .lock:    return DS.trigLock
-        case .oneShot: return DS.trigOneShot
-        case .skip:    return DS.trigSkip
-        }
-    }
-
-    private func stepPad(index: Int) -> some View {
-        let step = lane.stepGrid.step(at: index) ?? PerformanceStep()
-        let isActive = index < lane.stepGrid.chainLength
-        let isCurrent = index == lane.stepGrid.currentStepIndex
-        let isSelected = engine.selectedStepIndices.contains(index)
-        let color = trigColor(for: step, isActive: isActive)
-
-        return Button(action: {
-            guard isActive else { return }
-            #if os(macOS)
-            let shift = NSEvent.modifierFlags.contains(.shift)
-            #else
-            let shift = false
-            #endif
-            engine.handleStepTap(index: index, shiftPressed: shift, chainLength: lane.stepGrid.chainLength)
-        }) {
-            ZStack {
-                RoundedRectangle(cornerRadius: DS.radiusSM)
-                    .fill(isCurrent ? color.opacity(0.5) : (isSelected ? color.opacity(0.25) : color.opacity(0.08)))
-                VStack(spacing: 1) {
-                    Text("\(index + 1)")
-                        .font(DS.font(DS.fontCaption, weight: .bold))
-                        .foregroundColor(isCurrent ? .white : DS.textSecondary)
-                    if let dv = step.drumVoice {
-                        Text(dv.label.prefix(1))
-                            .font(DS.font(DS.fontCaption2, weight: .bold))
-                            .foregroundColor(DS.warning.opacity(0.9))
-                    } else if let prob = step.probability, prob < 1.0 {
-                        Text("\(Int(prob * 100))%")
-                            .font(DS.font(DS.fontCaption2, weight: .medium))
-                            .foregroundColor(DS.warning.opacity(0.8))
-                    }
-                }
-                if step.hasLock {
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(DS.neonAmbar.opacity(0.9))
-                        .frame(width: 2, height: 8)
-                        .offset(x: 14, y: 12)
-                    lockIndicatorDots(step: step)
-                        .offset(x: 8, y: -12)
-                }
-                if !isActive {
-                    RoundedRectangle(cornerRadius: DS.radiusSM)
-                        .fill(DS.panelHollow.opacity(0.9))
-                }
-            }
-            .frame(width: LRConstants.performanceStepPadSize, height: LRConstants.performanceStepPadSize)
-            .overlay(RoundedRectangle(cornerRadius: DS.radiusSM)
-                .stroke(isCurrent ? color : (isSelected ? DS.warning : DS.border), lineWidth: 1))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(isActive ? "Step \(index + 1) — TAP to edit, SHIFT+TAP to select, LONG-PRESS to capture"
-            : "Step \(index + 1) — outside chain")
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.5)
-                .onEnded { _ in
-                    guard index < lane.stepGrid.chainLength else { return }
-                    DispatchQueue.main.async { engine.captureCurrentToStep(at: index) }
-                }
-        )
-        .contextMenu {
-            if isActive {
-                ForEach(TrigType.allCases, id: \.self) { trig in
-                    Button(action: { engine.setStepTrigType(at: index, trig) }) {
-                        HStack {
-                            Text(trigLabel(trig))
-                            if step.trigType == trig {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func trigLabel(_ trig: TrigType) -> String {
-        switch trig {
-        case .note:    return "NOTE (N)"
-        case .lock:    return "LOCK (L)"
-        case .oneShot: return "ONE-SHOT (1x)"
-        case .skip:    return "SKIP (-)"
-        }
-    }
-
-    private func lockIndicatorDots(step: PerformanceStep) -> some View {
-        Group {
-            if step.lockCount <= 3 {
-                HStack(spacing: 1) {
-                    if step.cfg != nil         { Circle().fill(DS.warning).frame(width: 3, height: 3) }
-                    if step.feedback != nil     { Circle().fill(DS.info).frame(width: 3, height: 3) }
-                    if step.promptPhase != nil  { Circle().fill(DS.paramPhase).frame(width: 3, height: 3) }
-                    if step.denoiseStrength != nil { Circle().fill(DS.paramDenoise.opacity(0.6)).frame(width: 3, height: 3) }
-                    if step.texture != nil      { Circle().fill(DS.trigNote).frame(width: 3, height: 3) }
-                    if step.chaos != nil        { Circle().fill(DS.info).frame(width: 3, height: 3) }
-                    if step.warmth != nil       { Circle().fill(DS.trigNote.opacity(0.6)).frame(width: 3, height: 3) }
-                    if step.filterCutoff != nil  { Circle().fill(DS.trigLock).frame(width: 3, height: 3) }
-                    if step.filterResonance != nil { Circle().fill(DS.trigLock.opacity(0.7)).frame(width: 3, height: 3) }
-                    if step.excitationMode != nil { Circle().fill(DS.neonTurquesa).frame(width: 3, height: 3) }
-                    if step.delayMix != nil     { Circle().fill(DS.paramDelay).frame(width: 3, height: 3) }
-                    if step.bitCrushDepth != nil { Circle().fill(DS.paramCrush.opacity(0.7)).frame(width: 3, height: 3) }
-                }
-            } else {
-                Text("\(step.lockCount)L")
+                Text("INACTIVE")
                     .font(DS.font(DS.fontCaption2, weight: .bold))
-                    .foregroundColor(DS.warning)
+                    .foregroundColor(DS.textTertiary)
+                    .tracking(DS.trackingLab)
             }
+            .padding(.horizontal, DS.spacingXL)
+
+            inactiveNotice(message: message, hint: hint)
         }
+        .padding(.vertical, DS.spacingXS)
+        .background(DS.surfaceElevated.opacity(0.12))
     }
 
-    private var batchSelectionHeaderBar: some View {
-        let count = engine.selectedStepIndices.count
-        let sorted = engine.selectedStepIndices.sorted()
-        return VStack(spacing: DS.spacingSM) {
-            HStack(spacing: DS.spacingMD) {
-                Text("\(count) STEPS SELECTED")
-                    .font(DS.font(DS.fontCaption2, weight: .bold))
-                    .foregroundColor(DS.info.opacity(0.9))
-                Text(sorted.map { "\($0 + 1)" }.joined(separator: ", "))
-                    .font(DS.font(DS.fontCaption2, weight: .medium))
-                    .foregroundColor(DS.textSecondary)
-
-                Text("TRIG:")
-                    .font(DS.font(DS.fontCaption2, weight: .bold))
-                    .foregroundColor(DS.textTertiary.opacity(0.8))
-                ForEach(TrigType.allCases, id: \.self) { trig in
-                    Button(action: { engine.applyTrigTypeToSelected(trig) }) {
-                        Text(trigLabel(trig))
-                            .font(DS.font(DS.fontCaption2, weight: .bold))
-                            .foregroundColor(DS.info.opacity(0.8))
-                            .lineLimit(2)
-                            .multilineTextAlignment(.center)
-                            .frame(minHeight: 18)
-                            .padding(.horizontal, 6)
-                            .background(DS.surfaceElevated)
-                            .cornerRadius(DS.radiusSM)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Apply \(trigLabel(trig)) to all \(count) selected steps")
-                }
-
-                if lane.name == LanePreset.drumLane.name {
-                    Text("DRUM:")
-                        .font(DS.font(DS.fontCaption2, weight: .bold))
-                        .foregroundColor(DS.textTertiary.opacity(0.8))
-                    ForEach(DrumVoice.allCases, id: \.self) { voice in
-                        Button(action: { engine.applyDrumVoiceToSelected(voice) }) {
-                            Text(voice.label)
-                                .font(DS.font(DS.fontCaption2, weight: .bold))
-                                .foregroundColor(DS.warning.opacity(0.8))
-                                .lineLimit(2)
-                                .multilineTextAlignment(.center)
-                                .frame(minHeight: 18)
-                                .padding(.horizontal, 4)
-                                .background(DS.surfaceElevated)
-                                .cornerRadius(DS.radiusSM)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("Apply \(voice.label) to all \(count) selected steps — Drum Lane P-lock")
-                    }
-                    Button(action: { engine.applyDrumVoiceToSelected(nil) }) {
-                        Text("—")
-                            .font(DS.font(DS.fontCaption2, weight: .bold))
-                            .foregroundColor(DS.textTertiary)
-                            .frame(width: 20, height: 18)
-                            .background(DS.surfaceElevated)
-                            .cornerRadius(DS.radiusSM)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Clear DrumVoice from all \(count) selected steps")
-                }
-
-                Spacer()
-
-                Button(action: { engine.clearSelectedSteps() }) {
-                    Text("CLEAR ALL")
-                        .font(DS.font(DS.fontCaption2, weight: .bold))
-                        .foregroundColor(DS.danger)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(DS.danger.opacity(0.2))
-                        .cornerRadius(DS.radiusSM)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Reset all \(count) selected steps to default")
-            }
-        }
-        .padding(DS.spacingSM)
-        .background(DS.info.opacity(0.08))
-        .overlay(RoundedRectangle(cornerRadius: DS.radiusSM).stroke(DS.info.opacity(0.3), lineWidth: 1))
-        .padding(.top, DS.spacingSM)
-    }
-
-    private func pLockHeaderBar(stepIndex: Int) -> some View {
-        let step = lane.stepGrid.step(at: stepIndex) ?? PerformanceStep()
-        return VStack(spacing: DS.spacingSM) {
-            HStack(spacing: DS.spacingMD) {
-                Text("STEP \(stepIndex + 1) P-LOCK")
-                    .font(DS.font(DS.fontCaption2, weight: .bold))
-                    .foregroundColor(DS.warning.opacity(0.8))
-
-                trigTypeMiniPicker(stepIndex: stepIndex, current: step.trigType)
-
-                if lane.name == LanePreset.drumLane.name {
-                    drumVoiceMiniPicker(stepIndex: stepIndex, current: step.drumVoice)
-                }
-
-                probabilityControl(stepIndex: stepIndex, probability: step.probability)
-
-                microtimingControl(stepIndex: stepIndex, microtiming: step.microtiming)
-
-                Spacer()
-
-                LRToggle(
-                    label: "COPY", isActive: false, activeColor: DS.info,
-                    helpText: "Copy this step's trig type and all parameter locks to clipboard"
-                ) {
-                    clipboardStep = lane.stepGrid.step(at: stepIndex)
-                }
-                LRToggle(
-                    label: "PASTE", isActive: clipboardStep != nil, activeColor: DS.info,
-                    helpText: "Paste the copied step data onto this step"
-                ) {
-                    if let clip = clipboardStep {
-                        lane.stepGrid.setStep(clip, at: stepIndex)
-                    }
-                }
-                LRToggle(
-                    label: "CLEAR", isActive: false, activeColor: DS.danger,
-                    helpText: "Reset this step to default -- removes all parameter locks"
-                ) {
-                    engine.clearStep(at: stepIndex)
-                }
-            }
-        }
-        .padding(DS.spacingSM)
-        .background(DS.warning.opacity(0.05))
-        .overlay(RoundedRectangle(cornerRadius: DS.radiusSM).stroke(DS.warning.opacity(0.2), lineWidth: 1))
-        .padding(.top, DS.spacingSM)
-    }
-
-    private func trigTypeMiniPicker(stepIndex: Int, current: TrigType) -> some View {
-        HStack(spacing: 2) {
-            trigMiniButton("N",  trig: .note,    current: current, stepIndex: stepIndex)
-            trigMiniButton("L",  trig: .lock,    current: current, stepIndex: stepIndex)
-            trigMiniButton("1x", trig: .oneShot, current: current, stepIndex: stepIndex)
-            trigMiniButton("-",  trig: .skip,    current: current, stepIndex: stepIndex)
-        }
-    }
-
-    /// DrumVoice P-Lock picker (§0 Drum Lane). Tapping cycles through voice or clears.
-    private func drumVoiceMiniPicker(stepIndex: Int, current: DrumVoice?) -> some View {
-        HStack(spacing: 2) {
-            Text("DRUM:")
-                .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(DS.textTertiary.opacity(0.8))
-            ForEach(DrumVoice.allCases, id: \.self) { voice in
-                drumVoiceButton(stepIndex: stepIndex, voice: voice, current: current)
-            }
-            drumVoiceClearButton(stepIndex: stepIndex, current: current)
-        }
-        .help("Drum Lane: lock kick/snare/hat/cymbal/mixed per step. Requires DRUM LANE preset.")
-    }
-
-    private func drumVoiceButton(stepIndex: Int, voice: DrumVoice, current: DrumVoice?) -> some View {
-        let isActive = current == voice
-        return Button(action: {
-            engine.setStepDrumVoice(at: stepIndex, voice: isActive ? nil : voice)
-        }) {
-            Text(voice.label)
-                .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(isActive ? .black : DS.warning.opacity(0.6))
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-                .frame(minWidth: 38, minHeight: 20)
-                .background(isActive ? DS.neonAmbar.opacity(DS.activeOpacity) : DS.surfaceElevated)
-                .cornerRadius(DS.radiusSM)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Lock \(voice.label) for this step — Drum Lane prompt override")
-    }
-
-    private func drumVoiceClearButton(stepIndex: Int, current: DrumVoice?) -> some View {
-        let isActive = current == nil
-        return Button(action: { engine.setStepDrumVoice(at: stepIndex, voice: nil) }) {
-            Text("—")
-                .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(isActive ? .black : DS.textTertiary)
-                .frame(width: 20, height: 18)
-                .background(isActive ? DS.textSecondary : DS.surfaceElevated)
-                .cornerRadius(DS.radiusSM)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Clear DrumVoice lock — uses preset prompt phases")
-    }
-
-    private func trigMiniButton(_ label: String, trig: TrigType, current: TrigType, stepIndex: Int) -> some View {
-        let isActive = trig == current
-        let color = trigColor(for: PerformanceStep(trigType: trig), isActive: true)
-        let helpText: String = {
-            switch trig {
-            case .note: return "Note — full inference cycle (default)"
-            case .lock: return "Lock — apply P-locks without inference (trigless)"
-            case .oneShot: return "One-shot — fires once per pattern, then skips"
-            case .skip: return "Skip — step is not played"
-            }
-        }()
-        return Button(action: { engine.setStepTrigType(at: stepIndex, trig) }) {
-            Text(label)
-                .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(isActive ? .black : color.opacity(0.7))
-                .frame(width: 22, height: 18)
-                .background(isActive ? color : Color.clear)
-                .overlay(RoundedRectangle(cornerRadius: 2).stroke(color.opacity(0.4), lineWidth: 1))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(helpText)
-    }
-
-    private func probabilityControl(stepIndex: Int, probability: Float?) -> some View {
-        HStack(spacing: 3) {
-            Text("PROB:")
-                .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(DS.textTertiary)
-            Slider(
-                value: Binding(
-                    get: { Double(probability ?? 1.0) },
-                    set: { val in
-                        let f = Float(val)
-                        engine.setStepProbability(at: stepIndex, probability: f >= 1.0 ? nil : f)
-                    }
-                ),
-                in: 0...1
-            )
-            .accentColor(DS.warning.opacity(0.6))
-            .scrollableSlider(value: Binding(
-                get: { Double(probability ?? 1.0) },
-                set: { let f = Float($0); engine.setStepProbability(at: stepIndex, probability: f >= 1.0 ? nil : f) }
-            ), range: 0...1)
-            .frame(width: 80)
-            Text(probability != nil ? "\(Int((probability ?? 1) * 100))%" : "--")
-                .font(DS.font(DS.fontCaption2, weight: .medium))
+    private func inactiveNotice(message: String, hint: String) -> some View {
+        VStack(alignment: .leading, spacing: DS.spacingXS) {
+            Text(message)
+                .font(DS.font(DS.fontCaption, weight: .medium))
                 .foregroundColor(DS.textSecondary)
-                .frame(width: 28, alignment: .trailing)
+            Text(hint)
+                .font(DS.font(DS.fontCaption2))
+                .foregroundColor(DS.textTertiary.opacity(0.7))
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .help("Probability that this step fires. 100% = always, lower = random chance of skipping")
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, DS.spacingXL)
+        .padding(.vertical, DS.spacingSM)
     }
+}
 
-    private func microtimingControl(stepIndex: Int, microtiming: Double) -> some View {
-        HStack(spacing: 3) {
-            Text("MICRO:")
-                .font(DS.font(DS.fontCaption2, weight: .bold))
-                .foregroundColor(DS.textTertiary)
-            Slider(
-                value: Binding(
-                    get: { microtiming },
-                    set: { engine.setStepMicrotiming(at: stepIndex, microtiming: $0) }
-                ),
-                in: -0.5...0.5
-            )
-            .accentColor(DS.warning.opacity(0.6))
-            .scrollableSlider(
-                value: Binding(
-                    get: { microtiming },
-                    set: { engine.setStepMicrotiming(at: stepIndex, microtiming: $0) }
-                ),
-                range: -0.5...0.5
-            )
-            .frame(width: 60)
-            Text(
-                abs(microtiming) < 0.001
-                    ? "0"
-                    : String(format: "%+.0f%%", microtiming * 100)
-            )
-            .font(DS.font(DS.fontCaption2, weight: .medium))
-            .foregroundColor(DS.textSecondary)
-            .frame(width: 36, alignment: .trailing)
-        }
-        .help("Per-step timing offset. Negative = early (push), positive = late (drag)")
-    }
+// MARK: - Layout Metrics (Wave C C3)
+
+private enum PerformMetrics {
+    static let gesturePadHeight: CGFloat = 120
 }

@@ -2,7 +2,7 @@
 
 A small, standalone HTTP server that wraps [ACE-Step 1.5](https://github.com/ace-step/ACE-Step) neural audio inference behind a simple JSON API. It has no dependency on any particular host application — anything that can send an HTTP request can drive it: send an audio chunk plus a handful of generation parameters, and get processed audio back.
 
-This bridge was originally built for the Latent Resonator project and is being extracted here as a standalone, reusable component.
+This bridge was originally built as part of a larger project and is extracted here as a standalone, reusable component.
 
 ## What it does
 
@@ -19,7 +19,7 @@ This bridge was originally built for the Latent Resonator project and is being e
 
 ## Setup
 
-The included `setup_ace_bridge.sh` script automates environment creation, dependency installation, and (optionally) model download, then starts the server.
+The included `setup_ace_bridge.sh` script automates environment creation, dependency installation, and (optionally) model download, then starts the server. Everything it creates (virtual environment, cloned ACE-Step checkout, downloaded model weights) lives next to the script itself, so the bridge is self-contained and does not assume any particular surrounding project layout.
 
 ```bash
 # First-time setup, no model — server starts in passthrough mode
@@ -74,7 +74,8 @@ python ace_bridge_server.py [--host 127.0.0.1] [--port 8976] [--model-path PATH]
 
 - `--model-path` accepts a local directory or a HuggingFace repo ID. Without it, the server starts in passthrough mode.
 - `--device auto` picks MPS, then CUDA, then CPU, in that order, based on availability.
-- Set `LATENT_RESONATOR_FORCE_CPU=1` in the environment to force CPU execution unconditionally (a safety valve for MPS backends that crash on certain ops).
+- Set `LATENT_RESONATOR_FORCE_CPU=1` in the environment to force CPU execution unconditionally (a safety valve for MPS backends that crash on certain ops). The name is a holdover from this bridge's origin project; any caller can set it regardless of what launched the server.
+- `--low-latency` / `--performance-mode` cap the number of diffusion steps for lower-latency, real-time-oriented inference; pair with `--max-steps` to set the cap explicitly (default 6 if performance mode is on and `--max-steps` isn't given).
 
 ## HTTP API
 
@@ -82,7 +83,7 @@ All responses are JSON.
 
 ### `GET /health`
 
-Lightweight status check, suitable for periodic polling.
+Lightweight status check, suitable for periodic polling by a client to confirm the server is reachable and to see whether neural inference is currently active.
 
 ```json
 {
@@ -119,13 +120,15 @@ Request body:
   "entropy": 0.25,
   "granularity": 0.45,
   "audio_duration": 10.0,
-  "denoise_strength": 1.0
+  "denoise_strength": 1.0,
+  "thinking": true,
+  "task_type": "cover"
 }
 ```
 
 Only `audio` is required; every other field falls back to the default shown above. `audio` must be a base64-encoded WAV (16-bit PCM, 24-bit PCM, or 32-bit float; mono or multi-channel — multi-channel input is mixed down to mono). Request size is capped (1.4M base64 characters / 2MB decoded, roughly 10 seconds of mono float32 audio at 48 kHz) and oversized requests get a `413`.
 
-A few fields are expressed in a normalized, UI-friendly range and remapped onto the underlying ACE-Step parameters:
+A few fields are expressed in a normalized, caller-friendly range and remapped onto the underlying ACE-Step parameters:
 
 | Request field | Range | Maps to | Effect |
 |---|---|---|---|
@@ -134,6 +137,16 @@ A few fields are expressed in a normalized, UI-friendly range and remapped onto 
 | `granularity` | 0-1 | `guidance_interval_decay` (0-1) | Higher values decay CFG faster across steps, for finer detail. |
 | `infer_method` | `"ode"` / `"sde"` | `retake_variance` (0.0 / 0.5) | `ode` is deterministic; `sde` injects stochastic per-step noise. |
 | `denoise_strength` | 0-1 | effective step count | 0 short-circuits to passthrough; otherwise scales `num_steps`. |
+
+Two further fields control how the prompt reaches the model:
+
+- **`thinking`** (bool, default `true`): when `false`, the three ERG guidance channels (`use_erg_tag`, `use_erg_lyric`, `use_erg_diffusion`) are all disabled, so the prompt is injected directly into the diffusion transformer instead of being routed through ACE-Step's LM-based guidance planner. Use this to bypass LM-mediated guidance when you want the prompt applied more directly.
+- **`task_type`** (string, default `"cover"`): selects which ACE-Step task the input audio is run through.
+  - `"cover"` — audio-to-audio: the input audio feeds back in as a reference (`ref_audio`) alongside the prompt. This is the default and the mode intended for iterative, feedback-driven use (each call's output can become the next call's input).
+  - `"repaint"` — repaints a window of the input audio (currently the whole clip, `0` to `audio_duration`) guided by the prompt.
+  - `"extend"` — continues the input audio past its end.
+  - `"edit"` — rewrites a segment of the input audio toward the prompt.
+  - Any other value is reserved (not yet mapped) and falls back to `"cover"` with a warning logged server-side.
 
 Response body:
 
@@ -152,18 +165,25 @@ On error, the response is `{"error": "<message>"}` with a `400` (bad input), `41
 
 ### `POST /shutdown`
 
-Requests a graceful shutdown, so the process can release resources before exiting. Intended to be called by the host process ahead of sending `SIGTERM`.
+Requests a graceful shutdown, so the process can release resources before exiting. An alternative to sending `SIGTERM` directly to the process.
 
 ## Running the tests
 
-`test_bridge.py` covers the WAV encode/decode helpers in isolation — no model, no running server, and no GPU required.
+`test_bridge.py` covers the WAV encode/decode helpers and the Flask endpoints in passthrough mode (no model, no GPU) — 15 tests that always run, plus one opt-in live-inference test that is skipped unless a real ACE-Step checkpoint and `ACE_BRIDGE_LIVE_INFER=1` are provided.
 
 ```bash
 pip install pytest numpy
 pytest test_bridge.py -v
 ```
 
-All 9 tests are pure numpy/WAV-codec round-trip and validation checks, so none of them require a GPU or a loaded model — none are expected to skip. (A broader integration test against a loaded ACE-Step model is out of scope for this suite; it would need a real checkpoint and a GPU/MPS device to be meaningful.)
+Verified output from this checkout:
+
+```
+collected 16 items
+15 passed, 1 skipped in 0.20s
+```
+
+The single skip is `TestLiveInfer::test_real_infer_changes_or_produces_audio`, which requires a real ACE-Step checkpoint (found automatically under `../../models/ace-step-v1.5-base` relative to the repo this bridge lives in, or pointed to via `ACE_BRIDGE_MODEL_PATH`) and `ACE_BRIDGE_LIVE_INFER=1` set explicitly — it is not expected to run in a plain checkout.
 
 ## ACE-Step license note
 

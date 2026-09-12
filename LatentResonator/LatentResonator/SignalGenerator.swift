@@ -4,7 +4,7 @@ import AVFoundation
 // MARK: - Signal Generator
 // Multiple excitation sources for the Neural Feedback Loop.
 //
-// Max/MSP teaches us that sonic diversity begins at the source.
+// dataflow system teaches us that sonic diversity begins at the source.
 // The original Koenig Seed (§4.1) is ONE valid excitation -- but
 // the whitepaper's latent space is a resonant chamber (§1.2) that
 // responds differently to different inputs. Each mode "pings" the
@@ -65,12 +65,15 @@ enum SaturationMode: String, CaseIterable, Identifiable {
 /// Implements the stochastic parameter evolution concept (§5.2)
 /// where timbral entropy increases over time without human input.
 enum LFOTarget: String, CaseIterable, Identifiable {
-    case none        = "OFF"
-    case entropy     = "ENTROPY"
-    case granularity = "GRAIN"
-    case guidance    = "CFG"
-    case feedback    = "FEEDBACK"
-    case resonator   = "RESON"
+    case none            = "OFF"
+    case entropy         = "ENTROPY"
+    case granularity     = "GRAIN"
+    case guidance        = "CFG"
+    case feedback        = "FEEDBACK"
+    case resonator       = "RESON"
+    case filterCutoff    = "FILTER"
+    case delayMix        = "DELAY"
+    case saturationMorph = "SAT"
 
     var id: String { rawValue }
 }
@@ -187,6 +190,23 @@ final class SignalGenerator {
     private var cachedKPulses: Int = 0
     private var cachedKSteps: Int = 0
 
+    /// Manifesto gate ("Listen before you adjust"): false until the
+    /// performer manually arms the seed via `triggerKoenigSeed()`
+    /// (K key / UI button / MIDI). Defaults `false` so START does NOT
+    /// auto-inject — `renderKoenigSeedStreaming` returns silence until
+    /// armed. Read on the audio thread, written on the main thread;
+    /// follows the same access pattern as the rest of this struct's
+    /// mutable state.
+    var koenigArmed: Bool = false
+
+    /// Toggle the Koenig seed arm state. Called from `OscillatorNode.triggerSeed()`.
+    /// Returns the new armed state for UI feedback.
+    @discardableResult
+    func triggerKoenigSeed() -> Bool {
+        koenigArmed.toggle()
+        return koenigArmed
+    }
+
     // MARK: - Real-Time Render (Audio Thread)
 
     /// Fill raw audio buffer pointers for use in an AVAudioSourceNode render
@@ -250,6 +270,11 @@ final class SignalGenerator {
         frameCount: Int,
         sampleRate: Double
     ) {
+        // Manifesto ("Listen before you adjust"): the seed does NOT auto-fire
+        // on START. Until the performer arms it via `triggerKoenigSeed()`,
+        // emit silence. The buffer is already zeroed by `renderInto`.
+        guard koenigArmed else { return }
+
         // Recache rhythm pattern when parameters change
         if euclideanPulses != cachedKPulses || euclideanSteps != cachedKSteps {
             cachedRhythm = KoenigSeedGenerator.euclideanRhythm(
@@ -447,9 +472,9 @@ final class SignalGenerator {
         oscPhase = phase
     }
 
-    // MARK: - Triangle (Buchla Character)
+    // MARK: - Triangle (west-coast synthesis Character)
 
-    /// Soft, flute-like triangle wave -- the Buchla sound. Fewer
+    /// Soft, flute-like triangle wave -- the west-coast synthesis sound. Fewer
     /// harmonics than saw/square, pure and warm. Derived by
     /// integrating the square wave (leaky integrator for stability).
     private func fillTriangle(

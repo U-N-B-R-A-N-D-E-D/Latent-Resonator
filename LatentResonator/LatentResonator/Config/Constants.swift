@@ -8,6 +8,12 @@ import SwiftUI
 // Defaults are aligned with the white paper:
 // "Recursive Latent Trajectories in Neural Audio Synthesis"
 // --  CFG 15.0-18.0, inputStrength 0.60 -> 0.45, E(5,13) Koenig Seed.
+//
+// Whitepaper References:
+//   §1.1 — Lucier: Recursive audio processes (I Am Sitting in a Room)
+//   §1.2 — Xenakis: Stochastic synthesis and Markov chains (Formalized Music)
+//   §2.1 — Schaeffer: Musique concrète and sound object (objet sonore)
+//   §2.3 — Roads: Microsound and granular time domains (Microsound, 2001)
 
 enum LRConstants {
 
@@ -42,6 +48,13 @@ enum LRConstants {
     /// Default feedback: 0.5 -- active loop from the start.
     static let feedbackDefault: Float = 0.5
 
+    /// Hard ceiling applied to all feedback-path gains (FeedbackLoopNode,
+    /// DelayLineNode, TunableResonatorNode). 0.999 lets the performer push
+    /// to the edge of controlled self-oscillation (Envion/Buchla territory)
+    /// without the runaway that 1.0 would guarantee. Was a hardcoded 0.99
+    /// per-node — too conservative, killed the instrument's edge.
+    static let feedbackCap: Float = 0.999
+
     static let entropyRange: ClosedRange<Float> = 0.0...100.0
     /// Default entropy: 35 -- starts in the "textured" zone where spectral
     /// noise is clearly audible. Was 25 (inaudible in real-time DSP path).
@@ -61,6 +74,33 @@ enum LRConstants {
     static let inputStrengthRange: ClosedRange<Float> = 0.0...1.0
     static let inputStrengthDefault: Float = 0.6
 
+    // MARK: - Factory Topology (Envion §3.2 — Topology Reservoir)
+
+    /// Default bundled topology when no saved session exists.
+    /// Must include `FeedbackLoopNode` + `ACEStepInferenceNode` (whitepaper §3.3).
+    /// v2.0: macro-based default so PERFORM mode is alive on first launch
+    /// (focus macro + VU meters + envelope editor + knobs). The flat
+    /// `seed-feedback-flat` topology is preserved as an alternative.
+    static let defaultFactoryTopologyFileName = "seed-feedback-macro"
+
+    /// Scaffold topology used by `ImplicitGraphBuilder.buildGraph(from:)` to
+    /// construct a `MacroNode`'s *internal* graph from a `LanePreset`.
+    ///
+    /// P0 REGRESSION NOTE (2026-07-21): this must NEVER be
+    /// `defaultFactoryTopologyFileName`. That file is itself macro-based —
+    /// its "Resonator Macro" node has `presetName: "BUCHLA PERC"` and no
+    /// inline `internalGraph`, so building it re-enters `NodeFactory.createNode`
+    /// -> `MacroNode(id:params:)` -> `MacroNode.fromPreset` ->
+    /// `ImplicitGraphBuilder.buildGraph`. If that function reloaded
+    /// `defaultFactoryTopologyFileName` as its own scaffold, it would deserialize
+    /// the SAME macro node again, forever — infinite recursion, stack overflow,
+    /// before any audio. `seed-feedback-flat` is the minimal
+    /// source -> resonator -> output topology (see its metadata) and contains
+    /// no "macro" node, so it structurally cannot restart the cycle. See
+    /// `ImplicitGraphBuilder.presetsUnderConstruction` for the belt-and-suspenders
+    /// reentrancy guard in case that invariant is ever broken.
+    static let macroInternalScaffoldTopologyFileName = "seed-feedback-flat"
+
     // MARK: - Auto Decay (White Paper §4.2.2 -- Recursive Drift Trajectory)
     //
     // When enabled, inputStrength decays automatically toward a target value
@@ -76,13 +116,13 @@ enum LRConstants {
 
     // MARK: - Spectral Feature Logging
 
-    /// Maximum number of spectral feature snapshots retained per lane.
+    /// Maximum number of spectral feature snapshots retained per macro node.
     /// At ~1 snapshot per inference cycle (~20s), 256 entries ~ 85 min of data.
     static let featureLogMaxEntries: Int = 256
 
     // MARK: - Iteration Archive
 
-    /// Max number of past iteration audio buffers to retain per lane.
+    /// Max number of past iteration audio buffers to retain per macro node.
     static let iterationArchiveSize: Int = 16
 
     // MARK: - Timing Intervals (nanoseconds)
@@ -145,15 +185,15 @@ enum LRConstants {
     /// Raise to 15-25 when using MPS (GPU) or on fast machines.
     static let aceStepsDefault: Int = 8
 
-    // MARK: - Multi-Lane Architecture
+    // MARK: - v2.0 Graph Architecture Defaults
 
-    /// Maximum number of simultaneous lanes.
-    /// 4 lanes keeps CPU/GPU load manageable. With MPS inference (~5s/step),
-    /// 4 lanes cycle in ~20s total. Beyond 4, IOWorkLoop overload occurs.
-    static let maxLanes: Int = 4
+    /// Default number of MacroNodes created on app launch.
+    /// These are graph-based nodes, not legacy lanes.
+    static let defaultMacroNodeCount: Int = 4
 
-    /// Default number of lanes created on app launch.
-    static let defaultLaneCount: Int = 1
+    /// Maximum number of MacroNodes allowed.
+    /// v2.0: Replaces maxLanes from v1.x architecture.
+    static let maxMacroNodes: Int = 8
 
     // MARK: - Latent Pipeline (ACE-Step Three-Model Architecture)
 
@@ -203,7 +243,36 @@ enum LRConstants {
     /// drift audible to the performer. Was 0.7 (too subtle).
     static let spectralMemoryCoeff: Float = 0.85
 
-    // MARK: - Signal Generator (Max/MSP Excitation Sources)
+    // MARK: - Spectral Feedback Node (Emergence — Round 2 audit, Booth)
+    //
+    // SpectralFeedbackNode closes a loop around SpectralPipeline itself:
+    // Stage 3 (polar saturation) + Stage 5 (leaky memory) coupled through a
+    // hop-quantized delay become a real nonlinear dynamical system with
+    // state -- a spectral attractor owned entirely by Latent Resonator's
+    // own DSP, no ACE-Step dependency. gain < 1.0 (feedbackCap, existing
+    // constant above) guarantees stability regardless of these ranges.
+
+    /// Feedback gain range/default for the spectral loop. Exposed range
+    /// tops out at 0.95 (matches filterResonanceRange/delayFeedbackRange
+    /// convention); the render path additionally clamps via `feedbackCap`.
+    static let spectralFeedbackRange: ClosedRange<Float> = 0.0...0.95
+    static let spectralFeedbackDefault: Float = 0.7
+
+    /// Stage 5 leaky-memory coefficient for the node's internal pipeline.
+    static let spectralFeedbackMemoryRange: ClosedRange<Float> = 0.0...0.99
+    static let spectralFeedbackMemoryDefault: Float = 0.85
+
+    /// Stage 3 polar-saturation amount for the node's internal pipeline.
+    static let spectralFeedbackSaturationRange: ClosedRange<Float> = 0.0...1.0
+    static let spectralFeedbackSaturationDefault: Float = 0.3
+
+    /// How many hops of delay elapse before the loop's own output returns
+    /// as feedback. 1 hop = tightest loop (fastest attractor cycling); 4 =
+    /// loosest. Delay length in samples = delayHopCount * (fftSize / 2).
+    static let spectralFeedbackHopDelayRange: ClosedRange<Int> = 1...4
+    static let spectralFeedbackHopDelayDefault: Int = 2
+
+    // MARK: - Signal Generator (dataflow system Excitation Sources)
 
     /// Sine oscillator frequency range (Hz). Covers sub-bass to mid-range.
     static let sineFrequencyRange: ClosedRange<Float> = 20.0...2000.0
@@ -272,6 +341,52 @@ enum LRConstants {
     /// Filter resonance range. Self-oscillation near 0.95.
     static let filterResonanceRange: ClosedRange<Float> = 0.0...0.95
     static let filterResonanceDefault: Float = 0.0
+    /// Filter drive amount for waveshaping within the filter.
+    static let filterDriveRange: ClosedRange<Float> = 0.0...1.0
+    static let filterDriveDefault: Float = 0.0
+
+    // MARK: - Waveshaper
+
+    /// Waveshaper input gain. Higher values = more distortion.
+    static let waveshaperGainRange: ClosedRange<Float> = 0.0...2.0
+    static let waveshaperGainDefault: Float = 1.0
+
+    // MARK: - Comb Filter
+
+    /// Number of comb filter delay taps.
+    static let combTapCountRange: ClosedRange<Int> = 1...8
+    static let combTapCountDefault: Int = 5
+    /// Per-tap feedback amount for comb filter.
+    static let combFeedbackRange: ClosedRange<Float> = 0.0...0.95
+    static let combFeedbackDefault: Float = 0.78
+
+    // MARK: - Noise Source
+
+    /// Output amplitude for noise generator.
+    static let noiseAmplitudeRange: ClosedRange<Float> = 0.0...1.0
+    static let noiseAmplitudeDefault: Float = 0.5
+
+    // MARK: - Oscillator Source
+
+    /// Oscillator waveform selection (0=sine, 1=square, 2=saw, 3=triangle).
+    static let oscillatorWaveformDefault: Int = 0  // sine
+
+    // MARK: - Audio Pipeline Health (Auto-Recovery)
+    //
+    // Safety net for `NeuralEngine.verifyAudioPipeline()`. A source whose
+    // amplitude sits at/near zero produces total silence with no audible
+    // signal that anything is wrong -- `startProcessing()` auto-restores it
+    // once, on START only (never mid-performance), so a bad preset or a
+    // stray knob drag doesn't strand the user in silence with no recovery.
+
+    /// Below this, a source's amplitude counts as "silent" for pipeline
+    /// health checks and auto-recovery.
+    static let silentAmplitudeThreshold: Float = 0.01
+
+    /// Amplitude a silent source is lifted to on auto-recovery -- matches
+    /// `OscillatorNode.amplitude`'s own class default (see `getParam`
+    /// fallback in `SourceNodes.swift`), i.e. "as if never touched."
+    static let autoRestoreAmplitude: Float = 0.5
 
     // MARK: - Pulse Width (Square Oscillator PWM)
 
@@ -284,6 +399,15 @@ enum LRConstants {
     static let textureDefault: Float = 0.0
     static let chaosDefault: Float = 0.0
     static let warmthDefault: Float = 0.0
+
+    // MARK: - Control-Rate CV Routing (ControlGraphEvaluator)
+
+    /// Default scaling from normalized CV source (0…1) to parameter units when
+    /// an `AgitationNode` / `MetaParameterNode` output drives a `_cv` input.
+    static let controlCVDepth: Float = 1.0
+
+    /// Frequency CV depth in Hz (LFO → oscillator `freq_cv`).
+    static let controlFrequencyCVDepth: Float = 400.0
 
     // MARK: - Spectral Freeze
 
@@ -349,14 +473,12 @@ enum LRConstants {
     // MARK: - Design System (DS)
     //
     // Centralized design tokens for typography, color, spacing, and radii.
-    // Aesthetic: JP-future mecha module — brushed titanium, neon accents, flat panels.
     // All view files reference these instead of hardcoded values.
-    // Zero wiring change — purely visual consistency.
 
     enum DS {
 
         // -- Typography Scale (Fira Code) --
-        // 5 levels using Fira Code for legible mono. JP-future module style.
+        // 5 levels using Fira Code for legible mono.
         static let fontCaption2: CGFloat = 9    // metadata, status dots, tiny readouts
         static let fontCaption:  CGFloat = 10   // section headers, labels, bridge status
         static let fontBody:     CGFloat = 12   // primary text, lane names, buttons
@@ -380,7 +502,7 @@ enum LRConstants {
             return Font.custom(name, size: size)
         }
 
-        // -- Titanium Surface Palette (JP-future mecha) --
+        // -- Titanium Surface Palette --
         static let titanioTop    = Color(red: 0.17, green: 0.18, blue: 0.19)
         static let titanioBottom = Color(red: 0.10, green: 0.11, blue: 0.12)
         static let titanioBase   = Color(red: 0.12, green: 0.13, blue: 0.14)
@@ -438,6 +560,15 @@ enum LRConstants {
         static let paramDelay     = Color.blue
         static let paramCrush     = Color.purple
 
+        // Stage identity accents (Envion-style sparse hierarchy)
+        static let stageSeed      = neonAmbar
+        static let stageResonator = neonTurquesa
+        static let stageSpectra   = Color(red: 0.55, green: 0.72, blue: 0.68)
+        static let stageLadder    = Color(red: 0.85, green: 0.55, blue: 0.35)
+        static let stageEcho      = Color(red: 0.45, green: 0.62, blue: 0.78)
+        static let stageFlat      = textSecondary
+        static let stageNeural    = Color(red: 0.62, green: 0.68, blue: 0.72)
+
         // -- Divider (panel line)
         static let dividerColor = panelHollow
         static let dividerHeight: CGFloat = 1
@@ -473,7 +604,6 @@ enum LRConstants {
 
         // -- Accent Color Helper --
         // Single source of truth for lane accent color mapping.
-        // Replaces duplicated switch-on-name logic in LaneStripView and LatentResonatorView.
         static func accentColor(for colorName: String) -> Color {
             switch colorName {
             case "red":    return .red
@@ -528,9 +658,43 @@ enum LRConstants {
     // MARK: - ACE-Step Bridge Server
 
     enum ACEBridge {
-        /// When true, pass --device cpu to the bridge. Use when MPS crashes
-        /// (e.g. Metal validation in rsub). Set to false to try MPS for faster inference.
+        /// When true, pass --device cpu to any *freshly launched* bridge process.
+        /// Default is true -- CONFIRMED CRASH (2026-07-10): running with this
+        /// flipped false let the bridge resolve `Device: auto` -> `mps`, and a
+        /// STOP mid-infer landed on `at::native::rsub` -> MPS
+        /// `structured_sub_out_mps` -> `validateComputeFunctionArguments`
+        /// ("Read-only bytes ... bound ... with write access enabled") ->
+        /// Metal abort -> bridge process exit code 6 (SIGABRT). This is the
+        /// exact failure this flag was originally added to avoid.
+        ///
+        /// Nuance for whoever is tempted to flip this again: standalone e2e
+        /// runs of the ACE-Step pipeline OUTSIDE Xcode (plain `python
+        /// ace_bridge_server.py --device mps`) have loaded and inferred on MPS
+        /// without crashing. The abort above only reproduces under Xcode's
+        /// Debug + Metal API validation instrumentation attached to the child
+        /// process, and/or this exact PyTorch/ACE-Step build's `rsub` kernel.
+        /// Until someone confirms which of those it is (and fixes it, or ships
+        /// Release-config child process launches with Metal validation off),
+        /// CPU is the reliable default -- slower (45-95s/diffusion step) but
+        /// it does not abort the process out from under a live performance.
+        /// See `BridgeProcessManager.mpsCrashLatched` for the runtime backstop:
+        /// if a bridge ever does crash while on mps/auto, the NEXT launch is
+        /// forced to CPU regardless of this constant.
+        ///
+        /// NOTE: this only governs cold starts. An already-running, healthy bridge
+        /// (any device) is always reused rather than torn down -- see
+        /// BridgeProcessManager.performLaunch(). By the time a bridge answers
+        /// /health it has already survived model load and (if MPS) the risky
+        /// first-op window, so killing it to re-launch on CPU throws away a
+        /// proven-good session for no safety benefit.
         static let forceCPU: Bool = true
+
+        /// How long terminateServer() will wait for an in-flight /infer request
+        /// to finish before killing the bridge process anyway. Prevents bridge
+        /// restarts (profile switch, PERFORM mode entry, app quit) from cutting
+        /// off the one inference that was actually working. Kept short so app
+        /// quit / mode switches never hang indefinitely on a stuck request.
+        static let inFlightShutdownGrace: TimeInterval = 5.0
 
         /// Default base URL for the Python bridge server.
         static let baseURL: String = "http://127.0.0.1:8976"
@@ -549,18 +713,20 @@ enum LRConstants {
         static let statusEndpoint: String = "status"
         /// Default port.
         static let defaultPort: Int = 8976
-        /// Health polling interval in seconds.
-        /// 10s reduces CPU churn during inference-heavy workloads.
-        static let healthPollInterval: TimeInterval = 10.0
+        /// Health polling steady-state interval after the bridge has successfully booted.
+        static let healthPollSteadyInterval: TimeInterval = 30.0
+        /// Initial boot-backoff interval for health polling (8s, then 16s cap).
+        /// The Python server historically takes ~10-20s to load the model;
+        /// starting probes at 1s produced four noisy failed probes before the
+        /// first realistic chance of success. The 8s first probe keeps the
+        /// boot robust while cutting the failed-probe count to 0-1.
+        static let healthPollBootIntervalInitial: TimeInterval = 8.0
+        /// Maximum boot-backoff interval for health polling before capping.
+        static let healthPollBootIntervalCap: TimeInterval = 16.0
         /// Health check request timeout in seconds.
         /// When the bridge is busy with inference (40–70s per step), /health can be queued
         /// behind infer requests. 2s was too short and caused false "disconnected" status.
         static let healthTimeout: TimeInterval = 15.0
-        /// Delay before first health poll during bridge startup (seconds).
-        /// Model load takes ~4–7s; avoid hammering the port before the server can possibly respond.
-        static let bridgeStartupInitialDelay: TimeInterval = 3.0
-        /// Poll interval during bridge startup (seconds). 2s reduces "Connection refused" spam.
-        static let bridgeStartupPollInterval: TimeInterval = 2.0
         /// Inference timeout in seconds.
         /// CPU-only inference takes 45-95s per diffusion step; with multi-lane concurrent
         /// requests, total wait can exceed 120s even with threaded serving. 300s safety net.
@@ -690,36 +856,83 @@ enum LRConstants {
         "static":      [0.5, 0.5, 1.5, 1.5],   // high-heavy static
 
         // Analog character profiles (Phase 8: Analog Vocabulary)
-        "analog":      [1.6, 1.3, 0.9, 0.6],   // warm, heavy lows, rolled-off highs
-        "vintage":     [1.5, 1.2, 0.9, 0.5],   // similar to analog, slightly softer
-        "warm":        [1.4, 1.3, 1.0, 0.7],   // boosted lows and low-mids
-        "fat":         [1.8, 1.4, 0.8, 0.5],   // very heavy lows
-        "acid":        [0.8, 1.8, 1.5, 0.7],   // strong mid peak, scooped lows
-        "squelchy":    [0.7, 1.9, 1.6, 0.6],   // resonant mid emphasis
-        "buchla":      [0.9, 1.1, 1.5, 1.3],   // organic mid-high, soft lows
-        "west coast":  [0.8, 1.0, 1.4, 1.4],   // complex harmonic spectrum
-        "moog":        [1.8, 1.4, 0.8, 0.4],   // heavy lows, warm mids
-        "minimoog":    [1.9, 1.5, 0.7, 0.3],   // deepest low emphasis
-        "arp":         [0.7, 1.2, 1.5, 1.4],   // bright mids, present highs
-        "sequential":  [0.8, 1.1, 1.4, 1.3],   // balanced brightness
-        "roland":      [1.2, 1.2, 1.1, 0.9],   // balanced with warmth
-        "juno":        [1.3, 1.2, 1.1, 0.8],   // classic Juno warmth
-        "jupiter":     [1.4, 1.3, 1.0, 0.8],   // rich low-mids
-        "tb303":       [0.9, 1.7, 1.4, 0.6],   // mid-focused with resonant peak
-        "303":         [0.9, 1.7, 1.4, 0.6],   // alias
-        "tape":        [1.3, 1.1, 0.9, 0.5],   // rolled-off highs, low boost
-        "cassette":    [1.2, 1.0, 0.8, 0.4],   // duller tape character
-        "transistor":  [1.1, 1.4, 1.3, 0.8],   // mid saturation character
-        "tube":        [1.3, 1.3, 1.0, 0.6],   // warm, even harmonics
-        "valve":       [1.3, 1.3, 1.0, 0.6],   // alias for tube
+        "analog":      [1.6, 1.3, 0.9, 0.6],
+        "vintage":     [1.5, 1.2, 0.9, 0.5],
+        "warm":        [1.4, 1.3, 1.0, 0.7],
+        "fat":         [1.8, 1.4, 0.8, 0.5],
+        "acid":        [0.8, 1.8, 1.5, 0.7],
+        "squelchy":    [0.7, 1.9, 1.6, 0.6],
+        "buchla":      [0.9, 1.1, 1.5, 1.3],
+        "west coast":  [0.8, 1.0, 1.4, 1.4],
+        "moog":        [1.8, 1.4, 0.8, 0.4],
+        "minimoog":    [1.9, 1.5, 0.7, 0.3],
+        "arp":         [0.7, 1.2, 1.5, 1.4],
+        "sequential":  [0.8, 1.1, 1.4, 1.3],
+        "roland":      [1.2, 1.2, 1.1, 0.9],
+        "juno":        [1.3, 1.2, 1.1, 0.8],
+        "jupiter":     [1.4, 1.3, 1.0, 0.8],
+        "tb303":       [0.9, 1.7, 1.4, 0.6],
+        "303":         [0.9, 1.7, 1.4, 0.6],
+        "tape":        [1.3, 1.1, 0.9, 0.5],
+        "cassette":    [1.2, 1.0, 0.8, 0.4],
+        "transistor":  [1.1, 1.4, 1.3, 0.8],
+        "tube":        [1.3, 1.3, 1.0, 0.6],
+        "valve":       [1.3, 1.3, 1.0, 0.6],
+
+        // Timbral descriptors (expanded vocabulary)
+        "bass":        [1.9, 1.3, 0.6, 0.3],   // sub-heavy
+        "sub":         [2.0, 1.0, 0.4, 0.2],   // extreme low end
+        "fundamental": [1.8, 1.0, 0.5, 0.3],   // root-frequency focus
+        "sine":        [1.5, 0.8, 0.5, 0.3],   // pure tone emphasis
+        "low":         [1.7, 1.2, 0.7, 0.4],   // low-frequency tilt
+        "high":        [0.4, 0.6, 1.4, 1.8],   // high-frequency tilt
+        "bright":      [0.5, 0.8, 1.5, 1.8],   // presence + air
+        "dark":        [1.6, 1.2, 0.7, 0.4],   // muffled, rolled-off
+        "air":         [0.3, 0.5, 1.2, 2.0],   // extreme highs
+        "shimmer":     [0.4, 0.6, 1.5, 2.0],   // sparkling highs
+        "breath":      [0.5, 0.7, 1.3, 1.7],   // breathy presence
+        "hiss":        [0.3, 0.5, 1.5, 2.0],   // high-frequency noise
+        "rumble":      [2.0, 1.3, 0.5, 0.2],   // deep rumbling
+        "body":        [1.4, 1.5, 0.9, 0.5],   // mid-body warmth
+        "punch":       [1.4, 1.3, 1.2, 0.9],   // transient body + attack snap
+        "crack":       [0.6, 1.4, 1.8, 1.2],   // snappy transient
+        "pluck":       [0.7, 1.3, 1.6, 1.1],   // plucked string character
+        "pad":         [1.2, 1.3, 1.2, 0.9],   // even, full-spectrum sustain
+        "lush":        [1.3, 1.4, 1.1, 0.8],   // rich and full
+        "vocal":       [0.6, 1.6, 1.6, 0.7],   // formant-like mid peak
+        "cutting":     [0.5, 1.0, 1.8, 1.3],   // aggressive midrange
+        "lead":        [0.6, 1.3, 1.7, 1.2],   // lead synth presence
+        "drone":       [1.5, 1.4, 1.0, 0.6],   // sustained low-mid
+        "reverb":      [0.9, 1.1, 1.3, 1.3],   // diffused, even
+        "percuss":     [1.2, 1.5, 1.3, 0.8],   // mid-focused percussion
+        "percussion":  [1.2, 1.1, 1.4, 1.5],   // percussion: body + transient highs
+        "transient":   [0.8, 1.3, 1.5, 1.2],   // attack-heavy
+        "kick":        [2.0, 1.2, 0.5, 0.2],   // kick drum: all lows
+        "snare":       [0.8, 1.5, 1.5, 0.9],   // snare: mids + crack
+        "hat":         [0.3, 0.5, 1.5, 2.0],   // hi-hat: all highs
+        "cymbal":      [0.3, 0.6, 1.6, 1.8],   // cymbal: high shimmer
+        "808":         [1.6, 1.3, 1.0, 0.7],   // 808: bass body + presence
+        "industrial":  [1.0, 1.5, 1.5, 1.0],   // harsh mid presence
+        "mechanical":  [0.8, 1.4, 1.6, 0.9],   // machine-like
+        "glass":       [0.4, 0.7, 1.5, 1.8],   // crystalline highs
+        "dust":        [0.9, 1.0, 1.3, 1.4],   // fine-grain noise character
+        "erosion":     [1.2, 0.9, 1.1, 1.3],   // spectral erosion
+        "dissolution": [1.1, 0.8, 0.9, 1.4],   // dissolving tonality
+        "blur":        [1.2, 1.2, 1.0, 0.8],   // softened spectrum
+        "infrasonic":  [2.0, 0.8, 0.3, 0.1],   // below hearing threshold emphasis
+        "formless":    [1.0, 1.0, 1.0, 1.0],   // flat / no character
+        "filter":      [0.6, 1.8, 1.5, 0.6],   // resonant filter character
+        "sweep":       [0.7, 1.5, 1.5, 0.8],   // filter sweep midrange
+        "pwm":         [0.8, 1.3, 1.5, 1.0],   // pulse width modulation
     ]
+
 }
 
 // MARK: - Drum Voice (Drum Lane P-Lock)
 //
 // Per-step prompt override for percussion-oriented lanes. Each case maps to a
 // semantic prompt that steers ACE-Step toward a distinct drum character.
-// References: Plan "Drum Lane" §0.2; Elektron sound-lock paradigm (prompt = sample).
+// References: Plan "Drum Lane" §0.2; fixed-layout sound-lock paradigm (prompt = sample).
 //
 // When locked on a step, the lane uses this prompt for the next inference cycle
 // instead of the preset's prompt phase chain. Enables one mono lane to produce
@@ -763,12 +976,19 @@ enum DrumVoice: String, CaseIterable, Codable, Identifiable {
 
 // MARK: - Lane Preset
 //
-// Encapsulates a complete parameter snapshot for one ResonatorLane.
-// Four factory presets ship with the app (DRUMS, BASS, SYNTH, NOISE),
+// Encapsulates a complete parameter snapshot for one MacroNode.
+// Seven factory presets ship with the app (FERROFLUID DRONE, ARP LEAD, etc.),
 // each tuned to elicit a distinct sonic character from the ACE-Step
 // base model. All presets use task="cover", thinking=false (§6.1
 // circumventing the LM for deterministic control), and model=Base
 // for full CFG support (white paper §4.2.1).
+//
+// Naming (2026-07-21, perimeter honesty pass): two presets were renamed
+// from analog-gear references to names that honor the slow-feedback-
+// resonator identity instead of implying a subtractive-synth lineage.
+// Only `name` (the performer-facing label)
+// changed — `id`, `prompt`, and every DSP/ACE parameter are untouched, so
+// the sonic recipe each preset produces is identical to before the rename.
 
 struct LanePreset: Identifiable {
     let id: String
@@ -816,6 +1036,10 @@ struct LanePreset: Identifiable {
     // FFT size (preset-level spectral resolution configuration)
     let fftSize: Int
 
+    // Comb filter base delay (samples). Per-preset for distinct metallic character.
+    // Lower = brighter ring (leads, percussion), higher = darker resonance (bass, pads).
+    let combBaseDelay: Int
+
     // Auto-decay trajectory (White Paper §4.2.2 -- Recursive Drift)
     //
     // Preset-level configuration for the automatic inputStrength decay.
@@ -847,10 +1071,16 @@ struct LanePreset: Identifiable {
 
 extension LanePreset {
 
-    /// MOOG BASS — Slot: sub 20–120Hz. Polarized: sub only, NO highs.
+    /// FERROFLUID DRONE — Slot: sub 20–120Hz.
+    /// Polarized: sub only, NO highs. Identity-aligned rename 2026-07-21 — "ferrofluid" is
+    /// already this project's own vocabulary (`LRConstants.defaultPrompt`,
+    /// `PromptEngineNode.phase1Prompt`) for warm, viscous, sub-heavy
+    /// resonance, and fits its phase-3 evolution toward "infrasonic
+    /// dissolution, sub rumble" better than a Moog reference. `id` and every
+    /// sonic parameter below are unchanged.
     static let moogBass = LanePreset(
         id: "moog_bass",
-        name: "MOOG BASS",
+        name: "FERROFLUID DRONE",
         prompt: "sub bass only, fundamental, sine-like, fat low end, NO high frequencies, NO shimmer",
         accentColor: "blue",
         guidanceScale: 10.0,
@@ -879,6 +1109,7 @@ extension LanePreset {
         chaos: 0.15,
         warmth: 0.75,
         fftSize: 1024,
+        combBaseDelay: 271,
         autoDecayTarget: 0.50,
         autoDecayIterations: 18.0,
         promptPhase1: "sub bass only, fundamental, sine-like, fat low end, NO highs",
@@ -918,6 +1149,7 @@ extension LanePreset {
         chaos: 0.28,
         warmth: 0.4,
         fftSize: 1024,
+        combBaseDelay: 89,
         autoDecayTarget: 0.38,
         autoDecayIterations: 12.0,
         promptPhase1: "midrange lead, cutting, vocal, PWM, NO sub NO air",
@@ -957,6 +1189,7 @@ extension LanePreset {
         chaos: 0.38,
         warmth: 0.32,
         fftSize: 512,
+        combBaseDelay: 61,
         autoDecayTarget: 0.38,
         autoDecayIterations: 10.0,
         promptPhase1: "mid pluck, metallic, buchla, NO sub",
@@ -996,6 +1229,7 @@ extension LanePreset {
         chaos: 0.18,
         warmth: 0.55,
         fftSize: 2048,
+        combBaseDelay: 199,
         autoDecayTarget: 0.48,
         autoDecayIterations: 22.0,
         promptPhase1: "high shimmer, air, lush pad, NO bass",
@@ -1003,10 +1237,16 @@ extension LanePreset {
         promptPhase3: "dissolved pad mass, spectral blur, infinite sustain"
     )
 
-    /// TB-303 ACID — Slot: low-mid 120–350Hz. Polarized: squelch, NO air.
+    /// SPECTRAL TIDE — Slot: low-mid 120–350Hz.
+    /// Polarized: squelch, NO air. Identity-aligned rename 2026-07-21 — the self-oscillating
+    /// resonant filter rises and falls like a tide across its 3-phase
+    /// evolution ("squelchy resonance" -> "filter squelch, resonant peak" ->
+    /// "dissolved acid mass, low-mid entropy"); "tide" names that motion
+    /// without the 303 gear reference. `id` and every sonic parameter below
+    /// are unchanged.
     static let tb303Acid = LanePreset(
         id: "tb303_acid",
-        name: "TB-303 ACID",
+        name: "SPECTRAL TIDE",
         prompt: "acid bass, squelchy resonance, 303, low-mid, NO high shimmer NO air",
         accentColor: "green",
         guidanceScale: 14.0,
@@ -1035,6 +1275,7 @@ extension LanePreset {
         chaos: 0.28,
         warmth: 0.48,
         fftSize: 1024,
+        combBaseDelay: 109,
         autoDecayTarget: 0.35,
         autoDecayIterations: 10.0,
         promptPhase1: "acid bass, squelchy 303, low-mid resonance, NO air",
@@ -1074,6 +1315,7 @@ extension LanePreset {
         chaos: 0.88,
         warmth: 0.18,
         fftSize: 2048,
+        combBaseDelay: 43,
         autoDecayTarget: 0.15,
         autoDecayIterations: 14.0,
         promptPhase1: "high frequency hiss, air, breath, NO body",
@@ -1081,7 +1323,10 @@ extension LanePreset {
         promptPhase3: "white noise saturation, total spectral mass, heat death"
     )
 
-    /// DRUM LANE — Slot: perc body 280Hz. Human-centric, 808-aligned: punch, short decay (§0).
+    /// DRUM LANE — Perc-tuned: open filter for transient attack, short decay, 808-aligned (§0).
+    /// filterCutoff at 4500 Hz preserves kick click (2-5 kHz) and snare snap (2-8 kHz).
+    /// Low resonance avoids ringing. Short resonator decay prevents tonal droning.
+    /// combBaseDelay 31 = tight metallic snap (1423 Hz fundamental).
     static let drumLane = LanePreset(
         id: "drum_lane",
         name: "DRUM LANE",
@@ -1099,20 +1344,21 @@ extension LanePreset {
         euclideanPulses: 4,
         euclideanSteps: 8,
         delayTime: 0.08,
-        delayFeedback: 0.38,
+        delayFeedback: 0.28,
         delayMix: 0.10,
         bitCrushDepth: 12.0,
         resonatorNote: 36.0,
-        resonatorDecay: 0.48,
-        filterCutoff: 280.0,
-        filterResonance: 0.38,
+        resonatorDecay: 0.25,
+        filterCutoff: 4500.0,
+        filterResonance: 0.18,
         filterMode: .lowpass,
         saturationMode: .transistor,
         pulseWidth: 0.5,
-        texture: 0.38,
+        texture: 0.25,
         chaos: 0.32,
         warmth: 0.42,
         fftSize: 512,
+        combBaseDelay: 31,
         autoDecayTarget: 0.38,
         autoDecayIterations: 11.0,
         promptPhase1: "808 kick, punch, short decay, NO reverb tail, NO pad",

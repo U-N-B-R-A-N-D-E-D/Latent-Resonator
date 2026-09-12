@@ -45,16 +45,87 @@ struct LaneSnapshot: Codable, Equatable {
     var saturationMorph: Float?
 }
 
+// MARK: - Graph Snapshot (v2.0 Node-Graph Scene Persistence)
+
+/// Snapshot of a node's parameters at a point in time.
+/// Used by PerformanceScene for recall and crossfading via NodeGraph.
+struct GraphSnapshot: Codable, Equatable {
+    let nodeId: UUID
+    var parameters: [String: Float]
+    
+    init(nodeId: UUID, parameters: [String: Float]) {
+        self.nodeId = nodeId
+        self.parameters = parameters
+    }
+    
+    /// Create from any GraphNode by extracting Float parameters.
+    init(from node: any GraphNode) {
+        self.nodeId = node.id
+        self.parameters = node.parameters.compactMapValues { $0 as? Float }
+    }
+}
+
 // MARK: - Performance Scene (snapshot; name avoids shadowing SwiftUI.Scene)
 
 /// Full snapshot of all lanes' performable parameters. One scene = one recallable state.
+///
+/// v2.0: Uses graphSnapshots (node parameters from NodeGraph) as primary persistence.
+/// v1.x: Used laneSnapshots (direct lane properties).
+/// Migration: Decoding tries graphSnapshots first, falls back to laneSnapshots.
 struct PerformanceScene: Codable, Equatable {
+    let id: UUID
     var name: String
+    
+    /// v2.0: NodeGraph parameter snapshots. Primary persistence format.
+    /// Each entry maps a node ID (typically a lane's MacroNode) to its parameters.
+    var graphSnapshots: [UUID: GraphSnapshot]
+    
+    /// DEPRECATED: v1.x backward compatibility. Maintained for migration only.
+    /// Use graphSnapshots for new code.
     var laneSnapshots: [LaneSnapshot]
-
-    init(name: String = "Scene", laneSnapshots: [LaneSnapshot] = []) {
+    
+    init(id: UUID = UUID(), name: String = "Scene", graphSnapshots: [UUID: GraphSnapshot] = [:]) {
+        self.id = id
         self.name = name
+        self.graphSnapshots = graphSnapshots
+        self.laneSnapshots = []
+    }
+    
+    /// v1.x compatibility init (deprecated, for migration use only).
+    init(name: String = "Scene", laneSnapshots: [LaneSnapshot] = []) {
+        self.id = UUID()
+        self.name = name
+        self.graphSnapshots = [:]
         self.laneSnapshots = laneSnapshots
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case id, name, graphSnapshots, laneSnapshots
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.name = try container.decode(String.self, forKey: .name)
+        
+        // v2.0: Try graphSnapshots first (new format)
+        if let gs = try? container.decode([UUID: GraphSnapshot].self, forKey: .graphSnapshots) {
+            self.graphSnapshots = gs
+            self.laneSnapshots = []
+        } else {
+            // v1.x fallback: legacy laneSnapshots
+            self.laneSnapshots = try container.decode([LaneSnapshot].self, forKey: .laneSnapshots)
+            self.graphSnapshots = [:]
+        }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(graphSnapshots, forKey: .graphSnapshots)
+        // laneSnapshots not encoded -- migration to graphSnapshots is complete
     }
 }
 
@@ -76,7 +147,7 @@ struct SceneBank: Codable {
 
     mutating func ensureCapacity() {
         while scenes.count < Self.maxScenes {
-            scenes.append(PerformanceScene(name: "Scene \(scenes.count + 1)", laneSnapshots: []))
+            scenes.append(PerformanceScene(name: "Scene \(scenes.count + 1)"))
         }
     }
 }
@@ -98,7 +169,8 @@ enum TrigType: String, Codable, CaseIterable {
 // MARK: - Performance Step (Parameter Lock)
 
 /// One step in the grid. Holds a trig type, optional probability gate,
-/// and up to 13 lockable parameters applied when the step is active.
+/// legacy lockable parameters, and a generic lock table keyed by
+/// ExposedControl.id so any manually-exposed parameter can be p-locked.
 ///
 /// Backward compatibility: decodes the legacy `dspOnly: Bool` field
 /// (mapping `true` -> `.lock`) so old `performance_state.json` files
@@ -109,7 +181,7 @@ struct PerformanceStep: Equatable {
     var trigType: TrigType
     var probability: Float?       // 0..1; nil = always fire (100%)
 
-    // -- Inference locks --
+    // -- Legacy locks (kept for compatibility) --
     var cfg: Float?               // locked guidance scale (γ)
     var feedback: Float?          // locked feedback amount
     var promptPhase: Int?         // 1, 2, or 3
@@ -133,6 +205,9 @@ struct PerformanceStep: Equatable {
     /// Negative = early (push), positive = late (drag).
     var microtiming: Double = 0.0
 
+    /// Generic per-control locks keyed by ExposedControl.id (Wave C C2).
+    var genericLocks: [UUID: Float]
+
     init(
         trigType: TrigType = .note,
         probability: Float? = nil,
@@ -149,7 +224,8 @@ struct PerformanceStep: Equatable {
         delayMix: Float? = nil,
         bitCrushDepth: Float? = nil,
         drumVoice: DrumVoice? = nil,
-        microtiming: Double = 0.0
+        microtiming: Double = 0.0,
+        genericLocks: [UUID: Float] = [:]
     ) {
         self.trigType = trigType
         self.probability = probability
@@ -167,6 +243,7 @@ struct PerformanceStep: Equatable {
         self.bitCrushDepth = bitCrushDepth
         self.drumVoice = drumVoice
         self.microtiming = microtiming
+        self.genericLocks = genericLocks
     }
 
     /// Backward-compat computed getter (used by engine for .lock trig behavior).
@@ -178,6 +255,7 @@ struct PerformanceStep: Equatable {
         || warmth != nil || filterCutoff != nil || filterResonance != nil
         || excitationMode != nil || delayMix != nil || bitCrushDepth != nil
         || drumVoice != nil || trigType == .lock
+        || !genericLocks.isEmpty
     }
 
     /// Number of non-nil parameter locks (for compact UI display).
@@ -187,7 +265,7 @@ struct PerformanceStep: Equatable {
             texture, chaos, warmth, filterCutoff, filterResonance,
             excitationMode, delayMix, bitCrushDepth, drumVoice
         ]
-        return optionals.compactMap({ $0 }).count
+        return optionals.compactMap({ $0 }).count + genericLocks.count
     }
 }
 
@@ -202,6 +280,7 @@ extension PerformanceStep: Codable {
         case excitationMode, delayMix, bitCrushDepth
         case drumVoice
         case microtiming
+        case genericLocks
         // Legacy key read during decode only
         case dspOnly
     }
@@ -233,6 +312,7 @@ extension PerformanceStep: Codable {
         bitCrushDepth    = try c.decodeIfPresent(Float.self,  forKey: .bitCrushDepth)
         drumVoice        = try c.decodeIfPresent(DrumVoice.self, forKey: .drumVoice)
         microtiming      = try c.decodeIfPresent(Double.self, forKey: .microtiming) ?? 0.0
+        genericLocks     = try c.decodeIfPresent([UUID: Float].self, forKey: .genericLocks) ?? [:]
     }
 
     func encode(to encoder: Encoder) throws {
@@ -255,6 +335,9 @@ extension PerformanceStep: Codable {
         try c.encodeIfPresent(drumVoice,      forKey: .drumVoice)
         if microtiming != 0.0 {
             try c.encode(microtiming, forKey: .microtiming)
+        }
+        if !genericLocks.isEmpty {
+            try c.encode(genericLocks, forKey: .genericLocks)
         }
         // NOTE: dspOnly is NOT encoded -- trigType replaces it
     }

@@ -5,7 +5,7 @@ import AVFoundation
 //
 // Writes AVAudioPCMBuffer data to a WAV file on disk.
 // Used at two levels:
-//   1. Per-lane: captures the isolated output of a single ResonatorLane
+//   1. Per-macro: captures the isolated output of a single MacroNode
 //      (for studying one latent trajectory in isolation -- §5.1-5.4).
 //   2. Master bus: captures the mixed output (final performance artifact).
 //
@@ -36,7 +36,7 @@ final class AudioRecorder: @unchecked Sendable {
     /// Start recording to a WAV file.
     ///
     /// - Parameters:
-    ///   - name: Identifier for the recording (e.g. lane name or "MASTER")
+    ///   - name: Identifier for the recording (e.g. macro name or "MASTER")
     ///   - format: Audio format matching the tap output
     /// - Returns: File URL of the new recording
     func startRecording(name: String, format: AVAudioFormat) throws -> URL {
@@ -108,12 +108,12 @@ final class AudioRecorder: @unchecked Sendable {
     static func exportMetadata(
         recordingURL: URL,
         iterationCount: Int,
-        laneName: String,
+        macroName: String,
         parameters: [String: Any],
         featureLog: [SpectralFeatureSnapshot] = []
     ) {
         let meta: [String: Any] = [
-            "lane": laneName,
+            "macro": macroName,
             "iterationCount": iterationCount,
             "timestamp": ISO8601DateFormatter().string(from: Date()),
             "sampleRate": LRConstants.sampleRate,

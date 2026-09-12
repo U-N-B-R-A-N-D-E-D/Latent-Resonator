@@ -46,6 +46,13 @@ struct LatentResonatorApp: App {
 
     @StateObject private var engine = NeuralEngine()
 
+    init() {
+        // Create log file at startup
+        let logPath = ("~/Library/Application Support/LatentResonator/app.log" as NSString).expandingTildeInPath
+        let msg = "[LatentResonatorApp] App initializing at \(Date())\n"
+        try? msg.write(toFile: logPath, atomically: true, encoding: .utf8)
+    }
+
     var body: some Scene {
         WindowGroup {
             MainWindowContent(engine: engine)

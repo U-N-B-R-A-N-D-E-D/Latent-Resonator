@@ -1,0 +1,157 @@
+{
+  "version": "2.0.0",
+  "metadata": {
+    "name": "Minimal Drone",
+    "description": "Pure generative degradation. Two oscillators beating against each other through a ladder filter into the void.",
+    "author": "Latent Resonator Factory",
+    "stageTopology": ["seed", "seed", "ladder", "flat"]
+  },
+  "nodes": [
+    {
+      "id": "OSC1-DDDD-DDDD-DDDD-DDDDDDDDDDDD",
+      "nodeType": "oscillator",
+      "displayName": "Drone A",
+      "parameters": {
+        "frequency": {"float": 55.0},
+        "amplitude": {"float": 0.5},
+        "waveform": {"string": "sine"},
+        "pitchDrift": {"float": 0.1},
+        "driftRate": {"float": 0.05}
+      },
+      "position": { "x": 100.0, "y": 150.0 },
+      "stageKind": "seed"
+    },
+    {
+      "id": "OSC2-EEEE-EEEE-EEEE-EEEEEEEEEEEE",
+      "nodeType": "oscillator",
+      "displayName": "Drone B",
+      "parameters": {
+        "frequency": {"float": 55.5},
+        "amplitude": {"float": 0.5},
+        "waveform": {"string": "sine"},
+        "pitchDrift": {"float": 0.08},
+        "driftRate": {"float": 0.07}
+      },
+      "position": { "x": 100.0, "y": 350.0 },
+      "stageKind": "seed"
+    },
+    {
+      "id": "MIX2-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+      "nodeType": "mixer",
+      "displayName": "Blend",
+      "parameters": {
+        "gain1": {"float": 0.5},
+        "gain2": {"float": 0.5},
+        "gain3": {"float": 0.0},
+        "gain4": {"float": 0.0},
+        "masterGain": {"float": 1.0}
+      },
+      "position": { "x": 350.0, "y": 250.0 }
+    },
+    {
+      "id": "LADR-7777-7777-7777-777777777777",
+      "nodeType": "ladder_filter",
+      "displayName": "Warm Ladder",
+      "parameters": {
+        "cutoff": {"float": 400.0},
+        "resonance": {"float": 0.6},
+        "drive": {"float": 0.15}
+      },
+      "position": { "x": 600.0, "y": 250.0 },
+      "stageKind": "ladder"
+    },
+    {
+      "id": "MSTR-8888-8888-8888-888888888888",
+      "nodeType": "master_output",
+      "displayName": "Out",
+      "parameters": {
+        "volume": {"float": 0.85},
+        "limiterThreshold": {"float": -0.2}
+      },
+      "position": { "x": 850.0, "y": 250.0 },
+      "stageKind": "flat"
+    }
+  ],
+  "edges": [
+    {
+      "id": "EDG1-DDDD-DDDD-DDDD-DDDDDDDDDDDD",
+      "sourceNodeId": "OSC1-DDDD-DDDD-DDDD-DDDDDDDDDDDD",
+      "sourcePortId": "out",
+      "targetNodeId": "MIX2-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+      "targetPortId": "in1",
+      "signalType": "audio"
+    },
+    {
+      "id": "EDG2-EEEE-EEEE-EEEE-EEEEEEEEEEEE",
+      "sourceNodeId": "OSC2-EEEE-EEEE-EEEE-EEEEEEEEEEEE",
+      "sourcePortId": "out",
+      "targetNodeId": "MIX2-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+      "targetPortId": "in2",
+      "signalType": "audio"
+    },
+    {
+      "id": "EDG3-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+      "sourceNodeId": "MIX2-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+      "sourcePortId": "out",
+      "targetNodeId": "LADR-7777-7777-7777-777777777777",
+      "targetPortId": "in",
+      "signalType": "audio"
+    },
+    {
+      "id": "EDG4-7777-7777-7777-777777777777",
+      "sourceNodeId": "LADR-7777-7777-7777-777777777777",
+      "sourcePortId": "out",
+      "targetNodeId": "MSTR-8888-8888-8888-888888888888",
+      "targetPortId": "in",
+      "signalType": "audio"
+    }
+  ],
+  "exposedControls": [
+    {
+      "id": "CTL1-DDDD-DDDD-DDDD-DDDDDDDDDDDD",
+      "nodeId": "OSC1-DDDD-DDDD-DDDD-DDDDDDDDDDDD",
+      "paramId": "frequency",
+      "label": "Drone A Freq",
+      "controlType": "knob",
+      "range": [27.5, 110],
+      "defaultValue": 55,
+      "position": 0
+    },
+    {
+      "id": "CTL2-EEEE-EEEE-EEEE-EEEEEEEEEEEE",
+      "nodeId": "OSC2-EEEE-EEEE-EEEE-EEEEEEEEEEEE",
+      "paramId": "frequency",
+      "label": "Drone B Freq",
+      "controlType": "knob",
+      "range": [27.5, 110],
+      "defaultValue": 55.5,
+      "position": 1
+    },
+    {
+      "id": "CTL3-7777-7777-7777-777777777777",
+      "nodeId": "LADR-7777-7777-7777-777777777777",
+      "paramId": "cutoff",
+      "label": "Filter Cutoff",
+      "controlType": "knob",
+      "range": [40, 2000],
+      "defaultValue": 400,
+      "position": 2
+    },
+    {
+      "id": "CTL4-8888-8888-8888-888888888888",
+      "nodeId": "MSTR-8888-8888-8888-888888888888",
+      "paramId": "volume",
+      "label": "Output Level",
+      "controlType": "knob",
+      "range": [0, 1],
+      "defaultValue": 0.85,
+      "position": 3
+    }
+  ],
+  "macroBindings": [],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  }
+}
