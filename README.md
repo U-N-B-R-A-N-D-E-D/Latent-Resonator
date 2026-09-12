@@ -18,26 +18,28 @@ Grounded in the avant-garde traditions of Musique Concrète (Schaeffer), Stochas
 ## Project Status
 
 This repository is mid-migration away from the custom native SwiftUI canvas
-(the `LatentResonator.app` documented below) toward **[Bespoke Synth](https://www.bespokesynth.com/)**,
+(the `LatentResonator.app` documented below) toward a **fork of [Bespoke Synth](https://www.bespokesynth.com/)**,
 an actively maintained, open-source (GPL-3.0) modular synthesizer with a
-proven node-based UI. The custom canvas was the source of most UX friction
-(rendering lag, no smooth cable/node interaction); the neural feedback loop
-itself -- the actual research contribution -- is being carried over, not
-rebuilt. See [`docs/MIGRATION_BESPOKE_SYNTH_2026-09-11.md`](docs/MIGRATION_BESPOKE_SYNTH_2026-09-11.md)
+proven node-based UI, used here as our own foundation -- this is not a
+contribution back to the upstream project. The custom canvas was the source
+of most UX friction (rendering lag, no smooth cable/node interaction); the
+neural feedback loop itself -- the actual research contribution -- is being
+carried over, not rebuilt. See [`docs/MIGRATION_BESPOKE_SYNTH_2026-09-11.md`](docs/MIGRATION_BESPOKE_SYNTH_2026-09-11.md)
 for the full plan.
 
 **Done and verified:**
 - [`bespoke-migration/ace-bridge/`](bespoke-migration/ace-bridge/) -- the ACE-Step Python bridge, extracted into a standalone, host-agnostic package (9/9 tests passing).
 - [`bespoke-migration/module/`](bespoke-migration/module/) -- `ModuleACEResonator`, a real Bespoke Synth module implementing the `S(i+1) = ACE(S(i) + N(mu,sigma), P, gamma)` recursion, written and verified against an actual local build of Bespoke Synth (see [`BUILD_VERIFICATION.md`](bespoke-migration/module/BUILD_VERIFICATION.md)).
 
-**Pending** (human/community steps, not automatable): aligning with the
-Bespoke Synth community on Discord before proposing the module upstream, and
-opening the pull request itself.
+**Pending:** folding `ModuleACEResonator` permanently into our maintained
+fork's build and cutting our own release from it. Bespoke Synth's code is
+GPL-3.0 -- any binary we distribute from this fork must make that fork's
+full source available, which it already is (this repository is public).
 
 The Swift app below (v1.0.3) remains downloadable and functional, but is now
 **legacy** -- it is not receiving further UI work. Its screenshots have been
 removed from this README since they depict the canvas being phased out; new
-screenshots will follow once the Bespoke Synth module lands.
+screenshots will follow once our Bespoke Synth fork lands.
 
 ---
 
