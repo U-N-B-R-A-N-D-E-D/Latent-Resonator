@@ -38,15 +38,18 @@ for the full plan.
 
 **Done and verified, against this v2.0.0 code specifically:**
 - [`bespoke-migration/ace-bridge/`](bespoke-migration/ace-bridge/) -- the ACE-Step Python bridge, extracted into a standalone, host-agnostic package (15 passed, 1 correctly skipped without a live GPU checkpoint).
-- [`bespoke-migration/module/`](bespoke-migration/module/) -- `ModuleACEResonator`, a Bespoke Synth module implementing the `S(i+1) = ACE(S(i) + N(mu,sigma), P, gamma)` recursion, compiled clean against a real local build of Bespoke Synth (see [`BUILD_VERIFICATION.md`](bespoke-migration/module/BUILD_VERIFICATION.md)). Known gap: it ports the core subprocess/health-check/shutdown lifecycle from `BridgeProcessManager.swift`, but not that file's more elaborate auto-install/dependency-repair retry logic -- flagged there as follow-up work, not silently dropped.
+- [`bespoke-migration/module/`](bespoke-migration/module/) -- `ModuleACEResonator`, a Bespoke Synth module implementing the `S(i+1) = ACE(S(i) + N(mu,sigma), P, gamma)` recursion. Compiled clean and folded into a real local Bespoke Synth fork build (not just a scratch test), launched, and confirmed running stable with a real audio session initialized, no crash, clean shutdown with no orphaned processes (see [`BUILD_VERIFICATION.md`](bespoke-migration/module/BUILD_VERIFICATION.md)). Known gap: it ports the core subprocess/health-check/shutdown lifecycle from `BridgeProcessManager.swift`, but not that file's more elaborate auto-install/dependency-repair retry logic -- flagged there as follow-up work, not silently dropped.
 - The legacy app itself: Debug build succeeds clean, the full private test suite passes 122/122, and a `2.0.0` release zip builds correctly (ad-hoc signed, matching CI's own packaging steps).
+- SIGTERM/SIGINT now properly terminate the Python bridge subprocess (see the "Fixed" note in [`CHANGELOG.md`](CHANGELOG.md)) -- a bug found and closed during this verification pass, not left open.
 
-**Known issue found during this verification, not yet fixed:** sending the app a plain SIGTERM (a `kill`, a crash, or any external supervisor stopping it -- not just Quit from the menu) leaves the Python bridge subprocess running as an orphan. Root cause: `LatentResonatorApp.swift` only wires bridge cleanup to `NSApplication.willTerminateNotification`, which AppKit posts solely on its own graceful-quit path; there is no `SIGTERM` handler anywhere in the codebase. Worth fixing before cutting any new release of the legacy app.
-
-**Pending:** folding `ModuleACEResonator` permanently into our maintained
-fork's build and cutting our own release from it. Bespoke Synth's code is
-GPL-3.0 -- any binary we distribute from this fork must make that fork's
-full source available, which it already is (this repository is public).
+**Pending:** actually clicking through and exercising `ModuleACEResonator`'s
+UI interactively (prompt entry, trigger, live inference) -- everything
+verified so far is process-level (compiles, launches, stays alive, shuts
+down clean), not a hands-on functional test of the module itself. No
+packaged release exists yet, on purpose -- the fork stays a local build
+until that interactive pass happens. Bespoke Synth's code is GPL-3.0 -- any
+binary eventually distributed from this fork must make that fork's full
+source available.
 
 Screenshots have been removed from this README: the existing image files
 predate this v2.0.0 rewrite and don't actually depict the current
@@ -96,6 +99,44 @@ graph TD
 ```
 
 Source: [`bespoke-migration/module/ModuleACEResonator.h`](bespoke-migration/module/ModuleACEResonator.h) / [`.cpp`](bespoke-migration/module/ModuleACEResonator.cpp). Build verification, including the exact registration diffs against a real Bespoke Synth checkout: [`BUILD_VERIFICATION.md`](bespoke-migration/module/BUILD_VERIFICATION.md).
+
+### Not a plugin -- this is a whole-app fork
+
+Bespoke Synth has no plugin/dynamic-module system: every module, including
+this one, is compiled directly into the single Bespoke Synth binary. There
+is no "install Bespoke, then add Latent Resonator" step -- running
+`ModuleACEResonator` means running *our specific build* of the entire
+Bespoke Synth app (JUCE audio engine, every stock module, plus this one),
+not vanilla Bespoke Synth from bespokesynth.com.
+
+**No packaged download exists yet, deliberately** -- the fork currently
+lives only as a local build on one machine, not published anywhere. This
+repository does not, and should not, vendor Bespoke Synth's full source
+tree (JUCE + submodules, several GB) into its own git history -- that's an
+external GPL-3.0 project, not our code. What this repository *does* own is
+`bespoke-migration/` (the module source and the extracted bridge), which is
+everything needed to reproduce the fork:
+
+```bash
+git clone https://github.com/BespokeSynth/BespokeSynth
+cd BespokeSynth
+git submodule update --init --recursive
+cmake -Bignore/build -DCMAKE_BUILD_TYPE=Release
+
+# Copy this repo's module in, then wire it up exactly as documented in
+# bespoke-migration/module/BUILD_VERIFICATION.md:
+#   - copy ModuleACEResonator.h / .cpp into Source/
+#   - add the #include + REGISTER(...) line to Source/ModuleFactory.cpp
+#   - add the two filenames to Source/CMakeLists.txt's target_sources()
+
+cmake --build ignore/build --parallel 4 --config Release
+cp -R ../latent-resonator/bespoke-migration/ace-bridge ./ace-bridge  # sits next to the built .app
+```
+
+The resulting `BespokeSynth.app` is the whole distributable -- when a
+packaged `.zip` release does get published, it will be this same app plus
+its `ace-bridge/` folder, the same shape as the legacy Swift app's own
+releases (app + bridge script, model weights always separate).
 
 ---
 
