@@ -4,8 +4,9 @@ ACE-Step Bridge Server
 =======================
 
 A standalone HTTP bridge around ACE-Step 1.5 inference. Any client that
-speaks its JSON/HTTP API can send audio + parameters and receive processed
-audio back — the server has no dependency on a particular host application.
+speaks its JSON/HTTP API can send audio plus generation parameters and get
+processed audio back — the server has no dependency on any particular
+host application.
 
 Receives an audio chunk plus generation parameters as a JSON request with a
 base64-encoded WAV payload, runs inference, and returns the processed audio
@@ -19,17 +20,11 @@ Endpoints:
 
 The server degrades gracefully:
   - If an ACE-Step model is loaded → full neural inference
-  - If no model is loaded          → passthrough (echoes audio back unchanged),
-    so a host can still apply its own processing chain as a fallback.
+  - If no model is loaded          → passthrough (echoes audio back
+    unchanged), so a caller can still fall back to its own processing.
 
 Usage:
   python ace_bridge_server.py [--port 8976] [--model-path PATH]
-
-Parameter mapping reference:
-  Originally derived from the Latent Resonator project's design notes
-  (recursive formula S_{i+1} = ACE(S_i + N(mu, sigma), P, gamma); the model
-  treated as a "black box resonator"). See the /infer docstring below for
-  how each request parameter maps onto the underlying ACE-Step arguments.
 """
 
 import argparse
@@ -60,9 +55,9 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 # Force CPU when LATENT_RESONATOR_FORCE_CPU=1
 # ---------------------------------------------------------------------------
 # Some PyTorch/MPS combinations crash with SIGABRT on certain tensor ops
-# (e.g. rsub) via a Metal validation abort. This env var lets a host disable
-# MPS entirely as a hard safety valve; it must run before torch is imported
-# anywhere else in the process.
+# (e.g. rsub) via a Metal validation abort. This env var lets a caller
+# disable MPS entirely as a hard safety valve; it must run before torch is
+# imported anywhere else in the process.
 if os.environ.get("LATENT_RESONATOR_FORCE_CPU") == "1":
     import torch
 
@@ -84,6 +79,17 @@ except ImportError:
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+__all__ = [
+    "ACEStepWrapper",
+    "encode_wav_bytes",
+    "decode_wav_bytes",
+    "main",
+]
+
+# ---------------------------------------------------------------------------
 # ACE-Step Model Wrapper
 # ---------------------------------------------------------------------------
 
@@ -95,7 +101,7 @@ class ACEStepWrapper:
     When a model is loaded, audio is processed through the full ACE-Step
     pipeline (LLM + Diffusion Transformer). When no model is loaded, the
     wrapper operates in passthrough mode, returning the input audio
-    unmodified so a host can fall back to its own processing chain.
+    unmodified so a caller can fall back to its own processing chain.
 
     Model types and their capabilities (per the ACE-Step 1.5 documentation):
       - turbo:  8 steps, no CFG support, fast
@@ -114,7 +120,7 @@ class ACEStepWrapper:
         self.model = None
         self.model_path = model_path
         self.is_loaded = False
-        self.device = device
+        self.device = device  # Explicit device override
         self._requested_device = device
         self.load_error = None
         self.inference_count = 0
@@ -148,7 +154,7 @@ class ACEStepWrapper:
             # Device selection: honour the explicit --device flag. MPS
             # (Metal) crashes with SIGABRT on certain tensor ops (rsub /
             # sub_Tensor), so defaulting to CPU avoids the hard crash.
-            # A host can set LATENT_RESONATOR_FORCE_CPU=1 to force CPU.
+            # A caller can set LATENT_RESONATOR_FORCE_CPU=1 to force CPU.
             if os.environ.get("LATENT_RESONATOR_FORCE_CPU") == "1":
                 target_device = "cpu"
             else:
@@ -163,25 +169,26 @@ class ACEStepWrapper:
             logging.info(f"Resolved target device: {target_device}")
 
             try:
-                # The acestep package (GitHub: ace-step/ACE-Step)
+                # Try the acestep package (GitHub: ace-step/ACE-Step)
                 from acestep.pipeline_ace_step import ACEStepPipeline
 
                 logging.info(f"Loading ACE-Step model from: {model_path}")
-
-                # ACEStepPipeline auto-detects MPS / CUDA / CPU in __init__;
-                # override the device afterwards to guarantee our choice wins.
+                
+                # ACEStepPipeline auto-detects MPS / CUDA / CPU in __init__.
+                # We override the device AFTER loading to ensure CPU safety.
                 self.model = ACEStepPipeline(checkpoint_dir=model_path)
                 self.model.load_checkpoint(model_path)
 
+                # Force the pipeline to the requested device
                 if hasattr(self.model, "device"):
                     auto_device = str(self.model.device)
                     if auto_device != target_device:
                         logging.info(
-                            f"Overriding pipeline device: {auto_device} -> {target_device}"
+                            f"Overriding pipeline device: " f"{auto_device} → {target_device}"
                         )
                         if hasattr(self.model, "to"):
                             self.model.to(target_device)
-                        # Also move internal sub-models, if present.
+                        # Also move internal sub-models if present
                         for attr in ("unet", "vae", "text_encoder", "model"):
                             sub = getattr(self.model, attr, None)
                             if sub is not None and hasattr(sub, "to"):
@@ -190,8 +197,7 @@ class ACEStepWrapper:
                 self.device = target_device
                 logging.info(f"Using device: {self.device}")
 
-                # Ensure new tensors (e.g. scheduler state) are created on
-                # CPU when running in CPU mode.
+                # Ensure new tensors (e.g. scheduler) are created on CPU when in CPU mode
                 if target_device == "cpu":
                     try:
                         torch.set_default_device("cpu")
@@ -204,9 +210,27 @@ class ACEStepWrapper:
                     f"ACE-Step model loaded successfully on {self.device} "
                     f"(type: {self.model_type})"
                 )
+                
+            except ImportError as import_err:
+                # Detailed import error logging for debugging
+                logging.error(f"[IMPORT ERROR] Failed to import acestep.pipeline_ace_step: {import_err}")
+                logging.error(f"[IMPORT ERROR] Python path: {sys.path}")
+                try:
+                    import acestep
+                    logging.info(f"[IMPORT DEBUG] acestep package found at: {acestep.__file__}")
+                    logging.info(f"[IMPORT DEBUG] acestep contents: {dir(acestep)}")
+                except ImportError as acestep_err:
+                    logging.error(f"[IMPORT ERROR] Cannot import acestep at all: {acestep_err}")
+                # Try alternative import paths
+                try:
+                    import ace_step
+                    logging.info(f"[IMPORT DEBUG] ace_step (with underscore) found at: {ace_step.__file__}")
+                except ImportError:
+                    logging.error("[IMPORT ERROR] ace_step (with underscore) not found")
+                # Fall through to alternative loader below
 
             except ImportError:
-                # Try an alternative import path.
+                # Try alternative import paths
                 try:
                     from diffusers import AutoPipelineForText2Audio
 
@@ -243,6 +267,7 @@ class ACEStepWrapper:
         input_strength: float = 0.6,
         audio_duration: float = 10.0,
         denoise_strength: float = 1.0,
+        # --- Parameters mapped onto the underlying ACE-Step call ---
         guidance_interval: float = 0.5,
         guidance_interval_decay: float = 0.0,
         omega_scale: float = 10.0,
@@ -253,45 +278,96 @@ class ACEStepWrapper:
         use_erg_tag: bool = True,
         use_erg_lyric: bool = True,
         use_erg_diffusion: bool = True,
+        # --- LM-bypass switch + task routing ---
+        # `thinking`: when False, bypass the LM planner by disabling all
+        # three ERG guidance channels — the prompt reaches the diffusion
+        # transformer unmediated instead of being routed through it.
+        # `task_type`: a small vocabulary mapped onto ACE-Step's `task` param.
+        #   "cover"    → audio2audio (default; ref_audio feedback loop)
+        #   "repaint"  → repaint (src_audio + repaint_start/end window)
+        #   "extend"   → extend (continues past src_audio end)
+        #   "edit"     → edit (edit_target_prompt rewrites a segment)
+        #   "lego"/"extract"/"complete" → reserved (log + fall back to cover)
+        thinking: bool = True,
+        task_type: str = "cover",
     ) -> np.ndarray:
         """
         Run one inference cycle through ACE-Step 1.5.
 
+        Applies one step of the recursive feedback pattern this bridge is
+        built around: the output of a previous call can be fed back in as
+        the next call's input audio, with prompt and guidance parameters
+        steering each iteration (S_next = ACE(S_prev + noise, prompt, cfg)).
+
         Parameters:
-            audio_samples: Input audio as a float32 numpy array (mono)
+            audio_samples: Input audio as float32 numpy array (mono)
             sample_rate: Audio sample rate (Hz)
-            prompt: Semantic prompt text
-            guidance_scale: CFG scale (typical range 15.0-18.0)
-            num_steps: Diffusion steps (20-60 for the base model)
+            prompt: Semantic prompt text P
+            guidance_scale: CFG scale γ (typical range 15.0-18.0)
+            num_steps: Diffusion steps N (20–60 for base)
             seed: Random seed (-1 for random)
-            input_strength: Reference-audio strength (0.0-1.0)
+            input_strength: α — ref_audio_strength (0.0–1.0)
             audio_duration: Duration of generated audio in seconds
-            denoise_strength: Per-step denoise amount (0 = passthrough,
-                1 = full). Maps to an effective step count.
+            denoise_strength: Per-step denoise amount (0 = passthrough, 1 = full). Maps to effective step count.
             guidance_interval: When CFG is applied during diffusion [0..1].
-                Low values apply CFG early (structure); high values apply
-                it late (texture/detail).
-            guidance_interval_decay: CFG decay over steps [0..1]. Higher
-                values mean finer detail changes.
-            omega_scale: APG guidance omega [1..20]. Higher values mean
-                more aggressive deviation between iterations.
+                Maps from UI "SHIFT": low shift = early CFG (structure),
+                high shift = late CFG (texture/detail).
+            guidance_interval_decay: CFG decay over steps [0..1].
+                Maps from UI "GRANULARITY": higher = finer detail changes.
+            omega_scale: APG guidance omega [1..20].
+                Maps from UI "ENTROPY": higher = more aggressive deviation.
             min_guidance_scale: Floor for CFG during decay.
-            retake_variance: Stochastic variance per step [0..1]. 0.0 for
-                a deterministic (ODE) run, 0.5 for a stochastic (SDE) run.
+            retake_variance: Stochastic variance per step [0..1].
+                Maps from UI "METHOD SDE": 0.0 for ODE, 0.5 for SDE.
             scheduler_type: Diffusion scheduler ("euler").
             cfg_type: CFG strategy ("apg" or "cfg").
             use_erg_tag: Enable tag-based guidance routing.
             use_erg_lyric: Enable lyric-based guidance routing.
             use_erg_diffusion: Enable diffusion-based guidance routing.
+            thinking: When False, all three ERG channels are disabled so the
+                prompt reaches the diffusion transformer unmediated by the LM
+                planner. Overrides the per-channel flags above.
+            task_type: A small vocabulary mapped onto ACE-Step's `task` param.
+                "cover" (default) runs audio2audio with ref_audio feedback.
+                "repaint" / "extend" / "edit" route to the matching ACE-Step
+                task using the input audio as `src_audio`. Other values are
+                reserved and fall back to "cover" with a warning.
 
         Returns:
-            Processed audio as a float32 numpy array
+            Processed audio as float32 numpy array
         """
         if not self.is_loaded or self.model is None:
+            # Passthrough when model not loaded
             return audio_samples
 
-        # Effective steps = max(1, round(num_steps * denoise_strength)).
-        # denoise_strength of 0 means "do nothing" (passthrough).
+        # thinking=False bypasses the LM planner by disabling all ERG
+        # guidance channels; the prompt is injected directly into the
+        # diffusion transformer instead.
+        if not thinking:
+            use_erg_tag = False
+            use_erg_lyric = False
+            use_erg_diffusion = False
+
+        # task_type vocabulary → ACE-Step task param.
+        # "cover" keeps audio2audio (the feedback-loop pattern); repaint/
+        # extend/edit route to their native ACE-Step paths using the input
+        # audio as src_audio.
+        _TASK_MAP = {
+            "cover": None,           # audio2audio auto-set below
+            "repaint": "repaint",
+            "extend": "extend",
+            "edit": "edit",
+        }
+        resolved_task = _TASK_MAP.get(task_type)
+        if resolved_task is None and task_type != "cover":
+            logging.warning(
+                f"task_type='{task_type}' is reserved (no ACE-Step mapping yet); "
+                "falling back to 'cover' (audio2audio)."
+            )
+        use_repaint_path = resolved_task in ("repaint", "extend", "edit")
+
+        # Per-step denoise strength: 0 = passthrough; (0,1] = run that fraction of steps.
+        # Mapping: effective_steps = max(1, round(num_steps * denoise_strength)).
         denoise_strength = max(0.0, min(1.0, denoise_strength))
         if denoise_strength <= 0.0:
             return audio_samples
@@ -323,17 +399,31 @@ class ACEStepWrapper:
                     use_erg_tag=use_erg_tag,
                     use_erg_lyric=use_erg_lyric,
                     use_erg_diffusion=use_erg_diffusion,
-                    audio2audio_enable=True,
-                    ref_audio_strength=input_strength,
-                    ref_audio_input=tmp_input,
                     retake_variance=retake_variance,
                     save_path=tmp_dir,
                     batch_size=1,
                 )
 
+                if use_repaint_path:
+                    # repaint/extend/edit use src_audio_path + task; they do NOT
+                    # set audio2audio_enable (which would override task="audio2audio").
+                    infer_kwargs["task"] = resolved_task
+                    infer_kwargs["src_audio_path"] = tmp_input
+                    if resolved_task == "repaint":
+                        infer_kwargs["repaint_start"] = 0
+                        infer_kwargs["repaint_end"] = int(audio_duration)
+                else:
+                    # "cover" — the feedback-loop pattern. audio2audio_enable +
+                    # ref_audio auto-set task="audio2audio" inside
+                    # ACEStepPipeline.__call__.
+                    infer_kwargs["audio2audio_enable"] = True
+                    infer_kwargs["ref_audio_strength"] = input_strength
+                    infer_kwargs["ref_audio_input"] = tmp_input
+
                 logging.info(
-                    f"Inference: steps={effective_steps} (denoise={denoise_strength:.2f}), cfg={guidance_scale}, "
-                    f"strength={input_strength}, omega={omega_scale}, "
+                    f"Inference: task='{task_type}'→{resolved_task or 'audio2audio'}, "
+                    f"thinking={thinking}, steps={effective_steps} (denoise={denoise_strength:.2f}), "
+                    f"cfg={guidance_scale}, strength={input_strength}, omega={omega_scale}, "
                     f"interval={guidance_interval}, decay={guidance_interval_decay}, "
                     f"retake_var={retake_variance}, seed={seed}"
                 )
@@ -372,27 +462,28 @@ def decode_wav_bytes(wav_bytes: bytes) -> tuple:
     Decode a WAV file from bytes to (samples: np.ndarray, sample_rate: int).
     Supports 16-bit PCM and 32-bit float formats.
     """
-    # Prefer soundfile: it handles far more formats than the manual parser
-    # below and is more forgiving of nonstandard chunk layouts.
+    # Try soundfile first (handles all formats)
     try:
         import soundfile as sf
 
         data, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
         if data.ndim > 1:
-            data = data.mean(axis=1)
+            data = data.mean(axis=1)  # Mix to mono
         return data, sr
     except ImportError:
         pass
 
-    # Fallback: manual WAV parsing, used only if soundfile is unavailable.
+    # Fallback: manual WAV parsing
     if len(wav_bytes) < 44:
         raise ValueError("WAV data too short")
 
+    # Verify RIFF header
     riff = wav_bytes[:4]
     wave = wav_bytes[8:12]
     if riff != b"RIFF" or wave != b"WAVE":
         raise ValueError("Not a valid WAV file")
 
+    # Parse chunks
     pos = 12
     fmt_found = False
     data_bytes = b""
@@ -423,14 +514,15 @@ def decode_wav_bytes(wav_bytes: bytes) -> tuple:
     if not fmt_found or not data_bytes:
         raise ValueError("Missing fmt or data chunk in WAV")
 
+    # Decode sample data
     if audio_format == 3 and bits_per_sample == 32:
-        # IEEE float, 32-bit
+        # IEEE Float 32-bit
         samples = np.frombuffer(data_bytes, dtype=np.float32).copy()
     elif audio_format == 1 and bits_per_sample == 16:
-        # PCM, 16-bit
+        # PCM 16-bit
         samples = np.frombuffer(data_bytes, dtype=np.int16).astype(np.float32) / 32768.0
     elif audio_format == 1 and bits_per_sample == 24:
-        # PCM, 24-bit — no native numpy dtype, so unpack byte-by-byte.
+        # PCM 24-bit
         n_samples = len(data_bytes) // 3
         samples = np.zeros(n_samples, dtype=np.float32)
         for i in range(n_samples):
@@ -439,9 +531,10 @@ def decode_wav_bytes(wav_bytes: bytes) -> tuple:
             samples[i] = val / 8388608.0
     else:
         raise ValueError(
-            f"Unsupported WAV format: audio_format={audio_format}, bits={bits_per_sample}"
+            f"Unsupported WAV format: audio_format={audio_format}, " f"bits={bits_per_sample}"
         )
 
+    # Mix to mono if multichannel
     if channels > 1:
         samples = samples.reshape(-1, channels).mean(axis=1)
 
@@ -450,6 +543,7 @@ def decode_wav_bytes(wav_bytes: bytes) -> tuple:
 
 def encode_wav_bytes(samples: np.ndarray, sample_rate: int = 48000) -> bytes:
     """Encode float32 samples to WAV bytes (32-bit float, mono)."""
+    # Try soundfile first
     try:
         import soundfile as sf
 
@@ -459,8 +553,7 @@ def encode_wav_bytes(samples: np.ndarray, sample_rate: int = 48000) -> bytes:
     except ImportError:
         pass
 
-    # Fallback: manual WAV encoding (IEEE float32, mono), used only if
-    # soundfile is unavailable.
+    # Fallback: manual WAV encoding (IEEE float32, mono)
     data = samples.astype(np.float32).tobytes()
     num_channels = 1
     bits_per_sample = 32
@@ -502,16 +595,18 @@ MAX_WAV_BYTES = 2_000_000
 
 app = Flask(__name__)
 ACE_WRAPPER: ACEStepWrapper = None  # Initialized in main()
+LOW_LATENCY_MODE: bool = False  # Set in main() from --low-latency or --performance-mode flag
+PERF_CONFIG: dict = {}  # Performance config: max_steps, quantization
 
 
 @app.route("/health", methods=["GET"])
 def health():
     """
     Health check endpoint.
+    Returns server status, model availability, and device info.
 
-    Returns server status, model availability, and device info. Intended
-    for periodic polling by any client to confirm the bridge is reachable
-    and to learn whether neural inference is currently active.
+    Intended for periodic polling by a client to confirm the server is
+    reachable and to check whether neural inference is currently active.
     """
     return jsonify(
         {
@@ -550,18 +645,19 @@ def shutdown():
     """
     Graceful shutdown endpoint.
 
-    Intended to be called by the host process before it sends SIGTERM, so
-    the server can release resources cleanly before exiting.
+    Lets a caller ask the server to close resources cleanly before it is
+    terminated, as an alternative to sending SIGTERM directly.
     """
-    logging.info("Shutdown request received - terminating server")
+    logging.info("Shutdown request received — terminating server")
 
+    # Flask / Werkzeug shutdown
     func = request.environ.get("werkzeug.server.shutdown")
     if func is not None:
         func()
         return jsonify({"status": "shutting_down"}), 200
 
-    # Newer Werkzeug versions do not expose a shutdown hook; fall back to
-    # signalling our own process.
+    # Fallback for newer Werkzeug versions: schedule exit
+    import os
     import signal
 
     os.kill(os.getpid(), signal.SIGTERM)
@@ -572,6 +668,9 @@ def shutdown():
 def infer():
     """
     Run one inference cycle through ACE-Step 1.5.
+
+    Every parameter accepted by this endpoint is wired through to the
+    underlying ACE-Step pipeline call.
 
     Request JSON:
     {
@@ -585,24 +684,18 @@ def infer():
         "infer_method": "ode",
         "entropy": 0.25,
         "granularity": 0.45,
-        "audio_duration": 10.0,
-        "denoise_strength": 1.0
+        "audio_duration": 10.0
     }
 
-    All fields except "audio" are optional and fall back to the defaults
-    shown above. Several request fields are expressed in a normalized,
-    UI-friendly range and are remapped onto the underlying ACE-Step
-    arguments before inference:
-
-        shift (1-10) -> guidance_interval (0.1-0.9):
-            structure vs. texture attention allocation
-        entropy (0-1) -> omega_scale (1-20):
+    Normalized request parameter → ACE-Step parameter mapping:
+        shift (1-10) → guidance_interval (0.1-0.9):
+            structure↔texture attention allocation
+        entropy (0-1) → omega_scale (1-20):
             stochastic deviation magnitude
-        granularity (0-1) -> guidance_interval_decay (0-1):
+        granularity (0-1) → guidance_interval_decay (0-1):
             spectral granularity / detail resolution
-        infer_method "sde" -> retake_variance=0.5:
-            stochastic per-step diffusion instead of the deterministic
-            "ode" default
+        infer_method "sde" → retake_variance=0.5:
+            stochastic diffusion, for recursive drift across iterations
 
     Response JSON:
     {
@@ -613,9 +706,6 @@ def infer():
         "model_used": true,
         "model_type": "base"
     }
-
-    On error, responds with {"error": "<message>"} and an appropriate
-    4xx/5xx status code.
     """
     try:
         data = request.get_json(force=True, silent=True)
@@ -670,34 +760,57 @@ def infer():
         seed = safe_int(data.get("seed"), -1)
         input_strength = safe_float(data.get("input_strength"), 0.6)
         audio_duration = safe_float(data.get("audio_duration"), 10.0)
+        
+        # Low-latency mode: cap inference steps for real-time performance.
+        # Honors an explicit --max-steps if the server was launched with
+        # one, otherwise falls back to a conservative default of 6.
+        if LOW_LATENCY_MODE:
+            step_cap = PERF_CONFIG.get("max_steps") or 6
+            num_steps = min(num_steps, step_cap)
+            logging.info(f"Low-latency mode: capped steps to {num_steps}")
 
         shift_raw = safe_float(data.get("shift"), 5.0)
         guidance_interval = max(0.1, min(0.9, 0.1 + (shift_raw - 1.0) / 9.0 * 0.8))
 
-        # entropy (0-1) -> omega_scale (1-20): higher omega means more
-        # aggressive guidance deviation, i.e. more variation between runs.
+        # ENTROPY (0.0–1.0 normalized) → omega_scale (1.0–20.0)
+        # Higher omega = more aggressive guidance deviation = more sonic
+        # variation between iterations.
         entropy_raw = safe_float(data.get("entropy"), 0.25)
         omega_scale = max(1.0, min(20.0, 1.0 + entropy_raw * 19.0))
 
-        # granularity (0-1) -> guidance_interval_decay (0-1): controls how
-        # quickly CFG fades across diffusion steps; higher decays faster,
-        # yielding finer spectral detail.
+        # GRANULARITY (0.0–1.0 normalized) → guidance_interval_decay (0.0–1.0)
+        # Controls how quickly CFG fades during diffusion steps.
+        # High granularity = rapid CFG decay = finer spectral detail.
         granularity_raw = safe_float(data.get("granularity"), 0.45)
         guidance_interval_decay = max(0.0, min(1.0, granularity_raw))
 
-        # infer_method "ode" -> deterministic, reproducible; "sde" injects
-        # stochastic per-step noise via retake_variance.
+        # METHOD: ODE vs SDE
+        # ODE ("ode") → retake_variance=0.0: deterministic, reproducible.
+        # SDE ("sde") → retake_variance=0.5: stochastic per-step noise,
+        # injecting entropy at each diffusion step.
         infer_method = data.get("infer_method", "ode")
         retake_variance = 0.5 if infer_method == "sde" else 0.0
 
-        # Per-step denoise strength (0 = no denoise, 1 = full effect).
+        # Per-step denoise strength (0 = no denoise, 1 = full). A caller can
+        # skip calling this endpoint entirely when it would be 0.
         denoise_strength = max(0.0, min(1.0, safe_float(data.get("denoise_strength"), 1.0)))
 
-        # Floor for CFG during decay.
+        # thinking=False bypasses the LM planner (see ACEStepWrapper.infer).
+        # Defaults to True to preserve ACE-Step's native behavior unless a
+        # caller explicitly requests the bypass.
+        thinking = data.get("thinking", True)
+        if not isinstance(thinking, bool):
+            thinking = safe_int(thinking, 1) != 0
+
+        # task_type vocabulary → ACE-Step task routing (see ACEStepWrapper.infer).
+        task_type = data.get("task_type") if isinstance(data.get("task_type"), str) else "cover"
+
+        # Min guidance scale — floor during CFG decay
         min_guidance_scale = max(1.0, guidance_scale * 0.2)
 
         t0 = time.time()
 
+        # Run inference — ALL parameters wired through
         output_samples = ACE_WRAPPER.infer(
             audio_samples=samples,
             sample_rate=sr,
@@ -708,6 +821,7 @@ def infer():
             input_strength=input_strength,
             audio_duration=audio_duration,
             denoise_strength=denoise_strength,
+            # Normalized-parameter mappings computed above
             guidance_interval=guidance_interval,
             guidance_interval_decay=guidance_interval_decay,
             omega_scale=omega_scale,
@@ -715,10 +829,13 @@ def infer():
             retake_variance=retake_variance,
             scheduler_type="euler",
             cfg_type="apg",
+            thinking=thinking,
+            task_type=task_type,
         )
 
         duration_ms = (time.time() - t0) * 1000.0
 
+        # Encode output audio to WAV
         output_wav = encode_wav_bytes(output_samples, sr)
         output_b64 = base64.b64encode(output_wav).decode("ascii")
 
@@ -768,6 +885,29 @@ def main():
             "ACE-Step v0.1.0+ supports Apple Silicon (MPS) properly."
         ),
     )
+    parser.add_argument(
+        "--low-latency",
+        action="store_true",
+        help="Performance mode: reduce inference steps to 4-6 for live performance (legacy)"
+    )
+    parser.add_argument(
+        "--performance-mode",
+        action="store_true",
+        help="Enable performance mode (reduced steps, quantization) for live performance"
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Maximum inference steps (performance mode: 4-8, studio: 20)"
+    )
+    parser.add_argument(
+        "--quantization",
+        type=str,
+        default=None,
+        choices=["q8", "fp16", "fp32"],
+        help="Quantization mode: q8 (fast), fp16 (balanced), fp32 (quality)"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -778,20 +918,44 @@ def main():
     logging.info("=" * 60)
     logging.info("  ACE-Step Bridge Server v0.2.0")
     logging.info(f"  Device: {args.device}")
+    
+    # Performance mode: legacy --low-latency or new --performance-mode
+    is_performance_mode = args.low_latency or args.performance_mode
+    
+    if is_performance_mode:
+        perf_info = []
+        if args.max_steps:
+            perf_info.append(f"{args.max_steps} steps")
+        if args.quantization:
+            perf_info.append(f"quant={args.quantization}")
+        if not perf_info:
+            perf_info.append("4-6 steps")
+        logging.info(f"  Mode: PERFORMANCE ({', '.join(perf_info)})")
     logging.info("=" * 60)
+    
+    # Store performance mode flag in global
+    global LOW_LATENCY_MODE
+    LOW_LATENCY_MODE = is_performance_mode
+    
+    # Store performance configuration
+    global PERF_CONFIG
+    PERF_CONFIG = {
+        "max_steps": args.max_steps,
+        "quantization": args.quantization
+    }
 
+    # Initialize model wrapper with explicit device
     ACE_WRAPPER = ACEStepWrapper(model_path=args.model_path, device=args.device)
 
     if ACE_WRAPPER.is_loaded:
-        logging.info(f"Model ready on {ACE_WRAPPER.device} - full neural inference active")
+        logging.info(f"✓ Model ready on {ACE_WRAPPER.device} — " f"full neural inference active")
     else:
-        logging.warning("Model NOT loaded - server will run in passthrough mode.")
+        logging.warning("✗ Model NOT loaded — server will run in passthrough mode.")
         if ACE_WRAPPER.load_error:
             logging.warning(f"  Reason: {ACE_WRAPPER.load_error}")
         else:
-            logging.warning("  No model path specified. Use --model-path to load a model.")
-        logging.info("  Input audio will be returned unmodified; the calling host can apply")
-        logging.info("  its own processing chain as a fallback.")
+            logging.warning("  No model path specified. " "Use --model-path to load a model.")
+        logging.info("  Callers will receive passthrough audio from /infer until a model is loaded.")
 
     logging.info("")
     logging.info(f"Starting server on {args.host}:{args.port}")
@@ -801,21 +965,21 @@ def main():
     logging.info("")
 
     if args.debug:
+        # Debug mode: use Flask's built-in server for auto-reload
         app.run(host=args.host, port=args.port, debug=True)
     else:
         # Production: use waitress for thread-safe, multi-request serving.
-        # Flask's built-in dev server is single-threaded and not safe for
-        # concurrent inference requests.
+        # Flask's dev server is single-threaded and not safe for concurrent
+        # inference requests from multiple lanes.
         try:
             from waitress import serve
 
             logging.info("Using waitress WSGI server (multi-threaded)")
-            # 6 threads covers a few concurrent inference requests plus
-            # health-check polling without saturating the queue.
+            # 6 threads: 2+ lanes × inference + health checks; reduces "Task queue depth" warnings
             serve(app, host=args.host, port=args.port, threads=6)
         except ImportError:
             logging.warning(
-                "waitress not installed - falling back to Flask dev server. "
+                "waitress not installed — falling back to Flask dev server. "
                 "Install with: pip install waitress"
             )
             app.run(host=args.host, port=args.port, debug=False)

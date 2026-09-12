@@ -26,6 +26,14 @@ import argparse
 import os
 import sys
 
+__all__ = [
+    "check_dependencies",
+    "convert_vae_encoder",
+    "convert_vae_decoder",
+    "convert_dit",
+    "main",
+]
+
 
 def check_dependencies():
     """Verify required packages are installed."""

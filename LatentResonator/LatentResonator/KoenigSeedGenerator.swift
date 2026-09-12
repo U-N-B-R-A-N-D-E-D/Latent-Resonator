@@ -2,6 +2,12 @@ import Foundation
 import AVFoundation
 
 // MARK: - Koenig Seed Generator (Whitepaper §4.1)
+//
+// Theoretical foundations:
+//   - Koenig: Project Two (1957-1969) — algorithmic composition with stochastic selection
+//   - Xenakis: Formalized Music (1971) — sieve theory and stochastic synthesis
+//   - Roads: Computer Music Tutorial (1996) — algorithmic composition overview
+//
 // Generates Dirac impulses arranged in a Euclidean rhythm E(5,13).
 // Each impulse is followed by a 20ms Gaussian noise tail to provide
 // nucleation sites for the diffusion model's denoiser.

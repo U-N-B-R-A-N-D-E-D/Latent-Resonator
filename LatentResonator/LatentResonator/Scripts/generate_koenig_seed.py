@@ -26,6 +26,12 @@ import wave
 
 import numpy as np
 
+__all__ = [
+    "euclidean_rhythm",
+    "generate_koenig_seed",
+    "main",
+]
+
 
 def euclidean_rhythm(pulses: int, steps: int) -> list:
     """

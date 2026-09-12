@@ -3,182 +3,283 @@ import Combine
 import SwiftUI
 
 // MARK: - Sequencer Engine
-//
-// Owns step timing and advance logic. Extracted from NeuralEngine to reduce
-// its scope and separate "when to step" from "what to apply."
-//
-// NeuralEngine passes closures for lanes, focusStepGrid, isProcessing, and
-// applyLaneStepLocks so SequencerEngine stays pure about timing.
-//
-// White paper reference: §4.2.2 — recursive drift as performable arc; §7 — CFG at hand.
 
+/// Owns step timing and advance logic for all SequencerNodes in the graph.
+/// v2.0: Graph-native implementation — no lane dependencies.
+///
+/// White paper reference: §4.2.2 — recursive drift as performable arc; §7 — CFG at hand.
 final class SequencerEngine {
 
     // MARK: - Dependencies
 
-    private let lanesGetter: () -> [ResonatorLane]
-    private let focusStepGridGetter: () -> StepGrid?
+    private weak var nodeGraph: NodeGraph?
     private let isProcessingGetter: () -> Bool
-    private let applyLocks: (ResonatorLane) -> Void
 
     // MARK: - Step Timer
 
     private var stepTimer: DispatchSourceTimer?
     let stepTimerQueue = DispatchQueue(label: "com.latentresonator.stepTimer", qos: .userInteractive)
-    private var laneIterationCancellables = Set<AnyCancellable>()
+    private var iterationSubscriptions = Set<AnyCancellable>()
+    private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Init
 
     init(
-        lanesGetter: @escaping () -> [ResonatorLane],
-        focusStepGridGetter: @escaping () -> StepGrid?,
-        isProcessingGetter: @escaping () -> Bool,
-        applyLocks: @escaping (ResonatorLane) -> Void
+        nodeGraph: NodeGraph,
+        isProcessingGetter: @escaping () -> Bool
     ) {
-        self.lanesGetter = lanesGetter
-        self.focusStepGridGetter = focusStepGridGetter
+        self.nodeGraph = nodeGraph
         self.isProcessingGetter = isProcessingGetter
-        self.applyLocks = applyLocks
+
+        // Subscribe to node graph changes to detect new sequencers
+        setupNodeGraphSubscription()
     }
 
     deinit {
         stepTimer?.cancel()
+        iterationSubscriptions.removeAll()
+        cancellables.removeAll()
+    }
+
+    // MARK: - Node Graph Subscription
+
+    private func setupNodeGraphSubscription() {
+        nodeGraph?.$nodes
+            .sink { [weak self] _ in
+                self?.resubscribeToSequencers()
+            }
+            .store(in: &cancellables)
+    }
+
+    /// Resubscribe to all sequencers in the graph.
+    private func resubscribeToSequencers() {
+        iterationSubscriptions.removeAll()
+
+        guard let graph = nodeGraph else { return }
+
+        let sequencers = graph.nodes.values.compactMap { $0 as? SequencerNode }
+
+        for sequencer in sequencers {
+            // Subscribe to iteration-based advance
+            if sequencer.advanceMode == .iteration {
+                if let feedbackNode = findConnectedFeedbackLoop(for: sequencer) {
+                    setupIterationSubscription(sequencer: sequencer, feedbackNode: feedbackNode)
+                }
+            }
+        }
+    }
+
+    /// Get all sequencer nodes in the graph.
+    private var sequencers: [SequencerNode] {
+        nodeGraph?.nodes.values.compactMap { $0 as? SequencerNode } ?? []
     }
 
     // MARK: - Public API
 
-    /// Subscribe to each active lane's iteration count so step advance fires per-lane.
-    func subscribeLaneIterations() {
-        laneIterationCancellables.removeAll()
-        for lane in lanesGetter() {
-            lane.$iterationCount
-                .dropFirst()
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] newCount in
-                    guard newCount > 0 else { return }
-                    self?.advanceLaneStep(lane: lane)
-                }
-                .store(in: &laneIterationCancellables)
+    /// Subscribe to each active sequencer's iteration requirements.
+    /// Called when the engine starts processing.
+    func subscribeSequencerIterations() {
+        iterationSubscriptions.removeAll()
+
+        // For each iteration-based sequencer, set up subscription
+        for sequencer in sequencers where sequencer.advanceMode == .iteration {
+            // Find connected FeedbackLoopNode
+            if let feedbackNode = findConnectedFeedbackLoop(for: sequencer) {
+                setupIterationSubscription(sequencer: sequencer, feedbackNode: feedbackNode)
+            }
         }
     }
 
-    /// Start or stop the step timer. Uses the first lane with advanceMode=.time.
-    /// Lane switching no longer affects the timer — each lane's config is respected.
+    /// Find the FeedbackLoopNode connected to a sequencer (if any).
+    private func findConnectedFeedbackLoop(for sequencer: SequencerNode) -> FeedbackLoopNode? {
+        guard let graph = nodeGraph else { return nil }
+
+        // Look for edges where sequencer is the source and target is a feedback loop
+        for edge in graph.edges.values where edge.sourceNodeId == sequencer.id {
+            if let targetNode = graph.nodes[edge.targetNodeId] as? FeedbackLoopNode {
+                return targetNode
+            }
+        }
+
+        return nil
+    }
+
+    /// Set up iteration subscription between sequencer and feedback loop.
+    private func setupIterationSubscription(sequencer: SequencerNode, feedbackNode: FeedbackLoopNode) {
+        sequencer.subscribeToIterations(of: feedbackNode)
+    }
+
+    /// Start or stop the step timer for time-based sequencers.
     func syncStepTimer() {
         stepTimer?.cancel()
         stepTimer = nil
 
-        guard let grid = lanesGetter().first(where: { $0.stepGrid.advanceMode == .time })?.stepGrid else { return }
+        // Find any sequencer with time advance mode to determine BPM
+        guard let timeSequencer = sequencers.first(where: { $0.advanceMode == .time }) else {
+            return
+        }
 
-        let bpm = Double(grid.stepTimeBPM)
+        let bpm = Double(timeSequencer.stepTimeBPM)
         let intervalNs = UInt64((60.0 / bpm) * 1_000_000_000)
-        print(">> StepTimer: Starting at \(bpm) BPM (interval: \(String(format: "%.2f", 60.0 / bpm))s)")
 
         let timer = DispatchSource.makeTimerSource(flags: .strict, queue: stepTimerQueue)
-        timer.schedule(deadline: .now() + .nanoseconds(Int(intervalNs)),
-                       repeating: .nanoseconds(Int(intervalNs)),
-                       leeway: .microseconds(500))
+        timer.schedule(
+            deadline: .now() + .nanoseconds(Int(intervalNs)),
+            repeating: .nanoseconds(Int(intervalNs)),
+            leeway: .microseconds(500)
+        )
+
         timer.setEventHandler { [weak self] in
             guard let self = self, self.isProcessingGetter() else { return }
             DispatchQueue.main.async {
-                self.advanceAllLanesSteps()
+                self.advanceTimeBasedSteps()
             }
         }
+
         timer.resume()
         stepTimer = timer
     }
 
-    /// Manual step advance for one lane (tap or keyboard).
-    func advanceLaneManually(lane: ResonatorLane) {
-        let chain = lane.stepGrid.chainLength
-        guard chain > 0 else { return }
-        let next = (lane.stepGrid.currentStepIndex + 1) % chain
-        advanceLaneToStep(lane: lane, candidateIndex: next)
-    }
-
-    /// Cancel the step timer. Call when stopping the engine.
+    /// Cancel the step timer.
     func cancelStepTimer() {
         stepTimer?.cancel()
         stepTimer = nil
     }
 
+    /// Stop all sequencer subscriptions and timers.
+    func stop() {
+        cancelStepTimer()
+        iterationSubscriptions.removeAll()
+    }
+
     // MARK: - Advance Logic
 
-    private func advanceLaneStep(lane: ResonatorLane) {
-        let grid = lane.stepGrid
-        guard grid.advanceMode == .iteration else { return }
-        let total = lane.iterationCount
-        let chain = grid.chainLength
-        guard chain > 0 else { return }
+    /// Advance all iteration-based sequencers.
+    /// Called from an external iteration trigger (e.g., FeedbackLoopNode completion).
+    func advanceIterationBasedSteps() {
+        guard isProcessingGetter() else { return }
 
-        let candidateIndex = (total / grid.stepAdvanceDivisor) % chain
-        guard candidateIndex != grid.currentStepIndex else { return }
-
-        advanceLaneToStep(lane: lane, candidateIndex: candidateIndex)
-    }
-
-    private func advanceLaneToStep(lane: ResonatorLane, candidateIndex: Int) {
-        var grid = lane.stepGrid
-        let chain = grid.chainLength
-        guard chain > 0, candidateIndex >= 0, candidateIndex < chain else { return }
-        guard candidateIndex != grid.currentStepIndex else { return }
-
-        let previousIndex = grid.currentStepIndex
-
-        grid.currentStepIndex = candidateIndex
-
-        if candidateIndex < previousIndex {
-            grid.oneShotFired.removeAll()
-        }
-
-        var t = Transaction()
-        t.disablesAnimations = true
-        withTransaction(t) {
-            lane.stepGrid = grid
-        }
-
-        guard let step = grid.step(at: candidateIndex) else { return }
-
-        if step.trigType == .skip { return }
-        if step.trigType == .oneShot && grid.oneShotFired.contains(candidateIndex) { return }
-
-        if let prob = step.probability, prob < 1.0 {
-            if Float.random(in: 0...1) > prob { return }
-        }
-
-        applyLocks(lane)
-
-        if step.trigType == .oneShot {
-            var g = lane.stepGrid
-            g.oneShotFired.insert(candidateIndex)
-            lane.stepGrid = g
+        for sequencer in sequencers where sequencer.advanceMode == .iteration {
+            // Check step advance divisor
+            // In full implementation, track iteration count per sequencer
+            sequencer.advance()
         }
     }
 
-    private func advanceAllLanesSteps() {
-        let lanes = lanesGetter()
-        let timeGrid = lanes.first(where: { $0.stepGrid.advanceMode == .time })?.stepGrid
+    /// Advance time-based sequencers on timer tick.
+    private func advanceTimeBasedSteps() {
+        guard isProcessingGetter() else { return }
 
-        for lane in lanes {
-            let grid = lane.stepGrid
-            let chain = grid.chainLength
-            guard chain > 0 else { continue }
-            let next = (grid.currentStepIndex + 1) % chain
+        // Get reference BPM from first time-based sequencer (used for timing calculations)
+        _ = sequencers.first { $0.advanceMode == .time }?.stepTimeBPM ?? 120
 
-            if let step = grid.step(at: next), abs(step.microtiming) > 0.001,
-               let tg = timeGrid {
-                let bpm = Double(tg.stepTimeBPM)
-                let stepInterval = 60.0 / bpm
+        for sequencer in sequencers where sequencer.advanceMode == .time {
+            let bpm = Double(sequencer.stepTimeBPM)
+            let stepInterval = 60.0 / bpm
+
+            // Check for microtiming on the next step
+            _ = (sequencer.currentStepIndex + 1) % sequencer.chainLength
+
+            if let step = sequencer.currentStep,
+               abs(step.microtiming) > 0.001 {
+                // Apply microtiming offset
                 let offsetSeconds = step.microtiming * stepInterval
                 let delayNs = max(0, Int(offsetSeconds * 1_000_000_000))
+
                 stepTimerQueue.asyncAfter(deadline: .now() + .nanoseconds(delayNs)) { [weak self] in
                     DispatchQueue.main.async {
-                        self?.advanceLaneToStep(lane: lane, candidateIndex: next)
+                        self?.advanceSequencer(sequencer)
                     }
                 }
             } else {
-                advanceLaneToStep(lane: lane, candidateIndex: next)
+                advanceSequencer(sequencer)
             }
         }
+    }
+
+    /// Advance a single sequencer to its next step.
+    private func advanceSequencer(_ sequencer: SequencerNode) {
+        let chain = sequencer.chainLength
+        guard chain > 0 else { return }
+
+        let next = (sequencer.currentStepIndex + 1) % chain
+        _ = sequencer.advanceToStep(candidateIndex: next)
+    }
+
+    /// Manual step advance for a specific sequencer (tap or keyboard).
+    func advanceSequencerManually(_ sequencer: SequencerNode) {
+        let chain = sequencer.chainLength
+        guard chain > 0 else { return }
+        let next = (sequencer.currentStepIndex + 1) % chain
+        _ = sequencer.advanceToStep(candidateIndex: next)
+    }
+
+    /// Reset a specific sequencer to step 0.
+    func resetSequencer(_ sequencer: SequencerNode) {
+        sequencer.reset()
+    }
+
+    /// Reset all sequencers.
+    func resetAll() {
+        for sequencer in sequencers {
+            sequencer.reset()
+        }
+    }
+
+    // MARK: - Parameter Lock Application
+
+    /// Apply parameter locks for a triggered step to connected nodes.
+    /// This would be called after a step triggers to update downstream parameters.
+    func applyParameterLocks(for sequencer: SequencerNode) {
+        guard let step = sequencer.currentStep else { return }
+
+        // Find connected target nodes (typically a MacroNode)
+        guard let graph = nodeGraph else { return }
+
+        // Get edges where sequencer is the source
+        let outgoingEdges = graph.edges.values.filter { $0.sourceNodeId == sequencer.id }
+
+        for edge in outgoingEdges {
+            guard let targetNode = graph.nodes[edge.targetNodeId] else { continue }
+
+            // Apply parameter locks based on port
+            // v2.0: Need to cast to BaseGraphNode to use setParam
+            guard let target = targetNode as? BaseGraphNode else { continue }
+            switch edge.sourcePortId {
+            case "p_lock_0":
+                if let cfg = step.cfg {
+                    target.setParam("guidanceScale", value: cfg)
+                }
+            case "p_lock_1":
+                if let feedback = step.feedback {
+                    target.setParam("feedback", value: feedback)
+                }
+            case "p_lock_2":
+                if let texture = step.texture {
+                    target.setParam("texture", value: texture)
+                }
+            case "p_lock_3":
+                if let chaos = step.chaos {
+                    target.setParam("chaos", value: chaos)
+                }
+            default:
+                break
+            }
+        }
+    }
+}
+
+// MARK: - SequencerEngine Extensions
+
+extension SequencerEngine {
+    /// Convenience method to get the focused sequencer (for UI binding).
+    func focusedSequencer(in graph: NodeGraph, focusNodeId: UUID?) -> SequencerNode? {
+        guard let id = focusNodeId else { return nil }
+        return graph.nodes[id] as? SequencerNode
+    }
+
+    /// Get all sequencers sorted by position (for UI display).
+    func sortedSequencers() -> [SequencerNode] {
+        sequencers.sorted { $0.name < $1.name }
     }
 }

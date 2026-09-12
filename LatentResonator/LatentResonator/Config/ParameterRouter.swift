@@ -2,6 +2,17 @@ import Foundation
 import CoreMIDI
 import Network
 
+// MARK: - Debug Logging
+// #region agent log
+private func debugLog(_ message: String) {
+    let timestamp = ISO8601DateFormatter().string(from: Date())
+    let logMessage = "[\(timestamp)] \(message)\n"
+    // Write to stderr for immediate visibility
+    fputs(logMessage, stderr)
+    fflush(stderr)
+}
+// #endregion
+
 // MARK: - Control Parameter (MIDI CC + OSC mapping)
 //
 // Enum of performable parameters that can be driven by MIDI CC or OSC.
@@ -10,7 +21,7 @@ import Network
 
 enum ControlParameter: String, CaseIterable {
 
-    // Core lane parameters
+    // Core macro parameters
     case volume
     case guidanceScale
     case feedback
@@ -51,18 +62,13 @@ enum ControlParameter: String, CaseIterable {
     case crossfader
     case mute
     case solo
-    case spectralMorphActive
-    case autoDecayToggle
-    case promptEvolution
+    case spectralMorphActive      // legacy alias for SpectralChainNode.freezeActive
     case inferMethodSDE
-    case laneRecord
-    case archiveRecall
 
     /// Continuous range (min, max). Toggles use (0, 1) and isToggle == true.
     var floatRange: (Float, Float)? {
         switch self {
-        case .volume, .mute, .solo, .spectralMorphActive, .autoDecayToggle,
-             .promptEvolution, .inferMethodSDE, .laneRecord:
+        case .volume, .mute, .solo, .spectralMorphActive, .inferMethodSDE:
             return (0.0, 1.0)
         case .guidanceScale:
             return (LRConstants.cfgScaleRange.lowerBound,
@@ -123,22 +129,20 @@ enum ControlParameter: String, CaseIterable {
         case .lfoDepth:
             return (LRConstants.lfoDepthRange.lowerBound,
                     LRConstants.lfoDepthRange.upperBound)
-        case .archiveRecall:
-            return (0.0, Float(LRConstants.iterationArchiveSize - 1))
         }
     }
 
     /// Toggle params: CC < 64 -> 0, CC >= 64 -> 1.
     var isToggle: Bool {
         switch self {
-        case .mute, .solo, .spectralMorphActive, .autoDecayToggle,
-             .promptEvolution, .inferMethodSDE, .laneRecord:
+        case .mute, .solo, .spectralMorphActive, .inferMethodSDE:
             return true
         default: return false
         }
     }
 
-    /// Default MIDI CC (unique per parameter). CC 20-51.
+    /// Default MIDI CC (unique per live parameter). CC 20-51 with gaps
+    /// left after pruning dead v1-era IDs (38, 39, 49, 51).
     var defaultCC: UInt8 {
         switch self {
         case .volume:              return 20
@@ -159,8 +163,6 @@ enum ControlParameter: String, CaseIterable {
         case .bitCrushDepth:       return 35
         case .entropy:             return 36
         case .granularity:         return 37
-        case .autoDecayToggle:     return 38
-        case .archiveRecall:       return 39
         case .shift:               return 40
         case .inputStrength:       return 41
         case .inferenceSteps:      return 42
@@ -170,9 +172,7 @@ enum ControlParameter: String, CaseIterable {
         case .resonatorDecay:      return 46
         case .lfoRate:             return 47
         case .lfoDepth:            return 48
-        case .promptEvolution:     return 49
         case .inferMethodSDE:      return 50
-        case .laneRecord:          return 51
         }
     }
 }
@@ -217,7 +217,7 @@ enum ParameterRouter {
 // MARK: - CoreMIDI Input Manager
 //
 // Receives MIDI CC messages from any connected controller and routes
-// them through ParameterRouter into the NeuralEngine / ResonatorLane
+// them through ParameterRouter into the NeuralEngine / MacroNode
 // parameter space. Runs on the CoreMIDI real-time thread; parameter
 // application is dispatched to the main queue for @Published safety.
 
@@ -301,6 +301,14 @@ final class MIDIInputManager: ObservableObject {
 
     /// Start listening for MIDI input from all sources.
     func start() {
+        // #region agent log
+        debugLog("[MIDI:start] Starting MIDI Input Manager")
+        debugLog("[MIDI:start] CC Map has \(ccMap.count) mappings:")
+        for (cc, param) in ccMap {
+            debugLog("[MIDI:start]   CC#\(cc) -> \(param.rawValue)")
+        }
+        // #endregion
+        
         let status = MIDIClientCreateWithBlock("LatentResonatorMIDI" as CFString, &midiClient) { [weak self] notification in
             // Handle source added/removed if needed
             let messageID = notification.pointee.messageID
@@ -310,6 +318,9 @@ final class MIDIInputManager: ObservableObject {
         }
         guard status == noErr else {
             print(">> MIDI: Failed to create client (\(status))")
+            // #region agent log
+            debugLog("[MIDI:start] ✗ Failed to create MIDI client, error: \(status)")
+            // #endregion
             return
         }
 
@@ -323,11 +334,17 @@ final class MIDIInputManager: ObservableObject {
         }
         guard portStatus == noErr else {
             print(">> MIDI: Failed to create input port (\(portStatus))")
+            // #region agent log
+            debugLog("[MIDI:start] ✗ Failed to create input port, error: \(portStatus)")
+            // #endregion
             return
         }
 
         connectAllSources()
         print(">> MIDI: Input manager started")
+        // #region agent log
+        debugLog("[MIDI:start] ✓ MIDI Input Manager started successfully")
+        // #endregion
     }
 
     /// Stop MIDI input and dispose resources.
@@ -345,9 +362,25 @@ final class MIDIInputManager: ObservableObject {
     /// Connect to all available MIDI sources.
     private func connectAllSources() {
         let sourceCount = MIDIGetNumberOfSources()
+        // #region agent log
+        debugLog("[MIDI:connectAllSources] Found \(sourceCount) MIDI source(s)")
+        // #endregion
         for i in 0..<sourceCount {
             let source = MIDIGetSource(i)
-            MIDIPortConnectSource(inputPort, source, nil)
+            var name: Unmanaged<CFString>?
+            MIDIObjectGetStringProperty(source, kMIDIPropertyName, &name)
+            let sourceName = name?.takeRetainedValue() as String? ?? "Unknown"
+            // #region agent log
+            debugLog("[MIDI:connectAllSources] Source #\(i): \(sourceName)")
+            // #endregion
+            let connectStatus = MIDIPortConnectSource(inputPort, source, nil)
+            // #region agent log
+            if connectStatus == noErr {
+                debugLog("[MIDI:connectAllSources] ✓ Connected to \(sourceName)")
+            } else {
+                debugLog("[MIDI:connectAllSources] ✗ Failed to connect to \(sourceName), error: \(connectStatus)")
+            }
+            // #endregion
         }
         if sourceCount > 0 {
             print(">> MIDI: Connected to \(sourceCount) source(s)")
@@ -358,10 +391,19 @@ final class MIDIInputManager: ObservableObject {
     private func handleMIDIEventList(_ eventListPtr: UnsafePointer<MIDIEventList>) {
         let eventList = eventListPtr.pointee
         var packet = eventList.packet
+        
+        // #region agent log
+        debugLog("[MIDI:handleMIDIEventList] ===== PACKET RECEIVED =====")
+        debugLog("[MIDI:handleMIDIEventList] numPackets: \(eventList.numPackets)")
+        // #endregion
 
-        for _ in 0..<eventList.numPackets {
+        for packetIdx in 0..<eventList.numPackets {
             // MIDI 1.0 Universal Packet: 32-bit word
             let wordCount = packet.wordCount
+            // #region agent log
+            debugLog("[MIDI:handleMIDIEventList] Packet #\(packetIdx): wordCount=\(wordCount)")
+            // #endregion
+            
             if wordCount >= 1 {
                 DispatchQueue.main.async { [weak self] in
                     self?.lastActivityTime = Date()
@@ -372,18 +414,38 @@ final class MIDIInputManager: ObservableObject {
                 let status = UInt8((word >> 16) & 0xFF)
                 let data1 = UInt8((word >> 8) & 0xFF)
                 let data2 = UInt8(word & 0xFF)
+                
+                // Raw hex dump for debugging
+                let rawHex = String(format: "%08X", word)
+
+                // #region agent log
+                debugLog("[MIDI:handleMIDIEventList] Raw word: 0x\(rawHex)")
+                debugLog("[MIDI:handleMIDIEventList] Parsed: type=\(messageType) (0x\(String(format: "%X", messageType))) status=\(String(format: "%02X", status)) data1=\(data1) (0x\(String(format: "%02X", data1))) data2=\(data2) (0x\(String(format: "%02X", data2)))")
+                // #endregion
 
                 // MIDI 1.0 channel voice message (type 0x2)
+                // #region agent log
+                debugLog("[MIDI:handleMIDIEventList] Checking messageType == 0x2? \(messageType == 0x2)")
+                // #endregion
                 if messageType == 0x2 {
                     let statusNibble = status & 0xF0
+                    // #region agent log
+                    debugLog("[MIDI:handleMIDIEventList] statusNibble: 0x\(String(format: "%02X", statusNibble))")
+                    // #endregion
 
                     switch statusNibble {
                     // CC message: status 0xBn
                     case 0xB0:
+                        // #region agent log
+                        debugLog("[MIDI:handleMIDIEventList] ✓ CC MESSAGE DETECTED: CC#\(data1) value=\(data2)")
+                        // #endregion
                         routeCC(cc: data1, value: data2)
 
                     // Pitch Bend: status 0xEn (14-bit: data1 = LSB, data2 = MSB)
                     case 0xE0:
+                        // #region agent log
+                        debugLog("[MIDI:handleMIDIEventList] Pitch Bend message")
+                        // #endregion
                         let combined = (UInt16(data2) << 7) | UInt16(data1)
                         let normalized = Float(combined) / 16383.0
                         let target = pitchBendTarget
@@ -396,24 +458,57 @@ final class MIDIInputManager: ObservableObject {
 
                     // Channel Aftertouch: status 0xDn (7-bit: data1 = pressure)
                     case 0xD0:
+                        // #region agent log
+                        debugLog("[MIDI:handleMIDIEventList] Aftertouch message")
+                        // #endregion
                         let target = aftertouchTarget
                         let scaled = ParameterRouter.scaleCCToValue(data1, for: target)
                         DispatchQueue.main.async { [weak self] in
                             self?.onParameterChange?(target, scaled)
                         }
+                        
+                    // Note On: status 0x9n
+                    case 0x90:
+                        // #region agent log
+                        debugLog("[MIDI:handleMIDIEventList] Note On: note=\(data1) velocity=\(data2)")
+                        // #endregion
+                        
+                    // Note Off: status 0x8n
+                    case 0x80:
+                        // #region agent log
+                        debugLog("[MIDI:handleMIDIEventList] Note Off: note=\(data1) velocity=\(data2)")
+                        // #endregion
 
                     default:
+                        // #region agent log
+                        debugLog("[MIDI:handleMIDIEventList] Unhandled status nibble: 0x\(String(format: "%02X", statusNibble))")
+                        // #endregion
                         break
                     }
+                } else {
+                    // #region agent log
+                    debugLog("[MIDI:handleMIDIEventList] Message type != 0x2, skipping (type was \(messageType))")
+                    // #endregion
                 }
+            } else {
+                // #region agent log
+                debugLog("[MIDI:handleMIDIEventList] Packet has no words (wordCount=\(wordCount))")
+                // #endregion
             }
             packet = MIDIEventPacketNext(&packet).pointee
         }
+        // #region agent log
+        debugLog("[MIDI:handleMIDIEventList] ===== END PACKET =====")
+        // #endregion
     }
 
     /// Route a CC message through ParameterRouter.
     /// In MIDI Learn mode, assigns the incoming CC to the learning parameter.
     private func routeCC(cc: UInt8, value: UInt8) {
+        // #region agent log
+        debugLog("[MIDI:routeCC] Routing CC#\(cc) value=\(value)")
+        // #endregion
+        
         if isLearning, let param = learningParameter {
             ccMap[cc] = param
             for (existingCC, existingParam) in ccMap where existingParam == param && existingCC != cc {
@@ -422,14 +517,28 @@ final class MIDIInputManager: ObservableObject {
             isLearning = false
             learningParameter = nil
             saveCCMap()
+            // #region agent log
+            debugLog("[MIDI:routeCC] MIDI Learn complete: CC#\(cc) -> \(param.rawValue)")
+            // #endregion
             DispatchQueue.main.async { [weak self] in
                 self?.onLearnComplete?()
             }
             return
         }
 
-        guard let param = ccMap[cc] else { return }
+        guard let param = ccMap[cc] else {
+            // #region agent log
+            debugLog("[MIDI:routeCC] CC#\(cc) not mapped - ignoring")
+            // #endregion
+            return
+        }
+        // #region agent log
+        debugLog("[MIDI:routeCC] CC#\(cc) mapped to \(param.rawValue)")
+        // #endregion
         let scaled = ParameterRouter.scaleCCToValue(value, for: param)
+        // #region agent log
+        debugLog("[MIDI:routeCC] Scaled value: \(scaled)")
+        // #endregion
         DispatchQueue.main.async { [weak self] in
             self?.onParameterChange?(param, scaled)
         }
@@ -445,9 +554,13 @@ final class MIDIInputManager: ObservableObject {
 final class OSCInputManager: ObservableObject {
 
     @Published var isEnabled: Bool = false {
-        didSet { isEnabled ? start() : stop() }
+        didSet { guard isReady else { return }; isEnabled ? start() : stop() }
     }
     @Published var port: UInt16 = 9000
+
+    /// Prevents the `isEnabled` didSet observer from starting the OSC listeners
+    /// during `init`; the one canonical start happens from `NeuralEngine.setupMIDIRouting`.
+    private var isReady: Bool = false
     @Published var lastReceivedAddress: String = ""
 
     /// Traffic monitor: last packet validity and description for Settings > OSC.
@@ -471,6 +584,11 @@ final class OSCInputManager: ObservableObject {
         isEnabled = UserDefaults.standard.bool(forKey: Self.userDefaultsEnabledKey)
         let saved = UserDefaults.standard.integer(forKey: Self.userDefaultsPortKey)
         if saved > 0 { port = UInt16(saved) }
+        // Mark the manager ready so that future `isEnabled` assignments (e.g. from
+        // the Settings toggle) actually start/stop the listeners. The initial
+        // value set above is deliberately ignored to avoid a double-start before
+        // `NeuralEngine.setupMIDIRouting` has installed the parameter callback.
+        isReady = true
     }
 
     func saveSettings() {

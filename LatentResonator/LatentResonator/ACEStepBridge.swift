@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 // MARK: - ACE-Step Bridge Client
 //
@@ -20,6 +21,7 @@ enum ACEBridgeStatus: String {
     case connected    = "CONNECTED"
     case modelLoaded  = "MODEL LOADED"
     case error        = "ERROR"
+    case recovering   = "RECOVERING"  // Auto-reconnection in progress
 }
 
 /// Response from the /health endpoint.
@@ -111,6 +113,23 @@ final class ACEStepBridge: ObservableObject {
     /// Round-trip latency of last inference call (ms).
     @Published var lastLatencyMs: Double = 0.0
 
+    // MARK: - In-Flight Request Tracking
+    //
+    // BridgeProcessManager checks this before tearing down the bridge process
+    // (profile switch, PERFORM mode entry, app quit) so it never kills the
+    // server out from under an active /infer request -- see terminateServer().
+    // A count, not a bool: multiple FeedbackLoopNodes share this one bridge
+    // and can have concurrent requests in flight. OSAllocatedUnfairLock
+    // matches the lock style already used for per-node inference gating
+    // (see FeedbackLoopNode.isInferringLock).
+
+    private let inFlightInferCount = OSAllocatedUnfairLock(initialState: 0)
+
+    /// True while at least one /infer request is awaiting a response.
+    var isInferInFlight: Bool {
+        inFlightInferCount.withLock { $0 > 0 }
+    }
+
     // MARK: - Configuration
 
     /// Base URL for the bridge server.
@@ -120,9 +139,41 @@ final class ACEStepBridge: ObservableObject {
     private let healthSession: URLSession
     private let inferSession: URLSession
 
-    /// Health polling timer.
+    /// Health polling timer. Uses dynamic intervals: boot backoff (1s → 2s → 4s → 8s → 16s)
+    /// then steady-state polling once the first successful /health returns.
     private var healthTimer: Timer?
-    private let healthInterval: TimeInterval = 10.0
+
+    /// Current health polling interval. Mutated by the boot-backoff loop.
+    private var healthPollInterval: TimeInterval = LRConstants.ACEBridge.healthPollBootIntervalInitial
+
+    /// True while the polling loop is still in exponential boot backoff.
+    private var isHealthPollingBootPhase: Bool = false
+
+    /// True when the dynamic polling loop is active (prevents redundant reconnect timers).
+    private var isHealthPollingActive: Bool = false
+
+    /// Timestamp when bridge boot was initiated (for ready-time logging).
+    var bridgeStartTime: Date?
+
+    /// Ensures the "model loaded" ready log is emitted only once per boot.
+    private var bridgeReadyLogged: Bool = false
+
+    // MARK: - Reconnection State
+
+    /// Consecutive health check failures
+    @Published var consecutiveFailures: Int = 0
+    /// Maximum failures before triggering circuit breaker
+    private let maxConsecutiveFailures = LRConstants.maxConsecutiveFailures
+    /// Whether auto-reconnection is enabled
+    private var autoReconnectEnabled = true
+    /// Current reconnection attempt (for exponential backoff)
+    private var reconnectAttempt = 0
+    /// Maximum reconnection attempts before giving up
+    private let maxReconnectAttempts = 10
+    /// Reconnection timer (separate from health timer)
+    private var reconnectTimer: Timer?
+    /// Timestamp of last successful health check
+    private var lastSuccessfulHealthCheck: Date?
 
     // MARK: - Init
 
@@ -147,40 +198,94 @@ final class ACEStepBridge: ObservableObject {
 
     deinit {
         stopHealthPolling()
+        reconnectTimer?.invalidate()
     }
 
     // MARK: - Health Polling
 
     /// Start periodic health checks to the bridge server.
+    /// Uses exponential boot backoff (1s, 2s, 4s, 8s, 16s cap) until the first
+    /// successful /health, then switches to a slower 30s steady-state poll.
     func startHealthPolling() {
-        // Immediate first check
-        Task { await checkHealth() }
+        stopHealthPolling()
+        isHealthPollingActive = true
+        bridgeReadyLogged = false
 
-        // Schedule periodic checks on the main run loop
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.healthTimer?.invalidate()
-            self.healthTimer = Timer.scheduledTimer(
-                withTimeInterval: self.healthInterval,
-                repeats: true
-            ) { [weak self] _ in
-                Task { await self?.checkHealth() }
-            }
-        }
+        // Begin boot backoff: first check after 1s, then double until 16s cap.
+        isHealthPollingBootPhase = true
+        healthPollInterval = LRConstants.ACEBridge.healthPollBootIntervalInitial
+        scheduleNextHealthCheck(after: healthPollInterval)
     }
 
     /// Stop health polling.
     func stopHealthPolling() {
         healthTimer?.invalidate()
         healthTimer = nil
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
+        isHealthPollingActive = false
+    }
+
+    /// Schedule a single fire-and-reschedule health check. The interval is
+    /// recalculated after each check so boot backoff can shrink/expand.
+    private func scheduleNextHealthCheck(after interval: TimeInterval) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.healthTimer?.invalidate()
+            self.healthTimer = Timer.scheduledTimer(
+                withTimeInterval: interval,
+                repeats: false
+            ) { [weak self] _ in
+                Task { [weak self] in
+                    await self?.healthCheckTick()
+                }
+            }
+        }
+    }
+
+    /// One polling tick: check /health, then reschedule with the appropriate interval.
+    private func healthCheckTick() async {
+        await checkHealth()
+
+        if isHealthPollingBootPhase {
+            if status == .connected || status == .modelLoaded {
+                // First successful /health: leave boot backoff and switch to steady-state.
+                isHealthPollingBootPhase = false
+                healthPollInterval = LRConstants.ACEBridge.healthPollSteadyInterval
+            } else {
+                // Server not yet ready; back off exponentially up to the cap.
+                healthPollInterval = min(
+                    healthPollInterval * 2,
+                    LRConstants.ACEBridge.healthPollBootIntervalCap
+                )
+            }
+        } else {
+            // Steady-state: long-lived bridge, infrequent polls.
+            healthPollInterval = LRConstants.ACEBridge.healthPollSteadyInterval
+        }
+
+        logBridgeReadyIfNeeded()
+        scheduleNextHealthCheck(after: healthPollInterval)
+    }
+
+    /// Emit a single structured ready line the first time the model reports loaded.
+    private func logBridgeReadyIfNeeded() {
+        guard !bridgeReadyLogged,
+              status == .modelLoaded,
+              let startTime = bridgeStartTime else { return }
+        bridgeReadyLogged = true
+        let elapsed = Date().timeIntervalSince(startTime)
+        let formatted = String(format: "%.1f", elapsed)
+        print("[Bridge:ready] ✓ Model loaded on \(remoteDevice) in \(formatted)s — full neural inference active")
     }
 
     /// Check the server's /health endpoint.
+    /// Implements exponential backoff and circuit breaker pattern for resilience.
     func checkHealth() async {
         let url = baseURL.appendingPathComponent(LRConstants.ACEBridge.healthEndpoint)
 
         await MainActor.run {
-            if status == .disconnected {
+            if status == .disconnected || status == .error {
                 status = .connecting
             }
         }
@@ -188,15 +293,24 @@ final class ACEStepBridge: ObservableObject {
         do {
             let (data, response) = try await healthSession.data(from: url)
 
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else {
-                await updateStatus(.error, error: "Server returned non-200")
+            guard let httpResponse = response as? HTTPURLResponse else {
+                await handleHealthCheckFailure(error: "Invalid response type from server")
+                return
+            }
+
+            guard httpResponse.statusCode == 200 else {
+                let errorMsg = "Server returned HTTP \(httpResponse.statusCode)"
+                await handleHealthCheckFailure(error: errorMsg)
                 return
             }
 
             let health = try JSONDecoder().decode(ACEHealthResponse.self, from: data)
 
             await MainActor.run {
+                // Success - reset failure counters
+                self.consecutiveFailures = 0
+                self.reconnectAttempt = 0
+                self.lastSuccessfulHealthCheck = Date()
                 self.isModelLoaded = health.model_loaded
                 self.remoteDevice = health.device ?? "none"
                 self.remoteModelType = health.model_type ?? "unknown"
@@ -210,8 +324,87 @@ final class ACEStepBridge: ObservableObject {
                 }
             }
         } catch {
-            await updateStatus(.disconnected, error: error.localizedDescription)
+            await handleHealthCheckFailure(error: error.localizedDescription)
         }
+    }
+
+    /// Handle health check failure with circuit breaker logic.
+    private func handleHealthCheckFailure(error: String) async {
+        await MainActor.run {
+            consecutiveFailures += 1
+            lastError = error
+
+            // Circuit breaker: too many failures
+            if consecutiveFailures >= maxConsecutiveFailures {
+                if autoReconnectEnabled && reconnectAttempt < maxReconnectAttempts {
+                    status = .recovering
+                    // When the dynamic polling loop is active, its own backoff handles
+                    // retries; scheduling a duplicate reconnect timer would create
+                    // overlapping /health calls and extra console noise.
+                    if !isHealthPollingActive {
+                        scheduleReconnection()
+                    }
+                } else {
+                    status = .error
+                    if reconnectAttempt >= maxReconnectAttempts {
+                        lastError = "Max reconnection attempts reached. Bridge unavailable."
+                    }
+                }
+            } else {
+                status = .disconnected
+            }
+        }
+    }
+
+    /// Schedule automatic reconnection with exponential backoff.
+    private func scheduleReconnection() {
+        reconnectAttempt += 1
+
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s... up to 60s max
+        let backoffSeconds = min(pow(2.0, Double(reconnectAttempt - 1)), 60.0)
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            self.reconnectTimer?.invalidate()
+            self.reconnectTimer = Timer.scheduledTimer(
+                withTimeInterval: backoffSeconds,
+                repeats: false
+            ) { [weak self] _ in
+                Task { [weak self] in
+                    await self?.attemptReconnection()
+                }
+            }
+        }
+    }
+
+    /// Attempt to reconnect to the bridge server.
+    private func attemptReconnection() async {
+        await MainActor.run {
+            status = .recovering
+        }
+
+        // Try health check again
+        await checkHealth()
+    }
+
+    /// Force immediate reconnection attempt (e.g., after manual restart).
+    func forceReconnect() {
+        reconnectAttempt = 0
+        consecutiveFailures = 0
+        autoReconnectEnabled = true
+
+        Task {
+            await checkHealth()
+            startHealthPolling()
+        }
+    }
+
+    /// Disable auto-reconnection (e.g., when user manually stops).
+    func disableAutoReconnect() {
+        autoReconnectEnabled = false
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
     }
 
     // MARK: - Inference
@@ -254,6 +447,9 @@ final class ACEStepBridge: ObservableObject {
         guard status == .connected || status == .modelLoaded else {
             throw ACEBridgeError.notConnected
         }
+
+        inFlightInferCount.withLock { $0 += 1 }
+        defer { inFlightInferCount.withLock { $0 -= 1 } }
 
         // Encode audio to WAV bytes, then base64
         let wavData = WAVCodec.encode(samples: samples, sampleRate: sampleRate)

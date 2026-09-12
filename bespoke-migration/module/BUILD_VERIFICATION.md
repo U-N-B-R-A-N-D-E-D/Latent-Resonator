@@ -116,3 +116,28 @@ Tools' `clang-format`, since no standalone `clang-format` was on `PATH`)
 before this build, and the result was hand-checked against the pre-format
 version — only whitespace/line-wrapping changed (e.g. the base class list
 collapsed onto one line, ternary re-indentation), no logic was altered.
+
+## 5. Known gap: subprocess lifecycle parity with `BridgeProcessManager.swift`
+
+This module's process-lifecycle logic (`LaunchBridgeProcess`, `ShutdownBridge`,
+the worker thread's health-check loop) was ported from a version of
+`BridgeProcessManager.swift` that predates the app's current `v2.0.0` code by
+a substantial margin — a later diff comparison found ~465 added lines in that
+file that this module does not yet have equivalents for, chiefly:
+
+- Auto-installing and repairing the `ace_step` Python package on first run
+  (multi-strategy import probing, dependency reinstall, git clone/update
+  fallback if the package is missing entirely).
+- Filtering macOS network-stack log noise (`nw_socket_*`, `nw_endpoint_*`,
+  etc.) out of the bridge's captured output so real server logs aren't
+  buried.
+
+What this module *does* correctly implement — subprocess launch via
+`juce::ChildProcess`, `/health` polling on a background thread, and a
+graceful `/shutdown` POST before process teardown — is a faithful port of
+the core pattern and was verified against the real, current bridge server
+(see the top-level `bespoke-migration/ace-bridge/` extraction). The
+auto-install/log-filtering behavior above is additional robustness this
+module does not yet replicate; it's a reasonable follow-up, not a blocker
+for the module to be useful today (the target machine already has a working
+`.venv-ace-bridge/` in every case this has been exercised).
