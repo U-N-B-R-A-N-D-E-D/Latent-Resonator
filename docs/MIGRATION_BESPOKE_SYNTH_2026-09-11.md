@@ -1,191 +1,189 @@
-# Migración completa a Bespoke Synth — 2026-09-11
+# Full Migration to Bespoke Synth — 2026-09-11
 
-## Por qué
+## Why
 
-El canvas nativo (SwiftUI, custom `GraphAudioEngine` → `ExecutionPlan` → `DSPNode`) es la
-fuente del dolor actual: UX pobre, sin fluidez de nodos, lag, trabas. Cuatro meses de
-trabajo fueron a resolver un problema (patching visual en tiempo real) que ya está resuelto
-hace 20+ años en otro lado. Lo que sí funciona y no tiene por qué tirarse es la mitad
-"neuronal": el bridge Python a ACE-Step (15/15 tests) y el concepto de resonador
-recursivo del whitepaper. Ver `docs/whitepaper.md` para la fórmula `S(i+1) = ACE(S(i) +
-N(μ,σ), P, γ)`.
+The native canvas (SwiftUI, custom `GraphAudioEngine` → `ExecutionPlan` → `DSPNode`) is
+the source of the current pain: poor UX, no smooth node interaction, lag, freezes. Four
+months of work went into solving a problem (real-time visual patching) that has already
+been solved elsewhere for 20+ years. What does work and doesn't deserve to be thrown away
+is the "neural" half: the Python bridge to ACE-Step (9/9 tests) and the recursive
+resonator concept from the whitepaper. See `docs/whitepaper.md` for the formula
+`S(i+1) = ACE(S(i) + N(mu,sigma), P, gamma)`.
 
-Decisión: migrar todo a **Bespoke Synth** (github.com/BespokeSynth/BespokeSynth, GPL-3,
-activo — último update jun 2026) como base sobre la que corre **nuestro** proyecto.
-Esto es un fork/build propio, no una contribución al proyecto de Cycling/BespokeSynth —
-no se abre PR ni se coordina con su Discord. Ya existe precedente técnico directo del
-patrón que necesitamos: un módulo **StableAudio3** (mayo 2026) genera audio desde un
-prompt vía modelo neural, embebido como nodo del patch — lo usamos como referencia de
-implementación real, no como aval de nadie.
+Decision: migrate everything onto **Bespoke Synth** (github.com/BespokeSynth/BespokeSynth,
+GPL-3, active — last update June 2026) as the foundation **our own** project runs on.
+This is our own fork/build, not a contribution to Cycling/BespokeSynth's project — no
+PR is opened and nothing is coordinated on their Discord. There is already direct
+technical precedent for the pattern we need: a **StableAudio3** module (May 2026)
+generates audio from a prompt via a neural model, embedded as a patch node — we use it
+as a real implementation reference, not as anyone's endorsement.
 
-Dato de arquitectura clave (confirmado con research, no supuesto): el cuello de botella
-real es la inferencia de ACE-Step en sí (CPU local), no el host. Ningún entorno —Bespoke,
-Cardinal, Pd— corre un modelo de difusión de audio en el audio callback. El patrón
-validado por la industria (ver ANIRA, arXiv:2506.12665) es desacoplar la inferencia a un
-thread pool y devolver el resultado a un ring buffer lock-free — exactamente lo que ya
-hace `BridgeProcessManager.swift` de forma artesanal. Migrar no es resolver un problema
-nuevo, es portar una solución que ya probamos, a un host con mejor UX.
+Key architectural fact (confirmed by research, not assumed): the real bottleneck is
+ACE-Step's own inference (local CPU), not the host. No environment — Bespoke, Cardinal,
+Pd — runs an audio diffusion model inside the audio callback. The pattern validated by
+the industry (see ANIRA, arXiv:2506.12665) is decoupling inference to a thread pool and
+handing the result back through a lock-free ring buffer — exactly what
+`BridgeProcessManager.swift` already does by hand. Migrating isn't solving a new problem,
+it's porting a solution we already proved, to a host with better UX.
 
-Confirmado en el propio código fuente de Bespoke Synth (`Source/` del repo, vía API de
-GitHub): ya trae **Python embebido de fábrica** —
-`Source/ScriptModule_PythonInterface.i` (bindings SWIG) + `Source/cmake/bundle-python.cmake`
-(empaqueta un runtime Python con la app). Python no es un invitado ahí, es parte del
-build oficial. Esto abre una segunda vía de integración (ver Fase 3, opción B) además de la
-vía por subprocess+HTTP que ya tenemos probada.
+Confirmed in Bespoke Synth's own source (`Source/` of the repo, via the GitHub API): it
+already ships **embedded Python out of the box** —
+`Source/ScriptModule_PythonInterface.i` (pybind11 bindings) +
+`Source/cmake/bundle-python.cmake` (bundles a Python runtime with the app). Python isn't
+a guest there, it's part of the official build. This opens a second integration path
+(see Phase 3, option B) in addition to the subprocess+HTTP path we've already proven.
 
 ---
 
-## Qué es "jugo real" (se preserva) vs. "spam" (se descarta)
+## What's "real juice" (kept) vs. "spam" (dropped)
 
-### Real — se porta o se reusa tal cual
+### Real — ported or reused as-is
 
-| Pieza | Ruta actual | Destino |
+| Piece | Current path | Destination |
 |---|---|---|
-| Servidor del bridge (Flask/waitress, WAV codec, endpoints `/health` `/status` `/infer` `/shutdown`) | `LatentResonator/LatentResonator/Scripts/ace_bridge_server.py` (994 líneas) | Se copia **sin tocar** a un repo/carpeta nueva `ace-bridge/`. Es puro Python, cero dependencia de Swift. |
-| Suite de tests del bridge (15/15) | `.../Scripts/test_bridge.py` | Se copia sin tocar. Sigue siendo el gate de regresión del lado Python, sin importar el host. |
-| Setup/env | `requirements_bridge.txt`, `setup_ace_bridge.sh`, `.venv-ace-bridge/` | Sin tocar. |
-| Modelo vendoreado | `ACE-Step/` (repo completo del proyecto upstream) | Sin tocar. |
-| **Lógica de ciclo de vida del proceso** (descubrir modelo, instalar paquete si falta, descargar modelo si falta, poll de health-check, shutdown gracioso esperando inferencias en vuelo, kill-by-port de fallback) | `BridgeProcessManager.swift` (1097 líneas) | **No se porta el Swift** — se porta el *comportamiento*, ya validado en producción, a C++ dentro del nuevo módulo (Fase 3). Este archivo es la especificación, no el artefacto final. |
-| Concepto del resonador recursivo, formalismo §3.3/§6.1 | `docs/whitepaper.md` (361 líneas) | Se mantiene como doc de diseño canónico; se adapta a README del módulo nuevo. |
-| Prior art de comportamiento pinneado en tests Swift (21 TODOs deliberados, edge cases de `AudioPipelineValidator`/`ParameterRouterController`) | `LatentResonatorTests/*` | Se usa como checklist de verificación manual en Fase 4 — **no se porta código**, la mayoría de estos TODOs directamente dejan de aplicar (el grafo de Bespoke ya maneja disconnected-nodes, mixer, etc. nativamente). |
+| Bridge server (Flask/waitress, WAV codec, `/health` `/status` `/infer` `/shutdown` endpoints) | `LatentResonator/LatentResonator/Scripts/ace_bridge_server.py` (994 lines) | Copied **unmodified** into a new `ace-bridge/` folder/repo. Pure Python, zero Swift dependency. |
+| Bridge test suite (9/9) | `.../Scripts/test_bridge.py` | Copied unmodified. Remains the Python-side regression gate regardless of host. |
+| Setup/env | `requirements_bridge.txt`, `setup_ace_bridge.sh`, `.venv-ace-bridge/` | Unmodified. |
+| Vendored model | `ACE-Step/` (full upstream project repo) | Unmodified. |
+| **Process lifecycle logic** (discover model, install package if missing, download model if missing, health-check polling, graceful shutdown waiting on in-flight inference, kill-by-port fallback) | `BridgeProcessManager.swift` (1097 lines) | **The Swift is not ported** — the already production-validated *behavior* is ported to C++ inside the new module (Phase 3). This file is the specification, not the final artifact. |
+| Recursive resonator concept, §3.3/§6.1 formalism | `docs/whitepaper.md` (361 lines) | Kept as the canonical design doc; adapted into the new module's README. |
+| Behavior prior art pinned in Swift tests (21 deliberate TODOs, edge cases in `AudioPipelineValidator`/`ParameterRouterController`) | `LatentResonatorTests/*` | Used as a manual verification checklist in Phase 4 — **no code is ported**; most of these TODOs simply stop applying (Bespoke's own graph already handles disconnected nodes, mixing, etc. natively). |
 
-### Spam — se descarta sin culpa
+### Spam — dropped without regret
 
-- Todo el canvas SwiftUI: `PatchCanvasView`, `CableLayer`, `NodeCardChrome`, node cards
-  (Oscillator/Delay/LadderFilter/Mixer/MasterOutput/etc.).
-- El motor de grafo custom: `GraphAudioEngine`, `ExecutionPlan`, `DSPNode`, `NodeGraph`.
+- The entire SwiftUI canvas: `PatchCanvasView`, `CableLayer`, `NodeCardChrome`, node
+  cards (Oscillator/Delay/LadderFilter/Mixer/MasterOutput/etc.).
+- The custom graph engine: `GraphAudioEngine`, `ExecutionPlan`, `DSPNode`, `NodeGraph`.
 - `NeuralEngine.swift` (god-class), `ParameterRouterController.swift`,
-  `AudioPipelineValidator.swift`, `MacroMixerController`, macro controllers, gesture recording,
-  Motherbase/crossfader de escenas.
-- `ACEStepBridge.swift` (el wrapper Swift del bridge — se reemplaza por el nuevo módulo C++).
-- `stash@{0}` ("epitaxy: pre-switch") — confirmado muerto en la revisión anterior, se dropea.
-- `LatentResonator.xcodeproj`, carpetas `dist/*.app` viejas — se archivan, no se migran.
-- Los 122 tests Swift — no portables (prueban un motor que deja de existir). Se leen una
-  vez como espec de comportamiento (Fase 4) y después se retiran con el resto del engine.
+  `AudioPipelineValidator.swift`, `MacroMixerController`, macro controllers, gesture
+  recording, Motherbase/scene crossfader.
+- `ACEStepBridge.swift` (the Swift bridge wrapper — replaced by the new C++ module).
+- `stash@{0}` ("epitaxy: pre-switch") — confirmed dead in the prior review, dropped.
+- `LatentResonator.xcodeproj`, old `dist/*.app` folders — archived, not migrated.
+- The 122 Swift tests — not portable (they test an engine that stops existing). Read
+  once as a behavior spec (Phase 4), then retired along with the rest of the engine.
 
 ---
 
-## Fases
+## Phases
 
-### Fase 0 — Esto es nuestro fork, no una contribución a Bespoke
+### Phase 0 — This is our fork, not a contribution to Bespoke
 
-Bespoke no carga módulos externos — todo vive compilado dentro del propio binario. Eso
-significa que técnicamente el único camino para tener `ModuleACEResonator` corriendo es
-un **fork propio**, con nuestro módulo agregado a su árbol de fuentes y compilado como
-parte de nuestro propio binario. Eso es exactamente lo que hicimos y lo que seguimos
-haciendo — **no** hay intención de PR a `BespokeSynth/BespokeSynth`, ni de coordinar nada
-en su Discord. Su código sigue siendo de ellos (GPL-3, Copyright Ryan Challinor); nosotros
-mantenemos nuestro propio fork/build con el módulo agregado, para uso propio.
+Bespoke doesn't load external modules — everything lives compiled inside the binary
+itself. That means the only real path to running `ModuleACEResonator` is **our own
+fork**, with our module added to its source tree and compiled as part of our own
+binary. That is exactly what we did and continue to do — there is **no** intent to PR
+`BespokeSynth/BespokeSynth`, nor to coordinate anything on their Discord. Their code
+remains theirs (GPL-3, Copyright Ryan Challinor); we maintain our own fork/build with
+the module added, for our own use.
 
-Implicancia real (no de comunidad, de licencia): Bespoke Synth es GPL-3. Si en algún
-momento distribuimos un binario compilado de nuestro fork fuera de esta organización,
-la GPL-3 nos obliga a poner el código fuente completo de ese fork a disposición de quien
-lo reciba. Esto no bloquea nada hoy (todo el trabajo vive en nuestro propio repo, público),
-pero es una obligación real a tener presente antes de un release binario, no un detalle
-de cortesía.
+Real implication (a licensing fact, not a community courtesy): Bespoke Synth is GPL-3.
+If we ever distribute a compiled binary of our fork, GPL-3 obligates us to make that
+fork's full source available to whoever receives it. This doesn't block anything today
+(all the work lives in our own public repo), but it's a real obligation to keep in mind
+before a binary release, not a nicety.
 
-### Fase 1 — Congelar el "jugo real" en un paquete host-agnóstico
+### Phase 1 — Freeze the "real juice" into a host-agnostic package
 
-- Extraer `ace_bridge_server.py`, `test_bridge.py`, `requirements_bridge.txt`,
-  `setup_ace_bridge.sh` a una carpeta/repo independiente `ace-bridge/` (o repo propio,
-  a decidir).
-- Correr `test_bridge.py` de forma standalone, sin nada de Swift en el path — confirma
-  que esta pieza **nunca dependió realmente del host**, lo cual valida que la migración
-  de UI no arriesga esta parte.
-- Congelar `docs/whitepaper.md` como está; no tocar la fórmula ni el fundamento teórico.
+- Extract `ace_bridge_server.py`, `test_bridge.py`, `requirements_bridge.txt`,
+  `setup_ace_bridge.sh` into an independent `ace-bridge/` folder/repo (repo split TBD).
+- Run `test_bridge.py` standalone, with no Swift anywhere on the path — confirms this
+  piece **never actually depended on the host**, which validates that the UI migration
+  doesn't put it at risk.
+- Freeze `docs/whitepaper.md` as-is; don't touch the formula or the theoretical
+  foundation.
 
-### Fase 2 — Bootstrap del build de Bespoke Synth (sanity check antes de programar)
+### Phase 2 — Bootstrap the Bespoke Synth build (sanity check before coding)
 
 ```bash
-git clone https://github.com/BespokeSynth/BespokeSynth   # o tu fork
+git clone https://github.com/BespokeSynth/BespokeSynth   # or your fork
 cd BespokeSynth
 git submodule update --init --recursive
 cmake -Bignore/build -DCMAKE_BUILD_TYPE=Release
 cmake --build ignore/build --parallel 4 --config Release
 ```
 
-Confirmar que compila limpio ANTES de escribir el módulo nuevo. Mientras tanto, leer:
-- `Source/IAudioProcessor.h` / `.cpp` — clase base de todo módulo de audio.
-- `Source/ModuleContainer.h` — cómo el host registra/orquesta módulos.
-- `Source/ScriptModule.cpp` / `ScriptModule_PythonInterface.i` — el Python embebido, para
-  evaluar la opción B de la Fase 3.
-- Un módulo comparable ya existente en su árbol de fuentes (ideal: el propio
-  `StableAudio3`, o `SamplePlayer` como ya se usó) como referencia de estilo real,
-  no inventado.
+Confirm it builds clean BEFORE writing the new module. Meanwhile, read:
+- `Source/IAudioProcessor.h` / `.cpp` — base class of every audio module.
+- `Source/ModuleContainer.h` — how the host registers/orchestrates modules.
+- `Source/ScriptModule.cpp` / `ScriptModule_PythonInterface.i` — the embedded Python,
+  to evaluate Phase 3's option B.
+- An existing comparable module in its source tree (ideally `StableAudio3` itself, or
+  `SamplePlayer`, as already used) as a real style reference, not an invented one.
 
-### Fase 3 — Portar el ciclo de vida del bridge a un módulo nuevo
+### Phase 3 — Port the bridge's lifecycle into a new module
 
-Nuevo módulo: `Source/ModuleACEResonator.cpp/h`, hereda de `IAudioProcessor`.
+New module: `Source/ModuleACEResonator.cpp/h`, inherits `IAudioProcessor`.
 
-**Opción A — subprocess + HTTP (recomendada para el primer landing, menor riesgo):**
-- Reusa `ace_bridge_server.py` sin modificar.
-- Porta *el comportamiento* (no el código) de `BridgeProcessManager.swift` a C++:
-  descubrimiento de modelo, instalación/descarga si falta, poll de `/health`, `/infer`
-  disparado en background thread (nunca en el audio callback — mismo patrón validado por
-  ANIRA), shutdown gracioso vía `/shutdown` esperando inferencias en vuelo, kill-by-port
-  de fallback. Usar `juce::ChildProcess` (Bespoke es JUCE-based) en vez de
+**Option A — subprocess + HTTP (recommended for the first landing, lowest risk):**
+- Reuses `ace_bridge_server.py` unmodified.
+- Ports *the behavior* (not the code) of `BridgeProcessManager.swift` to C++: model
+  discovery, install/download if missing, `/health` polling, `/infer` fired on a
+  background thread (never on the audio callback — same pattern validated by ANIRA),
+  graceful shutdown via `/shutdown` waiting on in-flight inference, kill-by-port
+  fallback. Use `juce::ChildProcess` (Bespoke is JUCE-based) instead of
   `Process`/`URLSession`.
-- El resultado (WAV bytes) se decodifica y se escribe a un ring buffer lock-free que
-  `Process()` drena en cada callback de audio — esta es la reimplementación real de
-  `S(i+1) = ACE(S(i)+N(μ,σ), P, γ)` como nodo de Bespoke.
-- UI mínima estilo Bespoke (ImGui): campo de prompt, knobs para γ/μ/σ, botón de trigger.
+- The result (WAV bytes) is decoded and written into a lock-free ring buffer that
+  `Process()` drains every audio callback — this is the real reimplementation of
+  `S(i+1) = ACE(S(i)+N(mu,sigma), P, gamma)` as a Bespoke node.
+- Minimal Bespoke-style UI: prompt field, mu/sigma/gamma knobs, trigger button.
 
-**Opción B — Python embebido nativo (explorar después, no bloquea el v1):**
-- Usar el `ScriptModule` existente para llamar ACE-Step in-process, sin Flask ni subprocess.
-- Riesgo real: el intérprete embebido de Bespoke tiene su propio Python empaquetado
-  (`bundle-python.cmake`) — instalar torch + deps de ACE-Step ahí puede chocar con lo que
-  ya tenemos andando en `.venv-ace-bridge/`. Se evalúa como v2 una vez que la Opción A esté
-  funcionando de punta a punta en nuestro fork.
+**Option B — native embedded Python (explore later, doesn't block v1):**
+- Use the existing `ScriptModule` to call ACE-Step in-process, no Flask, no subprocess.
+- Real risk: Bespoke's embedded interpreter has its own bundled Python
+  (`bundle-python.cmake`) — installing torch + ACE-Step's deps there could conflict with
+  what's already working in `.venv-ace-bridge/`. Evaluated as v2 once option A is
+  working end to end in our fork.
 
-### Fase 4 — Validar contra el comportamiento viejo, no contra el código viejo
+### Phase 4 — Validate against the old behavior, not the old code
 
-- Releer los 21 TODOs de producción de `ParameterRouterController.swift` /
-  `AudioPipelineValidator.swift` / `NeuralEngine.swift` como checklist: confirmar cuáles
-  ya no aplican (el grafo/mixer de Bespoke los resuelve nativamente) y cuáles, si alguno,
-  siguen siendo responsabilidad del nuevo módulo.
-- Gate de regresión: `test_bridge.py` sigue en 15/15, sin tocar.
-- Smoke test manual: levantar Bespoke, agregar el módulo nuevo, disparar `/infer`, confirmar
-  arranque/cierre limpio del subprocess sin huérfanos — la misma barra de verificación que
-  ya se usó para el `.app` de Swift.
+- Re-read the 21 production TODOs in `ParameterRouterController.swift` /
+  `AudioPipelineValidator.swift` / `NeuralEngine.swift` as a checklist: confirm which no
+  longer apply (Bespoke's own graph/mixer natively handles them) and which, if any,
+  remain the new module's responsibility.
+- Regression gate: `test_bridge.py` stays at 9/9, unmodified.
+- Manual smoke test: launch Bespoke, add the new module, fire `/infer`, confirm clean
+  subprocess start/stop with no orphaned processes — the same verification bar already
+  used for the Swift `.app`.
 
-### Fase 5 — Nuestro propio fork/release, sin PR a nadie
+### Phase 5 — Our own fork/release, no PR to anyone
 
-- Pasar `clang-format` (el propio `.clang-format` del repo) — buena práctica de código,
-  no un requisito de aprobación externa.
-- Mantener el fork de Bespoke Synth con `ModuleACEResonator` agregado como el build que
-  usamos y distribuimos nosotros. Documentar claramente en el README de ese fork que los
-  pesos del modelo NO se bundlean (son locales, no van en git) — mismo criterio que ya
-  usábamos para el repo Swift.
-- Si en algún momento tiene sentido compartir el módulo con el proyecto original, es una
-  decisión de producto a evaluar más adelante — no un paso de este plan.
+- Run `clang-format` (the repo's own `.clang-format`) — good code hygiene, not a
+  requirement for external approval.
+- Maintain the Bespoke Synth fork with `ModuleACEResonator` added as the build we use
+  and distribute ourselves. Clearly document in that fork's README that model weights
+  are NOT bundled (they're local, not committed) — same criterion already used for the
+  Swift repo.
+- If sharing the module with the original project ever makes sense, that's a product
+  decision to evaluate later — not a step in this plan.
 
-### Fase 6 — Dar de baja el repo Swift
+### Phase 6 — Decommission the Swift repo
 
-- Taguear el estado final (`v2.0-final-native-canvas`) antes de archivar — no se borra
-  historia.
-- Dropear `stash@{0}` (ya confirmado muerto en la revisión anterior).
-- Retirar `LatentResonator.xcodeproj`, el canvas SwiftUI, el motor de grafo custom y los
-  122 tests Swift asociados.
-- Actualizar el `README.md` raíz para apuntar a nuestro fork de Bespoke Synth (con
-  `ModuleACEResonator` incorporado) como proyecto vivo, enlazando `docs/whitepaper.md`
-  como fundamento conceptual.
+- Tag the final state (`v2.0-final-native-canvas`) before archiving — history is not
+  deleted.
+- Drop `stash@{0}` (already confirmed dead in the prior review).
+- Retire `LatentResonator.xcodeproj`, the SwiftUI canvas, the custom graph engine, and
+  the associated 122 Swift tests.
+- Update the root `README.md` to point at our Bespoke Synth fork (with
+  `ModuleACEResonator` folded in) as the live project, linking `docs/whitepaper.md` as
+  the conceptual foundation.
 
 ---
 
-## Riesgos a vigilar
+## Risks to watch
 
-- **Licencia GPL-3 de Bespoke Synth**: al usar su código como base de nuestro fork,
-  cualquier binario que distribuyamos de ese fork queda sujeto a GPL-3 — código fuente
-  completo disponible para quien lo reciba. No es un tema de "pedir permiso", es una
-  obligación legal a cumplir al momento de un release, no antes.
-- **CPU local sigue siendo el techo real**: migrar de host no cambia la velocidad de
-  inferencia de ACE-Step en CPU. Si la latencia por bloque sigue siendo alta, el patrón
-  ring-buffer + thread pool la absorbe (no bloquea el audio), pero la "sensación" de
-  resonador recursivo en vivo depende de conseguir GPU en algún momento — esto es
-  independiente de la migración y no lo resuelve por sí sola.
-- **Opción B (Python embebido) es la más incierta** — no evaluar hasta tener Opción A
-  funcionando de punta a punta en nuestro fork.
-- **Mantener un fork implica arrastrar sus futuros cambios manualmente** (rebase/merge
-  periódico contra `BespokeSynth/BespokeSynth` upstream si queremos sus mejoras) — costo
-  de mantenimiento a largo plazo que no existía con el canvas 100% propio, a cambio de no
-  tener que mantener nosotros mismos un motor de UI de audio en tiempo real.
+- **Bespoke Synth's GPL-3 license**: by using its code as our fork's base, any binary
+  we distribute from that fork is subject to GPL-3 — full source code available to
+  whoever receives it. This isn't about "asking permission," it's a legal obligation to
+  satisfy at release time, not before.
+- **Local CPU remains the real ceiling**: migrating hosts doesn't change ACE-Step's
+  inference speed on CPU. If per-block latency stays high, the ring-buffer + thread-pool
+  pattern absorbs it (audio never blocks), but the live "feel" of the recursive
+  resonator depends on getting a GPU at some point — that's independent of the migration
+  and isn't solved by it alone.
+- **Option B (embedded Python) is the least certain** — don't evaluate it until option A
+  is working end to end in our fork.
+- **Maintaining a fork means manually pulling in their future changes** (periodic
+  rebase/merge against `BespokeSynth/BespokeSynth` upstream if we want their
+  improvements) — a long-term maintenance cost that didn't exist with the fully custom
+  canvas, in exchange for not having to maintain a real-time audio UI engine ourselves.
