@@ -49,6 +49,56 @@ namespace
    {
       juce::String(value).copyToUTF8(dest, MAX_TEXTENTRY_LENGTH);
    }
+
+   // A GUI app launched via Finder/`open` gets the minimal PATH launchd
+   // provides (no Homebrew, no pyenv) -- a bare "python3" that resolves fine
+   // from a Terminal shell silently fails to launch here. Resolve an
+   // absolute path instead: prefer a venv sitting next to the bridge script
+   // (the layout setup_ace_bridge.sh creates), then fall back to the same
+   // common absolute install locations the project's own Swift bridge
+   // manager already searched.
+   juce::String ResolveBridgePythonExecutable(const juce::String& scriptPath)
+   {
+      juce::File script(scriptPath);
+      juce::File venvPython = script.getParentDirectory().getChildFile(".venv-ace-bridge/bin/python3");
+      if (venvPython.existsAsFile())
+         return venvPython.getFullPathName();
+
+      static const char* kCandidates[] = {
+         "/opt/homebrew/bin/python3.12",
+         "/opt/homebrew/bin/python3.11",
+         "/usr/local/bin/python3",
+         "/usr/bin/python3",
+         "/opt/homebrew/bin/python3",
+      };
+      for (auto* candidate : kCandidates)
+      {
+         if (juce::File(candidate).existsAsFile())
+            return juce::String(candidate);
+      }
+
+      return "python3"; // last resort -- may still work if PATH happens to be set up
+   }
+
+   // A relative default ("ace-bridge/ace_bridge_server.py") only resolves
+   // against whatever working directory the OS happened to launch this
+   // process with -- unpredictable for a Finder/`open`-launched .app, and
+   // not necessarily where anyone actually placed the bridge folder.
+   // Instead, look for ace-bridge/ as a sibling of the running executable
+   // (that's where it's placed in this project's own build/package steps)
+   // and default to its absolute path when found; fall back to the old
+   // relative guess only if that lookup fails.
+   juce::String ResolveDefaultScriptPath()
+   {
+      juce::File exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+      // exe = .../BespokeSynth.app/Contents/MacOS/BespokeSynth
+      juce::File appBundle = exe.getParentDirectory().getParentDirectory().getParentDirectory();
+      juce::File sibling = appBundle.getParentDirectory().getChildFile("ace-bridge/ace_bridge_server.py");
+      if (sibling.existsAsFile())
+         return sibling.getFullPathName();
+
+      return kDefaultScriptPath;
+   }
 }
 
 // Owns every blocking operation the module needs (health polling, the /infer
@@ -321,7 +371,7 @@ ModuleACEResonator::ModuleACEResonator()
 , mInputSnapshot(int(kMaxSnapshotSeconds * gSampleRate))
 , mRandomEngine(std::random_device{}())
 {
-   SetCString(mScriptPathBuffer, kDefaultScriptPath);
+   SetCString(mScriptPathBuffer, ResolveDefaultScriptPath().toStdString());
    SetCString(mHostBuffer, kDefaultHost);
 
    mPlaybackScratch.resize(gBufferSize);
@@ -354,6 +404,11 @@ void ModuleACEResonator::CreateUIControls()
    TEXTENTRY_NUM(mPortEntry, "port", 6, &mPort, 1, 65535);
    UIBLOCK_NEWLINE();
    ENDUIBLOCK(mWidth, mHeight);
+
+   // DrawModule() draws the status line below the last control row at a
+   // fixed offset from the bottom -- without this, that text overlaps the
+   // host/port fields instead of sitting under them.
+   mHeight += 18;
 }
 
 void ModuleACEResonator::Init()
@@ -383,8 +438,10 @@ void ModuleACEResonator::LaunchBridgeProcess()
       mBridgeProcess = nullptr;
    }
 
+   juce::String pythonExecutable = ResolveBridgePythonExecutable(juce::String(mScriptPathBuffer));
+
    juce::StringArray args;
-   args.add("python3");
+   args.add(pythonExecutable);
    args.add(juce::String(mScriptPathBuffer));
    args.add("--host");
    args.add(juce::String(mHostBuffer));
@@ -395,7 +452,8 @@ void ModuleACEResonator::LaunchBridgeProcess()
    bool success = mBridgeProcess->start(args);
    if (!success)
    {
-      ofLog() << "ModuleACEResonator: failed to launch ACE bridge process";
+      ofLog() << "ModuleACEResonator: failed to launch ACE bridge process (tried '" << pythonExecutable << "')";
+      SetStatusMessage("failed to launch bridge: '" + pythonExecutable.toStdString() + "' not found");
       delete mBridgeProcess;
       mBridgeProcess = nullptr;
    }
