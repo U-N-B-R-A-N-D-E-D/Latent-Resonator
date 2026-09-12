@@ -6,6 +6,10 @@ All notable changes to Latent Resonator are documented here.
 
 Working-tree summary ahead of owner commit. Shipped v2 pull-render architecture (`GraphAudioEngine` → `ExecutionPlan` → `DSPNode`, native `PatchCanvasView`); this entry closes the perimeter roadmap (`docs/ROADMAP_PERIMETER_2026-07-21.md`) and documents concurrent canvas/PERFORM work.
 
+### Fixed (2026-09-11)
+
+- **SIGTERM/SIGINT orphaning the Python bridge process** — `LatentResonatorApp` only wired bridge cleanup to `NSApplication.willTerminateNotification`, which AppKit posts solely on its own graceful-quit path (Cmd+Q, Dock Quit). A raw `kill`, a crash, or an external supervisor sent SIGTERM directly and bypassed that notification, leaving `ace_bridge_server.py` running as an orphan. Added `DispatchSourceSignal` handlers for `SIGTERM`/`SIGINT` in `LatentResonatorApp.init()` (standard GCD pattern: `signal(sig, SIG_IGN)` before creating the dispatch source) that call the same `shutdownAll()` already used by the graceful path. Verified with a real `kill -TERM` against the running app: no orphaned process afterward, confirmed via `ps`.
+
 ### Perimeter engine wiring
 
 - **`SpectralAnalyzerNode`** — Conforms `DSPNode`; participates in `ExecutionPlan` (live centroid/flatness/flux for cybernetic feedback).
