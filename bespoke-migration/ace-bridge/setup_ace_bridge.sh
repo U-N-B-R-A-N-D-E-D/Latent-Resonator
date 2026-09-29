@@ -7,15 +7,13 @@
 # Creates a virtual environment, installs dependencies, optionally downloads
 # the ACE-Step model, and starts the bridge server.
 #
-# Model types (ACE-Step 1.5):
-#   base  — CFG + lego/extract/complete tasks (DEFAULT; broadest task support)
-#   sft   — CFG supported, 50 steps, high quality
-#   turbo — 8 steps, NO CFG, fast (fine for quick checks, not for CFG-dependent use)
+# Supported model: ACE-Step v1 3.5B, the checkpoint the bridge is tested with.
+# The ACE-Step pipeline itself downloads the checkpoint (about 7.7 GB) into the
+# model directory the first time the server loads it.
 #
 # Usage:
 #   ./setup_ace_bridge.sh                            # Setup + start (no model)
-#   ./setup_ace_bridge.sh --with-model               # Setup + download Base model + start
-#   ./setup_ace_bridge.sh --with-model --model-type sft   # Download SFT variant
+#   ./setup_ace_bridge.sh --with-model               # Setup + prepare the model directory + start
 #   ./setup_ace_bridge.sh --start-only               # Skip setup, just start server
 #   ./setup_ace_bridge.sh --help                     # Show help
 # ============================================================================
@@ -34,36 +32,30 @@ PROJECT_ROOT="$SCRIPT_DIR"
 VENV_DIR="$PROJECT_ROOT/.venv-ace-bridge"
 REQUIREMENTS="$SCRIPT_DIR/requirements_bridge.txt"
 SERVER_SCRIPT="$SCRIPT_DIR/ace_bridge_server.py"
-MODELS_ROOT="$PROJECT_ROOT/models"
+if [[ -d "$SCRIPT_DIR/../BespokeSynth.app" ]]; then
+    MODELS_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)/models"
+else
+    MODELS_ROOT="$PROJECT_ROOT/models"
+fi
+ACE_STEP_COMMIT="6ae0852b1388de6dc0cca26b31a86d711f723cb3"
 DEFAULT_PORT=8976
 DEFAULT_HOST="127.0.0.1"
 
 # ---------------------------------------------------------------------------
-# ACE-Step 1.5 Model Registry
+# Model registry
 # ---------------------------------------------------------------------------
-# Maps --model-type to HuggingFace repo ID and local directory name.
-# Default is "base", for its broader CFG and task support.
-#
-# If HuggingFace repo names change, update only these arrays.
+# The bridge loads ACE-Step v1 3.5B. Other ACE-Step variants are not supported
+# by the pipeline the bridge imports. The directory name matches the default
+# the Bespoke module looks for: <folder containing the app>/models/ace-step.
 # ---------------------------------------------------------------------------
 
 DEFAULT_MODEL_TYPE="base"
 
-# Resolve HuggingFace repo ID and local dir suffix from model type.
-# Compatible with macOS bash 3.2 (no associative arrays).
 resolve_model_registry() {
     case "$1" in
         base)
-            HF_MODEL_ID="ACE-Step/Ace-Step1.5"
-            MODEL_DIR_SUFFIX="ace-step-v1.5-base"
-            ;;
-        sft)
-            HF_MODEL_ID="ACE-Step/acestep-v15-sft"
-            MODEL_DIR_SUFFIX="ace-step-v1.5-sft"
-            ;;
-        turbo)
-            HF_MODEL_ID="ACE-Step/acestep-v15-turbo-continuous"
-            MODEL_DIR_SUFFIX="ace-step-v1.5-turbo"
+            HF_MODEL_ID="ACE-Step/ACE-Step-v1-3.5B"
+            MODEL_DIR_SUFFIX="ace-step"
             ;;
         *)
             return 1
@@ -98,12 +90,10 @@ Usage:
   $(basename "$0") [OPTIONS]
 
 Options:
-  --with-model         Download ACE-Step 1.5 model from HuggingFace
-  --model-type TYPE    Model variant: base (default), sft, turbo
-                         base  — CFG + lego/extract/complete (broadest support, default)
-                         sft   — CFG supported, high quality
-                         turbo — NO CFG, fast (not recommended)
-  --model-path PATH    Use a custom model path instead of downloading
+  --with-model         Use the default model directory; the ACE-Step pipeline
+                       downloads the v1 3.5B checkpoint (~7.7 GB) into it on
+                       first load
+  --model-path PATH    Use a custom model directory instead
   --start-only         Skip environment setup, just start the server
   --port PORT          Server port (default: $DEFAULT_PORT)
   --host HOST          Server bind host (default: $DEFAULT_HOST)
@@ -114,11 +104,8 @@ Examples:
   # First-time setup (no model — server runs in passthrough mode)
   $(basename "$0")
 
-  # Full setup with Base model download (~7GB, recommended)
+  # Full setup; the checkpoint (~7.7 GB) downloads on first server start
   $(basename "$0") --with-model
-
-  # Download the SFT variant instead
-  $(basename "$0") --with-model --model-type sft
 
   # Start server with existing model at custom path
   $(basename "$0") --start-only --model-path /path/to/model
@@ -196,10 +183,7 @@ echo -e "${CYAN}║            Neural Audio Inference Service            ║${NC
 echo -e "${CYAN}║                                                      ║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
-log_info "Model type: ${GREEN}${MODEL_TYPE}${NC} (${HF_MODEL_ID})"
-if [[ "$MODEL_TYPE" == "turbo" ]]; then
-    log_warn "Turbo model does NOT support CFG — CFG-dependent controls will be inactive."
-fi
+log_info "Model: ${GREEN}${HF_MODEL_ID}${NC}"
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -316,15 +300,17 @@ if [[ "$START_ONLY" == false ]]; then
 
         if [[ -d "$ACE_STEP_REPO_DIR" ]] && [[ -f "$ACE_STEP_REPO_DIR/setup.py" || -f "$ACE_STEP_REPO_DIR/pyproject.toml" ]]; then
             log_info "ACE-Step repo already cloned: $ACE_STEP_REPO_DIR"
-            log_info "Updating to latest version..."
-            (cd "$ACE_STEP_REPO_DIR" && git pull)
         else
             log_info "Cloning ACE-Step from GitHub..."
-            git clone https://github.com/ace-step/ACE-Step.git "$ACE_STEP_REPO_DIR" 2>&1 | tail -3
-            if [[ $? -ne 0 ]]; then
+            if ! git clone https://github.com/ace-step/ACE-Step.git "$ACE_STEP_REPO_DIR"; then
                 log_error "Failed to clone ACE-Step repo"
                 log_warn "Server will start in passthrough mode (no neural inference)"
             fi
+        fi
+
+        if [[ -d "$ACE_STEP_REPO_DIR/.git" ]]; then
+            log_info "Pinning ACE-Step to the tested commit ${ACE_STEP_COMMIT:0:12}"
+            (cd "$ACE_STEP_REPO_DIR" && git fetch --quiet origin && git checkout --quiet "$ACE_STEP_COMMIT")
         fi
 
         if [[ -d "$ACE_STEP_REPO_DIR" ]]; then
@@ -356,44 +342,12 @@ if [[ "$START_ONLY" == false ]]; then
     # -----------------------------------------------------------------------
 
     if [[ "$WITH_MODEL" == true ]] && [[ -z "$MODEL_PATH" ]]; then
-        log_step "Downloading ACE-Step Model (${MODEL_TYPE})"
-
-        # Check if model already downloaded
-        if [[ -d "$MODEL_DIR" ]] && [[ "$(ls -A "$MODEL_DIR" 2>/dev/null)" ]]; then
-            log_info "Model directory already exists: $MODEL_DIR"
-            log_info "Skipping download (delete directory to re-download)"
-            MODEL_PATH="$MODEL_DIR"
-        else
-            log_info "Model type: $MODEL_TYPE"
-            log_info "HuggingFace repo: $HF_MODEL_ID"
-            log_info "Local directory: $MODEL_DIR"
-            log_info "Downloading (~7GB)... this may take a while."
-
-            # Ensure models root exists
-            mkdir -p "$MODELS_ROOT"
-
-            # Install huggingface_hub if not present
-            pip install huggingface_hub --quiet
-
-            # Download using huggingface-cli
-            python -c "
-from huggingface_hub import snapshot_download
-print('Downloading $HF_MODEL_ID to $MODEL_DIR')
-snapshot_download(
-    repo_id='$HF_MODEL_ID',
-    local_dir='$MODEL_DIR',
-    local_dir_use_symlinks=False,
-)
-print('Download complete!')
-"
-            if [[ $? -eq 0 ]]; then
-                MODEL_PATH="$MODEL_DIR"
-                log_ok "Model ($MODEL_TYPE) downloaded to $MODEL_DIR"
-            else
-                log_error "Model download failed"
-                log_warn "Server will start in passthrough mode"
-            fi
-        fi
+        log_step "Preparing model directory"
+        mkdir -p "$MODEL_DIR"
+        MODEL_PATH="$MODEL_DIR"
+        log_info "Model directory: $MODEL_DIR"
+        log_info "The ACE-Step pipeline downloads ${HF_MODEL_ID} (~7.7 GB) into it"
+        log_info "the first time the server loads the model. This can take a while."
     fi
 else
     # Start-only mode — activate existing venv
