@@ -1,74 +1,37 @@
-# ──────────────────────────────────────────────
-# Latent Resonator — .gitignore
-# ──────────────────────────────────────────────
-
-# Xcode
-build/
-DerivedData/
-*.xcodeproj/xcuserdata/
-*.xcworkspace/xcuserdata/
-*.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
-*.pbxuser
-!default.pbxuser
-*.mode1v3
-!default.mode1v3
-*.mode2v3
-!default.mode2v3
-*.perspectivev3
-!default.perspectivev3
-xcuserdata/
-*.moved-aside
-*.hmap
-*.ipa
-*.dSYM.zip
-*.dSYM
-
-# Swift Package Manager
-.build/
-Package.resolved
-
-# Core ML Models (large binaries — not tracked in git)
-*.mlmodelc/
-*.mlpackage/
-*.mlmodel
-CoreMLModels/
 
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
-dist/
 *.egg
+*.whl
 .venv/
 .venv*/
 venv/
 env/
-*.whl
+.pytest_cache/
 
-# ACE-Step Bridge (project-specific venv + model weights)
+# Model weights and local model checkouts (never committed or redistributed)
 .venv-ace-bridge/
 models/
 ACE-Step/
-
-# Model weights
 *.safetensors
 *.pt
 *.ckpt
-models/**/*.bin
 *.bin
+
+# Build and distribution artifacts
 build*/
 cmake-build-*/
-.pytest_cache/
+dist/
+*.zip
 
-# Generated audio artifacts
+# Generated audio (demo output ships as release assets)
 *.wav
-*.mp3
 *.aiff
 *.flac
-
-# Exception: curated demo audio committed to docs/
-!docs/audio/*.mp3
+demos/out/
 
 # macOS
 .DS_Store
@@ -78,48 +41,26 @@ cmake-build-*/
 .Spotlight-V100
 .Trashes
 
-# IDE
+# Editors and tooling
 .cursor/
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 *~
 
-# SwiftLint
-.swiftlint.yml.cache
-
-# Xcode test results
-*.xcresult
-
-# Internal dev-only test suite (not shipped)
-LatentResonator/LatentResonatorTests/
-
-# Environment / Secrets
+# Environment and secrets
 .env
 .env.local
 *.key
 *.pem
-# Stale package manager artifacts
-package-lock.json
-package.json
 
 # Profiling data
 *.profraw
 *.profdata
 
-# Distribution artifacts
-dist/
-*.zip
-
-# Claude Code worktrees / agent metadata
-.claude/
-
-# Node tooling for the PatchEditor sub-project
-node_modules/
-
-# Editor / hand-rolled file backups
+# Backups
 *.backup_*
 *.backup
 *.bak.*
-
