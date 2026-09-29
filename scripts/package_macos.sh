@@ -96,7 +96,7 @@ chmod +x "$STAGE/ace-bridge/setup_ace_bridge.sh"
 n_examples=0
 for d in "$REPO_ROOT/examples" "$REPO_ROOT/bespoke-migration/examples" "$PATCH_DIR"; do
     [ -d "$d" ] || continue
-    for f in "$d"/*.bsk; do
+    for f in "$d"/*.bsk "$d"/*.json; do
         [ -f "$f" ] || continue
         mkdir -p "$STAGE/examples"
         cp "$f" "$STAGE/examples/"
@@ -119,28 +119,27 @@ find "$STAGE" -name '.venv*' -type d -prune -exec rm -rf {} +
 find "$STAGE" -name '.DS_Store' -type f -delete
 
 cat > "$STAGE/models/README.txt" <<'EOF'
-Model weights are NOT included in this download (several GB, separate licence).
+Model weights are NOT included in this download (about 7.7 GB, separate licence).
 
-The bridge looks for ACE-Step 1.5 weights under:
+The module looks for the ACE-Step v1 3.5B checkpoint in:
 
-    ace-bridge/models/ace-step-v1.5-base/     (default: "base")
-    ace-bridge/models/ace-step-v1.5-sft/
-    ace-bridge/models/ace-step-v1.5-turbo/
+    models/ace-step/        (next to BespokeSynth.app, i.e. in this folder)
 
-Two ways to get them:
+If the LATENT_RESONATOR_MODEL_PATH environment variable is set, it wins.
 
-  1. Automatic (recommended, ~7 GB, needs internet):
-       cd ace-bridge
-       ./setup_ace_bridge.sh --with-model
-     downloads the "base" weights from HuggingFace (ACE-Step/Ace-Step1.5).
+How to get the weights:
 
-  2. Bring your own:
-       ./setup_ace_bridge.sh --model-path /path/to/your/model_dir
+  1. Run  cd ace-bridge && ./setup_ace_bridge.sh --with-model
+     It creates models/ace-step/ and starts the bridge, which downloads the
+     checkpoint into that folder the first time it loads the model.
+
+  2. Or point the module at a checkpoint folder you already have (edit its
+     "model path" field, or set LATENT_RESONATOR_MODEL_PATH).
 
 Without weights the bridge runs in passthrough mode: audio flows, but no
-neural processing happens (the module shows "passthrough").
+neural processing happens (the module status says so).
 
-Check the ACE-Step model licence before redistributing or using commercially.
+The weights are distributed under their own licence; see NOTICE.
 EOF
 
 cat > "$STAGE/QUICKSTART.txt" <<'EOF'
@@ -148,11 +147,11 @@ Latent Resonator @VERSION@ -- macOS (Apple Silicon, arm64)
 ==========================================================
 
 What this is: a build of Bespoke Synth (GPL-3) with an extra module,
-"latentresonator", that streams audio through a local Python bridge running
-ACE-Step 1.5 and feeds the result back into the patch.
+"latentresonator", that sends audio to a local Python bridge running
+ACE-Step v1 3.5B and plays the regenerated result back into the patch.
 
 Requirements: Apple Silicon Mac, macOS 14+, Python 3.12
-(brew install python@3.12), ~10 GB free disk, internet for the first setup.
+(brew install python@3.12), ~16 GB free disk, internet for the first setup.
 
 Steps
 -----
@@ -163,38 +162,56 @@ Steps
 
    then open it with right-click -> Open the first time.
 
-1. Create the Python environment and download weights (Terminal):
+1. Create the Python environment and fetch the weights (Terminal):
 
        cd ace-bridge
        ./setup_ace_bridge.sh --with-model
 
-   This creates the venv ace-bridge/.venv-ace-bridge (Python 3.12), installs
-   the dependencies from requirements_bridge.txt, downloads the model (see
-   models/README.txt) and STARTS the bridge on http://127.0.0.1:8976.
-   Leave that Terminal window open. Next time: ./setup_ace_bridge.sh --start-only
-   (add --model-path ... or use the same models folder).
+   This creates ace-bridge/.venv-ace-bridge (Python 3.12), installs the
+   dependencies, creates models/ace-step/ and starts the bridge, which then
+   downloads the ~7.7 GB checkpoint into that folder (see models/README.txt).
+   When the log says the model is ready, stop it with Ctrl+C: the module
+   starts its own bridge, so leaving this one running would occupy the port.
 
-2. Open BespokeSynth.app. Keep the ace-bridge/ folder next to the app; the
-   module finds it there.
+2. Optional: load the ready-made example patch.
+   Copy it into Bespoke's data folder:
 
-3. Right-click the empty canvas (or use the module menu), open the SYNTHS
-   category and add "latentresonator". Check its status line: it should read
-   "connected - model loaded". "passthrough" means no model is loaded.
+       mkdir -p ~/Documents/BespokeSynth/layouts
+       cp examples/latent_resonator_demo.json ~/Documents/BespokeSynth/layouts/
 
-4. Route audio into the module and its output to an output channel.
-   Optional: open patches from the examples/ folder (if present).
+   then set  "layout" : "layouts/latent_resonator_demo.json"  in
+   ~/Documents/BespokeSynth/userprefs.json (created on Bespoke's first run;
+   open the app once first) and restart the app. The patch wires a signal
+   generator into latentresonator, then gain, splitter and both outputs, plus
+   a "regenerate" pulse button.
+
+   Or build it by hand: add "signalgenerator", "latentresonator" and "gain"
+   from the menus, drag cables between them, and connect gain to the outputs.
+
+3. Open BespokeSynth.app. The module launches the bridge itself and loads
+   the weights (about a minute the first time). Its status line reads
+   "bridge unreachable" until then; when ready it shows the model and dtype.
+
+4. Make sound: on the "source" signal generator raise "vol" (it starts at
+   0). With "dry monitor" at 0.5 you should hear the tone right away.
+   Click "regenerate" on latentresonator (or the "regenerate" pulse button):
+   a progress bar runs, then the regenerated take plays, looped. Use
+   "out gain dB" if it is quiet (normalisation targets about -3 dBFS).
+   "iterate" feeds each take back as the next input.
 
 Honest limits
 -------------
-- Inference is not real time. Expect seconds of latency per processed block
-  on Apple Silicon; this is a "latent" effect, not a live insert.
-- The very first run is slow (model load and warm-up, then a MPS cache).
-- Needs roughly 8 GB+ of unified memory for the base model; 16 GB advised.
-- The module started from inside Bespoke launches the bridge WITHOUT a model
-  path, so start the bridge with setup_ace_bridge.sh (step 1) BEFORE using
-  the module if you want neural output.
+- Inference is not real time. A take takes seconds (about 1-8 s for 3-30 s of
+  audio in our tests on a 32 GB Apple Silicon Mac); it never runs at audio
+  rate and cannot be played live.
+- The very first run is slow (weights download, model load and warm-up).
+- The model is about 14 GB in float32 and the bridge runs it in float16;
+  16 GB of unified memory or more is advised.
+- The output is largely regenerated: it does not preserve the input's waveform.
 - Weights are not bundled and are subject to their own licence.
 - Not notarized; ad-hoc signed. Only tested on Apple Silicon.
+- The GUI of this build was checked only by loading the example patch;
+  playback and the regenerate workflow were not exercised by hand.
 
 Licence and source: see SOURCE.txt, LICENSE and NOTICE. This program is free
 software (GPL-3.0-or-later) and comes with NO WARRANTY.

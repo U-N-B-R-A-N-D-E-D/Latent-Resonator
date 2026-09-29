@@ -191,7 +191,7 @@ private:
    int mSeed{ -1 };
    bool mLockSeed{ false };
    int mLastSeed{ -1 }; // UI thread only
-   float mDry{ 0.0f };
+   float mDry{ 0.5f };
    float mOutGainDb{ 0.0f };
    bool mNormalize{ true };
    bool mLoop{ true };

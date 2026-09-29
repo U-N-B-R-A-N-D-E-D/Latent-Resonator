@@ -111,14 +111,15 @@ namespace
    }
 
    // Env var wins so a patch shipped to another machine needs no edits; then
-   // a models/ directory next to the app's folder; empty means passthrough.
+   // models/ace-step in the folder that contains the .app (the layout the
+   // release zip and setup_ace_bridge.sh use); empty means passthrough.
    juce::String ResolveDefaultModelPath()
    {
       juce::String fromEnv = juce::SystemStats::getEnvironmentVariable(kModelPathEnvVar, juce::String());
       if (fromEnv.isNotEmpty())
          return fromEnv;
 
-      juce::File sibling = GetAppContainerDirectory().getParentDirectory().getChildFile("models/ace-step");
+      juce::File sibling = GetAppContainerDirectory().getChildFile("models/ace-step");
       if (sibling.isDirectory())
          return sibling.getFullPathName();
 
