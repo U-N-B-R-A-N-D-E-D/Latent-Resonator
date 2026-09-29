@@ -1,96 +1,56 @@
 # Contributing to Latent Resonator
 
-Thank you for your interest in contributing to Latent Resonator. This project explores recursive neural audio synthesis as a compositional tool, and we welcome contributions that extend or improve the system.
+Latent Resonator is a recursive neural audio resonator built as a Bespoke Synth module (`bespoke-migration/module/`) that talks to a local Python bridge around ACE-Step (`bespoke-migration/ace-bridge/`). Contributions are welcome.
 
-## How to Contribute
+## Workflow
 
-1. **Fork** this repository.
-2. **Create a branch** from `main` for your change (`git checkout -b feature/your-feature`).
-3. **Make your changes** following the guidelines below.
-4. **Test thoroughly** -- ensure the app builds and your changes do not break existing functionality.
-5. **Open a Pull Request** against `main` with a clear description of what you changed and why.
+1. Fork the repository and branch from `main`.
+2. Make a focused change; explain what and why in the pull request.
+3. Run the checks below.
+4. Open a pull request against `main`.
 
-## What We Accept
+## Structure
 
-- Bug fixes with a clear description of the problem and solution.
-- Performance improvements backed by measurements.
-- New excitation modes, DSP effects, or spectral processing algorithms that align with the project's aesthetic (generative degradation, recursive feedback, stochastic synthesis).
-- Core ML model integration improvements.
-- Documentation improvements, typo fixes, and clarifications.
-- Accessibility improvements for the macOS interface.
+- `bespoke-migration/module/` -- C++ Bespoke Synth module (`ModuleACEResonator`).
+- `bespoke-migration/ace-bridge/` -- Python HTTP bridge and its tests.
+- `docs/` -- documentation and whitepaper.
+- `LatentResonator/` -- retired Swift app, kept for reference; not the primary workflow.
 
-## What We Do Not Accept
+## Guidelines
 
-- Changes that introduce third-party Swift dependencies (the project uses only Apple system frameworks).
-- UI redesigns that deviate from the established design system (`LRConstants.DS`).
-- Features that require network access beyond the local bridge server (127.0.0.1).
-- Code that introduces memory leaks or unbounded allocations in the audio path.
+### Module (C++)
 
-## Code Guidelines
+- No allocation, locking, disk or network I/O on the audio thread.
+- Guard against NaN/Inf in DSP changes.
+- Follow Bespoke Synth's coding conventions and keep the upstream license header.
 
-### Architecture
+### Python bridge
 
-- **No new files** unless explicitly necessary. Prefer modifying existing files.
-- **Constants in config**, not scattered. All tuning parameters belong in `Config/Constants.swift`.
-- **No magic numbers**. Use `LRConstants` for ranges, defaults, and thresholds.
-- **Design tokens** for all UI values. Typography, colors, spacing, and radii must reference `LRConstants.DS`.
+- Must run on Python 3.9--3.12 and work in passthrough mode (no model loaded).
+- The bridge listens on 127.0.0.1 only.
+- Code must pass `black --check`, `flake8` and `pylint` (config: `pyproject.toml`, `.flake8`).
 
-### Swift Style
-
-- Follow the existing `.swiftlint.yml` configuration.
-- Use `MARK:` comments to organize sections within files.
-- Document non-obvious logic with inline comments. Reference whitepaper sections where applicable (e.g., `// Whitepaper §3.3`).
-- Keep functions focused. Avoid functions longer than 100 lines when possible.
-- All `@Published` properties, `Binding` paths, and `ObservableObject` wiring changes require careful review -- these affect the entire reactive chain.
-
-### Audio Path Constraints
-
-- **No allocations** in the audio render callback (`combinedSourceNode` install tap block).
-- **No blocking calls** (network, disk I/O, locks) on the audio thread.
-- Use `CircularAudioBuffer` for cross-thread audio communication.
-- Validate that DSP changes do not produce NaN or Inf values under stress (see the stress test pattern in the test suite).
-
-### Python Bridge
-
-- The bridge server (`ace_bridge_server.py`) must remain compatible with Python 3.9--3.12.
-- All JSON payloads between Swift and Python use snake_case keys.
-- The bridge must function in passthrough mode (no model loaded) without errors.
-- Python code must pass `black --check`, `flake8`, and `pylint`. Config: `pyproject.toml`, `.flake8`.
-
-## Whitepaper Alignment
-
-This project implements the methodology described in [docs/whitepaper.md](docs/whitepaper.md). Contributions should be consistent with the theoretical framework:
-
-- The recursive formula: `S(i+1) = ACE(S(i) + N(mu,sigma), P, gamma)`
-- The Koenig Seed: Euclidean rhythm E(5,13) with Dirac impulses
-- The Non-Linear Spectral Processor as a semantic filter
-- Generative degradation as an aesthetic goal, not a defect
-
-## Git: Avoid Co-authored-by in Commits
-
-Cursor adds `Co-authored-by: Cursor <cursoragent@cursor.com>` to commits made from the IDE. **Disable it:** Cursor Settings → Agents → Attribution → toggle OFF.
-
-To keep the repo clean, also install the hook:
+## Checks
 
 ```bash
-cp scripts/prepare-commit-msg .git/hooks/prepare-commit-msg && chmod +x .git/hooks/prepare-commit-msg
+pytest bespoke-migration/ace-bridge/test_bridge.py -v
 ```
 
-This strips Co-authored-by before each commit. To fix an existing commit, run `scripts/fix_commit_coauthor.sh` from Terminal.app (outside Cursor).
+Also run `black --check`, `flake8` and `pylint` on the bridge sources.
 
-## Pull Request Process
+## Security and privacy
 
-1. Ensure your code builds without warnings (`xcodebuild build`).
-2. Run SwiftLint: `swiftlint lint --config .swiftlint.yml`.
-3. Run Python quality checks: `black --check LatentResonator/LatentResonator/Scripts/`, `flake8 LatentResonator/LatentResonator/Scripts/`, `pylint LatentResonator/LatentResonator/Scripts/*.py`.
-4. Run Python bridge tests: `pytest LatentResonator/LatentResonator/Scripts/test_bridge.py`.
-5. Describe what whitepaper section(s) your change relates to, if applicable.
-6. A maintainer will review your PR. Expect feedback and iteration -- this is normal.
+- No secrets, tokens or API keys in commits.
+- No personal paths (for example `/Users/<name>/`) or personal data in code, docs or logs.
+- Do not commit model weights or generated audio.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).
+- Contributions to `bespoke-migration/module/` are licensed under GPL-3.0-or-later (see `bespoke-migration/module/LICENSE`), matching Bespoke Synth.
+- Contributions to everything else are licensed under the MIT License (see `LICENSE`).
+
+Third-party components are listed in `NOTICE`.
 
 ## Code of Conduct
 
-Be respectful, constructive, and collaborative. We are building an instrument for artistic exploration -- the same spirit of openness should apply to how we work together.
+Be respectful, constructive and collaborative.
