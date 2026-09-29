@@ -41,6 +41,7 @@ __pycache__/
 dist/
 *.egg
 .venv/
+.venv*/
 venv/
 env/
 *.whl
@@ -49,6 +50,16 @@ env/
 .venv-ace-bridge/
 models/
 ACE-Step/
+
+# Model weights
+*.safetensors
+*.pt
+*.ckpt
+models/**/*.bin
+*.bin
+build*/
+cmake-build-*/
+.pytest_cache/
 
 # Generated audio artifacts
 *.wav
@@ -68,11 +79,7 @@ ACE-Step/
 .Trashes
 
 # IDE
-# .cursor/ is ignored except .cursor/skills/** (agent skills are tracked).
-# NOTE: git can't re-include files under an ignored directory, so this must
-# stay as ".cursor/*" (one level) + a negation, not ".cursor/" (whole tree).
-.cursor/*
-!.cursor/skills
+.cursor/
 .idea/
 .vscode/
 *.swp
