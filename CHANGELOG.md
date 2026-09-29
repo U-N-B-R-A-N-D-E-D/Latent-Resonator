@@ -6,6 +6,17 @@ All notable changes to Latent Resonator are documented here.
 
 Working-tree summary ahead of owner commit. Shipped v2 pull-render architecture (`GraphAudioEngine` → `ExecutionPlan` → `DSPNode`, native `PatchCanvasView`); this entry closes the perimeter roadmap (`docs/ROADMAP_PERIMETER_2026-07-21.md`) and documents concurrent canvas/PERFORM work.
 
+### Changed (2026-09 direction change)
+
+- **Project direction** — Latent Resonator is now a custom `latentresonator` module in a fork of Bespoke Synth (GPL-3.0), with a standalone Python bridge (`bespoke-migration/ace-bridge/`, MIT). It is positioned as an asynchronous "recursive neural resampler", not a real-time effect.
+- **Swift/SwiftUI app retired** — `LatentResonator/` is kept only as reference; its docs move to `docs/archive`. It will not receive further work.
+- **Claims corrected** — Removed the "<200 ms" / "<5 ms" / real-time neural claims; only Bespoke's own DSP nodes are real-time. The loop is an asynchronous generator, not an audio-rate effect.
+- **Bridge engine: float16 on MPS, warm-up, progress** — On Apple Silicon (MPS) the bridge now defaults to float16, which removed a 20-30 s per-call stall seen in float32 (39-57 s for 3 s of audio, before). A warm 3 s take now takes about 1.1 s, 10 s about 2.4 s, 30 s about 7-8 s, measured under heavy machine load. Added `--warmup`, `--dtype`, per-phase timings in `/infer` responses, `GET /progress` with real step counts, prompt-embedding caching, request serialisation, larger input limit (12 MB WAV), and `bench_bridge.py`. Float16 output was compared to float32 by correlation (0.88, same seed) and level only; it is quieter.
+- **Parameter semantics corrected** — `gamma` is the bridge's `denoise_strength` (scales the step count), not the guidance scale. The SDEdit-style "how much of the input survives" knob is `input_strength`, which the module does not yet expose.
+- **Model naming corrected** — The bridge loads ACE-Step v1 3.5B, not "ACE-Step 1.5"; the `acestep-v15-turbo` folder has no weights and is not usable.
+- **README rewritten** — English, honest limits first, reproducible Bespoke build steps, measured performance table, roadmap, licensing table. Removed the link to a nonexistent `.app` release and unbuilt screenshots.
+- **Whitepaper revised** — Implementation section replaced with the Bespoke module architecture; unmeasured claims (VRAM, training-set size, parameter count, CPU load time, low-latency percussion, "we successfully induce") removed or marked as hypotheses; added a hypotheses-and-experiments section (critical input strength, codec-only control, seed divergence) and model-collapse references.
+
 ### Fixed (2026-09-11)
 
 - **SIGTERM/SIGINT orphaning the Python bridge process** — `LatentResonatorApp` only wired bridge cleanup to `NSApplication.willTerminateNotification`, which AppKit posts solely on its own graceful-quit path (Cmd+Q, Dock Quit). A raw `kill`, a crash, or an external supervisor sent SIGTERM directly and bypassed that notification, leaving `ace_bridge_server.py` running as an orphan. Added `DispatchSourceSignal` handlers for `SIGTERM`/`SIGINT` in `LatentResonatorApp.init()` (standard GCD pattern: `signal(sig, SIG_IGN)` before creating the dispatch source) that call the same `shutdownAll()` already used by the graceful path. Verified with a real `kill -TERM` against the running app: no orphaned process afterward, confirmed via `ps`.
