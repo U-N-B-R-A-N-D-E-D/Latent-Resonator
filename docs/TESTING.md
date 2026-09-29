@@ -1,30 +1,24 @@
-# Latent Resonator v2.0 — Testing
+# Latent Resonator - Testing
 
-## Quick start
+Latent Resonator is a Bespoke Synth module (`bespoke-migration/module/`) backed by a Python bridge to ACE-Step (`bespoke-migration/ace-bridge/`). The retired Swift app is no longer built or tested.
 
-1. **Open the app** — Double-click `LatentResonator.app`
-2. **If macOS blocks it** — Right-click → Open → Open
-3. **Press START** — The app will set up the ACE-Step bridge (venv, deps) if needed
+## Bridge tests (no model, no GPU)
 
-## With ACE-Step (neural inference)
+```
+cd bespoke-migration/ace-bridge
+pip install pytest numpy
+pytest test_bridge.py -v
+```
 
-- Install [ACE-Step 1.5](https://github.com/facebookresearch/ace-step) per their repo
-- In Latent Resonator: **Settings** → point to your model path (or use default)
-- Press **START** in PERFORM — first run may take a minute to create venv and load the model
+These cover the WAV helpers and the HTTP endpoints in passthrough mode. One live-inference test is skipped unless a real ACE-Step checkpoint is available and `ACE_BRIDGE_LIVE_INFER=1` is set. See `bespoke-migration/ace-bridge/README.md`.
 
-## Without ACE-Step (DSP only)
+## Running the bridge with neural inference
 
-- The app runs standalone: filters, delay, resonator, excitation sources
-- Use **SILENCE** excitation + DSP for feedback-loop testing without neural inference
+- Python 3.9-3.12 (ACE-Step's dependency stack does not yet support 3.13+).
+- Run `bespoke-migration/ace-bridge/setup_ace_bridge.sh` to create a venv and, optionally, download the ACE-Step v1 3.5B checkpoint.
+- Start the server: `python ace_bridge_server.py --model-path /path/to/model`.
+- Without a model the server starts in passthrough mode, useful for testing the feedback loop without neural inference.
 
-## Contents
+## Module build and manual checks
 
-- `LatentResonator.app` — The application
-- `README.md` — Full documentation
-- `docs/whitepaper.md` — Technical spec
-- `docs/screenshots/` — Setup and Perform views
-
-## Requirements
-
-- macOS 14+
-- For ACE-Step: Python 3.9–3.12, PyTorch, model weights
+Build steps and the manual verification checklist for the Bespoke Synth module are in `bespoke-migration/module/BUILD_VERIFICATION.md`. Inference runs on a background thread on the local machine, so expect latency of seconds per pass, not audio-callback rates.
