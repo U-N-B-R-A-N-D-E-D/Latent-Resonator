@@ -41,7 +41,7 @@ The Latent Resonator replicates this topology with a diffusion model as the "roo
 
 ## 2. Implementation: The Bespoke Synth Module
 
-The theoretical loop of Section 1 is a batch protocol. The implementation is a custom module, registered as `latentresonator`, inside a fork of Bespoke Synth (an open-source, GPL-3.0 modular synthesizer), plus a Python bridge that runs the model. An earlier standalone Swift/AVAudioEngine application has been retired and is kept only as reference in the repository archive.
+The theoretical loop of Section 1 is a batch protocol. The implementation is a custom module, registered as `latentresonator`, inside a fork of Bespoke Synth (an open-source, GPL-3.0 modular synthesizer), plus a Python bridge that runs the model. An earlier standalone Swift/AVAudioEngine application has been removed; its reusable design notes are in `docs/LEGACY_SWIFT_LEARNINGS.md` and its source is in git history at tag `swift-app-final`.
 
 ### 2.1 Two Clocks
 
