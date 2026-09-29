@@ -149,7 +149,7 @@ Any binary distributed from the fork must make the fork's full source available 
 
 ## Legacy Swift app
 
-The original SwiftUI/AVAudioEngine app under `LatentResonator/` is retired and kept only as reference. Its documentation is in [`docs/archive`](docs/archive). It is not built, supported or described here. The migration rationale is in [`docs/MIGRATION_BESPOKE_SYNTH_2026-09-11.md`](docs/MIGRATION_BESPOKE_SYNTH_2026-09-11.md).
+The original SwiftUI/AVAudioEngine app was retired and removed from the tree. Its distilled knowledge (algorithms, parameters, bridge lifecycle, lessons learned) is in [`docs/LEGACY_SWIFT_LEARNINGS.md`](docs/LEGACY_SWIFT_LEARNINGS.md); the full source is in git history under the tag `swift-app-final`. The migration rationale is in [`docs/MIGRATION_BESPOKE_SYNTH_2026-09-11.md`](docs/MIGRATION_BESPOKE_SYNTH_2026-09-11.md).
 
 ## Credits
 
