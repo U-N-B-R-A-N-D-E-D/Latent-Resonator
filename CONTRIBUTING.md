@@ -13,8 +13,10 @@ Latent Resonator is a recursive neural audio resonator built as a Bespoke Synth 
 
 - `bespoke-migration/module/` -- C++ Bespoke Synth module (`ModuleACEResonator`).
 - `bespoke-migration/ace-bridge/` -- Python HTTP bridge and its tests.
-- `docs/` -- documentation and whitepaper.
-- `LatentResonator/` -- retired Swift app, kept for reference; not the primary workflow.
+- `bespoke-migration/patches/` -- pinned upstream Bespoke base and the JUCE build patch.
+- `scripts/` -- `apply_module.sh` and `package_macos.sh`.
+- `demos/` -- reproducible demo and experiment generator.
+- `docs/` -- documentation, whitepaper and the distilled notes from the retired Swift app.
 
 ## Guidelines
 
