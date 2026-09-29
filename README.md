@@ -72,6 +72,29 @@ Build details, including the exact registration diffs against a Bespoke checkout
 
 The `acestep-v15-turbo` folder that some downloads contain has no weights in our setup, and the turbo variant is not usable here.
 
+## Try it (standalone zip)
+
+`scripts/package_macos.sh` assembles `LatentResonator-<version>-macOS-arm64.zip`: the fork's `BespokeSynth.app`, the bridge, an example patch, licenses and a source offer. It is ad-hoc signed, not notarized, and there is no public download yet. Its `QUICKSTART.txt` has the exact steps; in short:
+
+1. `cd ace-bridge && ./setup_ace_bridge.sh --with-model` creates the Python 3.12 venv and `models/ace-step/`, and the bridge downloads the ~7.7 GB checkpoint on first load. Stop it with Ctrl+C when the model is ready.
+2. Optionally load `examples/latent_resonator_demo.json` (copy it to `~/Documents/BespokeSynth/layouts/` and set `"layout"` in `~/Documents/BespokeSynth/userprefs.json`), or wire `signalgenerator` -> `latentresonator` -> `gain` -> outputs by hand.
+3. Open the app. The module starts its own bridge and finds the weights in `models/ace-step` next to the app (or in `LATENT_RESONATOR_MODEL_PATH`). Raise `vol` on the signal generator, then press `regenerate`.
+
+What was verified for the zip layout: the module finds the bridge script, the venv and the weights by itself, and the bridge reports the model loaded in float16 on MPS. The example patch loads with all cables wired. Not verified by hand: audio playback, the progress bar during a run, iterate/cancel, and save/load of the patch.
+
+### Module controls
+
+| Control | Effect |
+|---|---|
+| `prompt` | Text conditioning |
+| `input strength` | Bridge `input_strength` (0-1, default 0.6): how much of the input the model keeps before denoising |
+| `steps`, `guidance`, `seed` (`lock seed`) | Diffusion steps, guidance scale, seed (-1 = random) |
+| `gamma (step scale)` | Bridge `denoise_strength`; scales the number of steps actually run |
+| `noise mu` / `noise sigma` | Gaussian noise added to the snapshot before each pass |
+| `iterate`, `cancel` | Feed each take back as the next input, up to N times |
+| `dry monitor`, `out gain dB`, `normalize take`, `loop take` | Hear the live input, adjust level, normalize to about -3 dBFS, loop the last take |
+| `regenerate` (button or pulse input) | Snapshot the input and start a take |
+
 ## Quick start (build)
 
 Bespoke Synth has no plugin system, so every module is compiled into the one binary. This repository does not vendor Bespoke's source tree; it owns only the module and the bridge.
@@ -126,12 +149,12 @@ Observed quirks: float16 outputs were quiet (RMS roughly 0.01-0.03 against an in
 
 ## Roadmap
 
-1. **Truth and hygiene**: correct all claims, retire the Swift app, clean docs and licensing. (This pass.)
-2. **Engine**: harden the module and bridge (dependency repair, cancellation, take management, error surfacing).
-3. **Science experiments**: test the hypotheses in the whitepaper (critical guidance, codec-only control, seed divergence) with logged per-iteration metrics.
-4. **Nodes and Take Strip**: nodes for capture, iterate, and a Take Strip to browse, compare and route takes.
-5. **Performance layer**: patches and controls that make takes playable through Bespoke's real-time nodes.
-6. **Release**: reproducible build, a GPL-3-compliant source-available binary, documentation.
+1. **Truth and hygiene**: done. Claims corrected, Swift app removed (source at tag `swift-app-final`), licensing settled.
+2. **Engine**: done for the bridge (float16, warm-up, progress endpoint, benchmark harness). Still open: dependency repair from inside the module, and hand-testing the module's GUI workflow.
+3. **Science experiments**: generator and first data exist (`demos/make_demo.py`; a single-seed `input_strength` sweep hints at a change of regime between 0.4 and 0.6, not resolved with four points). Open: more seeds, a codec-only control, and CLAP-based metrics.
+4. **Nodes and Take Strip**: open. Today a single module holds the loop and the last take; a Take Strip to browse, compare and route takes is next.
+5. **Performance layer**: open. Prefab, macro slider and snapshots around the module, plus more example patches.
+6. **Release**: the zip builds locally; the tag-triggered release workflow has not been run. No public download yet.
 
 No dates are committed.
 
@@ -143,9 +166,10 @@ No dates are committed.
 | `latentresonator` module (compiled into the fork) | GPL-3.0 |
 | Python bridge (`bespoke-migration/ace-bridge/`) | MIT |
 | Documentation | MIT |
-| ACE-Step code and weights | Not asserted here. Check the upstream repository's LICENSE and the model card yourself: sources disagree (Apache-2.0 vs MIT). |
+| ACE-Step code | Apache-2.0 (read from the upstream `LICENSE`, 2026-09-29) |
+| ACE-Step v1 3.5B weights | MIT, as declared in the model card that ships with the checkpoint (read 2026-09-29) |
 
-Any binary distributed from the fork must make the fork's full source available under GPL-3.0. Statements about ACE-Step's training-data provenance are claims made by its authors; we have not verified them. See [LICENSE](LICENSE) and [CONTRIBUTING.md](CONTRIBUTING.md).
+Any binary distributed from the fork must make the fork's full source available under GPL-3.0. Re-check the ACE-Step licenses before each release. Statements about ACE-Step's training-data provenance are claims made by its authors; we have not verified them. Copyright holder of this repository: UNBRANDED. See [LICENSE](LICENSE) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Legacy Swift app
 
