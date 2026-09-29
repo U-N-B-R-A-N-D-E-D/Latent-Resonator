@@ -15,6 +15,7 @@ the same way.
 Endpoints:
   GET  /health     — connection check + model status
   GET  /status     — detailed model and server status
+  GET  /progress   — step-level progress of the running request
   POST /infer      — run one inference cycle
   POST /shutdown   — graceful shutdown
 
@@ -36,8 +37,10 @@ import os
 import struct
 import sys
 import tempfile
+import threading
 import time
 import traceback
+from collections import OrderedDict
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -90,6 +93,102 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
+# Progress tracking and timing
+# ---------------------------------------------------------------------------
+
+# Set ACE_BRIDGE_TIMING=1 to log per-phase timings for every /infer call.
+TIMING_LOG = os.environ.get("ACE_BRIDGE_TIMING") == "1"
+
+# Number of prompt embeddings kept in the text-encoder cache.
+TEXT_CACHE_SIZE = 32
+
+# Run a full garbage collection every N inferences instead of every call.
+GC_EVERY_N_CALLS = 10
+
+
+class ProgressTracker:
+    """Thread-safe progress state for the request currently being served."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._state = "idle"
+        self._phase = "idle"
+        self._step = 0
+        self._total = 0
+        self._t0 = 0.0
+        self._step_t0 = 0.0
+        self._first_step_done_at = 0.0
+
+    @property
+    def phase(self) -> str:
+        return self._phase
+
+    def begin(self, total_steps: int):
+        with self._lock:
+            self._state = "busy"
+            self._phase = "starting"
+            self._step = 0
+            self._total = max(0, int(total_steps))
+            self._t0 = time.perf_counter()
+            self._first_step_done_at = 0.0
+
+    def set_phase(self, phase: str):
+        with self._lock:
+            if self._state == "busy":
+                self._phase = phase
+
+    def set_total(self, total_steps: int):
+        with self._lock:
+            self._total = max(0, int(total_steps))
+
+    def set_step(self, step: int):
+        with self._lock:
+            self._step = int(step)
+            if step >= 1 and not self._first_step_done_at:
+                self._first_step_done_at = time.perf_counter()
+
+    def end(self):
+        with self._lock:
+            self._state = "idle"
+            self._phase = "idle"
+            self._step = 0
+            self._total = 0
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            busy = self._state == "busy"
+            elapsed = time.perf_counter() - self._t0 if busy else 0.0
+            eta = None
+            if busy and self._phase == "diffusion" and 1 < self._step < self._total:
+                per_step = (time.perf_counter() - self._first_step_done_at) / (self._step - 1)
+                eta = round(per_step * (self._total - self._step), 2)
+            return {
+                "state": self._state,
+                "phase": self._phase,
+                "step": self._step,
+                "total_steps": self._total,
+                "elapsed_s": round(elapsed, 3),
+                "eta_s": eta,
+            }
+
+
+PROGRESS = ProgressTracker()
+
+
+def _device_sync(device: str):
+    """Block until queued device work finishes so phase timings are accurate."""
+    try:
+        import torch
+
+        if device.startswith("mps"):
+            torch.mps.synchronize()
+        elif device.startswith("cuda"):
+            torch.cuda.synchronize()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # ACE-Step Model Wrapper
 # ---------------------------------------------------------------------------
 
@@ -116,8 +215,13 @@ class ACEStepWrapper:
         "base": "base",
     }
 
-    def __init__(self, model_path: str = None, device: str = "cpu"):
+    def __init__(self, model_path: str = None, device: str = "cpu", dtype: str = "auto"):
         self.model = None
+        self.dtype_request = dtype
+        # The pipeline is not re-entrant: serialise inference calls.
+        self._infer_lock = threading.Lock()
+        self._timings: dict = {}
+        self.last_timings: dict = {}
         self.model_path = model_path
         self.is_loaded = False
         self.device = device  # Explicit device override
@@ -173,9 +277,20 @@ class ACEStepWrapper:
                 from acestep.pipeline_ace_step import ACEStepPipeline
 
                 logging.info(f"Loading ACE-Step model from: {model_path}")
-                
+
                 # ACEStepPipeline auto-detects MPS / CUDA / CPU in __init__.
                 # We override the device AFTER loading to ensure CPU safety.
+                # The pipeline reads its dtype from this variable; on MPS it
+                # otherwise forces float32.
+                # "auto" picks float16 on MPS (measured: correlation 0.88 with
+                # float32 for the same seed; bfloat16 diverges) and leaves the
+                # ACE-Step default elsewhere. An existing ACE_PIPELINE_DTYPE wins.
+                requested = self.dtype_request
+                explicit = requested not in (None, "", "auto")
+                if not explicit:
+                    requested = "float16" if target_device == "mps" else None
+                if requested and (explicit or not os.environ.get("ACE_PIPELINE_DTYPE")):
+                    os.environ["ACE_PIPELINE_DTYPE"] = requested
                 self.model = ACEStepPipeline(checkpoint_dir=model_path)
                 self.model.load_checkpoint(model_path)
 
@@ -204,19 +319,23 @@ class ACEStepWrapper:
                     except AttributeError:
                         pass
 
+                self._instrument_pipeline()
                 self.is_loaded = True
                 self.load_error = None
                 logging.info(
                     f"ACE-Step model loaded successfully on {self.device} "
-                    f"(type: {self.model_type})"
+                    f"(type: {self.model_type}, dtype: {getattr(self.model, 'dtype', '?')})"
                 )
-                
+
             except ImportError as import_err:
                 # Detailed import error logging for debugging
-                logging.error(f"[IMPORT ERROR] Failed to import acestep.pipeline_ace_step: {import_err}")
+                logging.error(
+                    f"[IMPORT ERROR] Failed to import acestep.pipeline_ace_step: {import_err}"
+                )
                 logging.error(f"[IMPORT ERROR] Python path: {sys.path}")
                 try:
                     import acestep
+
                     logging.info(f"[IMPORT DEBUG] acestep package found at: {acestep.__file__}")
                     logging.info(f"[IMPORT DEBUG] acestep contents: {dir(acestep)}")
                 except ImportError as acestep_err:
@@ -224,7 +343,10 @@ class ACEStepWrapper:
                 # Try alternative import paths
                 try:
                     import ace_step
-                    logging.info(f"[IMPORT DEBUG] ace_step (with underscore) found at: {ace_step.__file__}")
+
+                    logging.info(
+                        f"[IMPORT DEBUG] ace_step (with underscore) found at: {ace_step.__file__}"
+                    )
                 except ImportError:
                     logging.error("[IMPORT ERROR] ace_step (with underscore) not found")
                 # Fall through to alternative loader below
@@ -256,7 +378,138 @@ class ACEStepWrapper:
             self.load_error = f"Model load failed: {e}"
             logging.error(f"{self.load_error}\n{traceback.format_exc()}")
 
-    def infer(
+    # ------------------------------------------------------------------
+    # Pipeline instrumentation (wrapper-side; ACE-Step source is untouched)
+    # ------------------------------------------------------------------
+
+    def _add_timing(self, label: str, seconds: float):
+        self._timings[label] = self._timings.get(label, 0.0) + seconds
+
+    def _wrap_phase(self, obj, name: str, label: str, phase: str = None):
+        """Time a pipeline method and (optionally) publish the current phase."""
+        orig = getattr(obj, name, None)
+        if orig is None:
+            return
+
+        def wrapped(*args, **kwargs):
+            if phase:
+                PROGRESS.set_phase(phase)
+            t = time.perf_counter()
+            try:
+                return orig(*args, **kwargs)
+            finally:
+                _device_sync(self.device)
+                self._add_timing(label, time.perf_counter() - t)
+
+        setattr(obj, name, wrapped)
+
+    def _wrap_text_cache(self, name: str):
+        """Cache text-encoder outputs keyed by (texts, args)."""
+        orig = getattr(self.model, name, None)
+        if orig is None:
+            return
+        cache: OrderedDict = OrderedDict()
+
+        def cached(texts, *args, **kwargs):
+            key = (tuple(texts), args, tuple(sorted(kwargs.items())))
+            hit = cache.get(key)
+            if hit is not None:
+                cache.move_to_end(key)
+                self._add_timing("text_cache_hits", 1)
+                return hit
+            value = orig(texts, *args, **kwargs)
+            cache[key] = value
+            while len(cache) > TEXT_CACHE_SIZE:
+                cache.popitem(last=False)
+            return value
+
+        setattr(self.model, name, cached)
+
+    def _instrument_pipeline(self):
+        """
+        Attach timing, progress and caching around ACEStepPipeline methods.
+
+        Everything is done on the instance (and the tqdm name of the pipeline
+        module), so the ACE-Step package itself is never modified.
+        """
+        model = self.model
+        self._wrap_text_cache("get_text_embeddings")
+        self._wrap_text_cache("get_text_embeddings_null")
+        self._wrap_phase(model, "get_text_embeddings", "text_encode", "text_encode")
+        self._wrap_phase(model, "get_text_embeddings_null", "text_encode", "text_encode")
+        self._wrap_phase(model, "infer_latents", "vae_encode", "vae_encode")
+        self._wrap_phase(model, "text2music_diffusion_process", "diffusion", "diffusion")
+        self._wrap_phase(model, "flowedit_diffusion_process", "diffusion", "diffusion")
+        self._wrap_phase(model, "latents2audio", "vae_decode", "vae_decode")
+        transformer = getattr(model, "ace_step_transformer", None)
+        if transformer is not None:
+            self._wrap_phase(transformer, "encode", "cond_encode")
+
+        # The pipeline runs gc.collect() after every call (0.5-1 s with the
+        # model resident). Do it every GC_EVERY_N_CALLS calls instead.
+        def cleanup_memory():
+            if self.inference_count % GC_EVERY_N_CALLS == 0:
+                import gc
+
+                gc.collect()
+
+        model.cleanup_memory = cleanup_memory
+
+        # Step-level progress: the diffusion loops iterate through
+        # tqdm(enumerate(timesteps), total=N). Replace the pipeline module's
+        # tqdm with a generator that reports the step counter.
+        try:
+            import acestep.pipeline_ace_step as pipeline_module
+
+            original_tqdm = pipeline_module.tqdm
+
+            def tracking_tqdm(iterable=None, *args, **kwargs):
+                total = kwargs.get("total")
+                if PROGRESS.phase == "diffusion" and total:
+                    PROGRESS.set_total(total)
+
+                    def gen():
+                        for i, item in enumerate(iterable):
+                            PROGRESS.set_step(i)
+                            yield item
+                        PROGRESS.set_step(total)
+
+                    return gen()
+                return original_tqdm(iterable, *args, **kwargs)
+
+            pipeline_module.tqdm = tracking_tqdm
+        except Exception as e:
+            logging.warning(f"Progress hook unavailable, using step estimates only: {e}")
+
+    def warmup(self, duration_s: float = 3.0, sample_rate: int = 48000, steps: int = 6):
+        """
+        Run one short throw-away inference so kernel compilation and memory
+        allocation happen at startup instead of on the first real request.
+        With input_strength=0.5 the audio2audio path runs steps // 2 diffusion
+        steps, so the default exercises the guided transformer forward pass.
+        """
+        if not self.is_loaded:
+            return
+        t = time.perf_counter()
+        n = int(duration_s * sample_rate)
+        tone = (0.2 * np.sin(2 * np.pi * 220.0 * np.arange(n) / sample_rate)).astype(np.float32)
+        self.infer_with_timings(
+            tone,
+            sample_rate=sample_rate,
+            prompt="warmup",
+            num_steps=steps,
+            input_strength=0.5,
+            audio_duration=duration_s,
+            seed=0,
+        )
+        self.inference_count = 0
+        logging.info(f"Warm-up finished in {time.perf_counter() - t:.1f}s")
+
+    def infer(self, audio_samples: np.ndarray, *args, **kwargs) -> np.ndarray:
+        """Run one inference cycle; see infer_with_timings for parameters."""
+        return self.infer_with_timings(audio_samples, *args, **kwargs)[0]
+
+    def infer_with_timings(
         self,
         audio_samples: np.ndarray,
         sample_rate: int = 48000,
@@ -334,11 +587,12 @@ class ACEStepWrapper:
                 reserved and fall back to "cover" with a warning.
 
         Returns:
-            Processed audio as float32 numpy array
+            Tuple of (processed float32 audio, per-phase timings in seconds).
+            The timings dict is empty on passthrough.
         """
         if not self.is_loaded or self.model is None:
             # Passthrough when model not loaded
-            return audio_samples
+            return audio_samples, {}
 
         # thinking=False bypasses the LM planner by disabling all ERG
         # guidance channels; the prompt is injected directly into the
@@ -353,7 +607,7 @@ class ACEStepWrapper:
         # extend/edit route to their native ACE-Step paths using the input
         # audio as src_audio.
         _TASK_MAP = {
-            "cover": None,           # audio2audio auto-set below
+            "cover": None,  # audio2audio auto-set below
             "repaint": "repaint",
             "extend": "extend",
             "edit": "edit",
@@ -370,9 +624,72 @@ class ACEStepWrapper:
         # Mapping: effective_steps = max(1, round(num_steps * denoise_strength)).
         denoise_strength = max(0.0, min(1.0, denoise_strength))
         if denoise_strength <= 0.0:
-            return audio_samples
+            return audio_samples, {}
         effective_steps = max(1, int(round(num_steps * denoise_strength)))
 
+        with self._infer_lock:
+            return self._run_pipeline(
+                audio_samples=audio_samples,
+                sample_rate=sample_rate,
+                prompt=prompt,
+                guidance_scale=guidance_scale,
+                effective_steps=effective_steps,
+                seed=seed,
+                input_strength=input_strength,
+                audio_duration=audio_duration,
+                denoise_strength=denoise_strength,
+                guidance_interval=guidance_interval,
+                guidance_interval_decay=guidance_interval_decay,
+                omega_scale=omega_scale,
+                min_guidance_scale=min_guidance_scale,
+                retake_variance=retake_variance,
+                scheduler_type=scheduler_type,
+                cfg_type=cfg_type,
+                use_erg_tag=use_erg_tag,
+                use_erg_lyric=use_erg_lyric,
+                use_erg_diffusion=use_erg_diffusion,
+                thinking=thinking,
+                task_type=task_type,
+                resolved_task=resolved_task,
+                use_repaint_path=use_repaint_path,
+            )
+
+    def _run_pipeline(
+        self,
+        audio_samples,
+        sample_rate,
+        prompt,
+        guidance_scale,
+        effective_steps,
+        seed,
+        input_strength,
+        audio_duration,
+        denoise_strength,
+        guidance_interval,
+        guidance_interval_decay,
+        omega_scale,
+        min_guidance_scale,
+        retake_variance,
+        scheduler_type,
+        cfg_type,
+        use_erg_tag,
+        use_erg_lyric,
+        use_erg_diffusion,
+        thinking,
+        task_type,
+        resolved_task,
+        use_repaint_path,
+    ):
+        """Execute one pipeline call while holding the inference lock."""
+        self._timings = {}
+        t_total = time.perf_counter()
+        # audio2audio noises the reference and runs only (1 - strength) of the steps.
+        estimated_steps = (
+            effective_steps
+            if use_repaint_path
+            else max(1, int(effective_steps * (1.0 - input_strength)))
+        )
+        PROGRESS.begin(estimated_steps)
         try:
             import soundfile as sf
 
@@ -381,7 +698,9 @@ class ACEStepWrapper:
 
             with tempfile.TemporaryDirectory() as tmp_dir:
                 tmp_input = os.path.join(tmp_dir, "input.wav")
+                t = time.perf_counter()
                 sf.write(tmp_input, audio_samples, sample_rate)
+                self._add_timing("input_write", time.perf_counter() - t)
 
                 infer_kwargs = dict(
                     prompt=prompt,
@@ -428,8 +747,11 @@ class ACEStepWrapper:
                     f"retake_var={retake_variance}, seed={seed}"
                 )
 
+                t_pipeline = time.perf_counter()
                 result = self.model(**infer_kwargs)
+                pipeline_s = time.perf_counter() - t_pipeline
 
+                t = time.perf_counter()
                 output_wav = None
                 if isinstance(result, list):
                     for item in result:
@@ -441,15 +763,46 @@ class ACEStepWrapper:
                     audio_out, sr_out = sf.read(output_wav, dtype="float32")
                     if audio_out.ndim > 1:
                         audio_out = audio_out.mean(axis=1)
+                    self._add_timing("output_read", time.perf_counter() - t)
                     self.inference_count += 1
-                    return audio_out.astype(np.float32)
+                    timings = self._finish_timings(t_total, pipeline_s)
+                    return audio_out.astype(np.float32), timings
                 else:
                     logging.warning("No output WAV found in pipeline result")
-                    return audio_samples
+                    return audio_samples, {}
 
         except Exception as e:
             logging.error(f"Inference error: {e}\n{traceback.format_exc()}")
-            return audio_samples  # Passthrough on error
+            return audio_samples, {}  # Passthrough on error
+        finally:
+            PROGRESS.end()
+
+    def _finish_timings(self, t_total: float, pipeline_s: float) -> dict:
+        """Derive the reported phase breakdown from the raw accumulators."""
+        raw = self._timings
+        cond = raw.get("cond_encode", 0.0)
+        diffusion = raw.get("diffusion", 0.0)
+        phases = {
+            "input_write": raw.get("input_write", 0.0),
+            "text_encode": raw.get("text_encode", 0.0),
+            "vae_encode": raw.get("vae_encode", 0.0),
+            "cond_encode": cond,
+            "diffusion_loop": max(0.0, diffusion - cond),
+            "vae_decode": raw.get("vae_decode", 0.0),
+            "output_read": raw.get("output_read", 0.0),
+        }
+        accounted = sum(phases.values()) - phases["input_write"] - phases["output_read"]
+        phases["other"] = max(0.0, pipeline_s - accounted)
+        phases["total"] = time.perf_counter() - t_total
+        phases = {k: round(v, 3) for k, v in phases.items()}
+        if TIMING_LOG:
+            logging.info(
+                "Timings: "
+                + ", ".join(f"{k}={v:.2f}s" for k, v in phases.items())
+                + f", text_cache_hits={int(raw.get('text_cache_hits', 0))}"
+            )
+        self.last_timings = phases
+        return phases
 
 
 # ---------------------------------------------------------------------------
@@ -583,10 +936,11 @@ def encode_wav_bytes(samples: np.ndarray, sample_rate: int = 48000) -> bytes:
 # ---------------------------------------------------------------------------
 # Payload Limits (DoS protection)
 # ---------------------------------------------------------------------------
-# Max base64 string length (~1.3 MB -> ~1 MB decoded). Covers ~10s mono float32.
-MAX_AUDIO_B64_LEN = 1_400_000
-# Max WAV bytes after decode. ~10s at 48 kHz mono float32.
-MAX_WAV_BYTES = 2_000_000
+# Max WAV bytes after decode. 12 MB covers 30 s of 48 kHz stereo float32
+# (11.52 MB) or 60 s mono; 3 s of stereo is only ~1.15 MB.
+MAX_WAV_BYTES = 12_000_000
+# Max base64 string length: ceil(MAX_WAV_BYTES / 3) * 4 plus slack.
+MAX_AUDIO_B64_LEN = 16_100_000
 
 
 # ---------------------------------------------------------------------------
@@ -633,11 +987,27 @@ def status():
             "device": ACE_WRAPPER.device if ACE_WRAPPER else "none",
             "error": ACE_WRAPPER.load_error if ACE_WRAPPER else None,
             "inference_count": (ACE_WRAPPER.inference_count if ACE_WRAPPER else 0),
+            "dtype": str(getattr(ACE_WRAPPER.model, "dtype", "unknown")) if ACE_WRAPPER else "none",
+            "max_wav_bytes": MAX_WAV_BYTES,
+            "progress": PROGRESS.snapshot(),
             "sample_rate": 48000,
             "buffer_size": 48000,
             "version": "0.2.0",
         }
     )
+
+
+@app.route("/progress", methods=["GET"])
+def progress():
+    """
+    Progress of the request currently being served.
+
+    Returns {state: idle|busy, phase, step, total_steps, elapsed_s, eta_s}.
+    `step` counts completed diffusion steps; `total_steps` is an estimate until
+    the pipeline reports the real count. `eta_s` is null until it can be
+    extrapolated from at least two completed steps.
+    """
+    return jsonify(PROGRESS.snapshot())
 
 
 @app.route("/shutdown", methods=["POST"])
@@ -760,7 +1130,7 @@ def infer():
         seed = safe_int(data.get("seed"), -1)
         input_strength = safe_float(data.get("input_strength"), 0.6)
         audio_duration = safe_float(data.get("audio_duration"), 10.0)
-        
+
         # Low-latency mode: cap inference steps for real-time performance.
         # Honors an explicit --max-steps if the server was launched with
         # one, otherwise falls back to a conservative default of 6.
@@ -811,7 +1181,7 @@ def infer():
         t0 = time.time()
 
         # Run inference — ALL parameters wired through
-        output_samples = ACE_WRAPPER.infer(
+        output_samples, timings = ACE_WRAPPER.infer_with_timings(
             audio_samples=samples,
             sample_rate=sr,
             prompt=prompt,
@@ -847,6 +1217,7 @@ def infer():
                 "duration_ms": round(duration_ms, 2),
                 "model_used": ACE_WRAPPER.is_loaded,
                 "model_type": ACE_WRAPPER.model_type,
+                "timings": timings,
             }
         )
 
@@ -888,25 +1259,40 @@ def main():
     parser.add_argument(
         "--low-latency",
         action="store_true",
-        help="Performance mode: reduce inference steps to 4-6 for live performance (legacy)"
+        help="Performance mode: reduce inference steps to 4-6 for live performance (legacy)",
     )
     parser.add_argument(
         "--performance-mode",
         action="store_true",
-        help="Enable performance mode (reduced steps, quantization) for live performance"
+        help="Enable performance mode (reduced steps, quantization) for live performance",
     )
     parser.add_argument(
         "--max-steps",
         type=int,
         default=None,
-        help="Maximum inference steps (performance mode: 4-8, studio: 20)"
+        help="Maximum inference steps (performance mode: 4-8, studio: 20)",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="auto",
+        choices=["auto", "float32", "float16", "bfloat16"],
+        help=(
+            "Model dtype. auto = float16 on MPS, ACE-Step default elsewhere. "
+            "Use float32 for the previous MPS behaviour."
+        ),
+    )
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help="Run one short inference after loading so the first request is not cold",
     )
     parser.add_argument(
         "--quantization",
         type=str,
         default=None,
         choices=["q8", "fp16", "fp32"],
-        help="Quantization mode: q8 (fast), fp16 (balanced), fp32 (quality)"
+        help="Quantization mode: q8 (fast), fp16 (balanced), fp32 (quality)",
     )
     args = parser.parse_args()
 
@@ -918,10 +1304,10 @@ def main():
     logging.info("=" * 60)
     logging.info("  ACE-Step Bridge Server v0.2.0")
     logging.info(f"  Device: {args.device}")
-    
+
     # Performance mode: legacy --low-latency or new --performance-mode
     is_performance_mode = args.low_latency or args.performance_mode
-    
+
     if is_performance_mode:
         perf_info = []
         if args.max_steps:
@@ -932,20 +1318,19 @@ def main():
             perf_info.append("4-6 steps")
         logging.info(f"  Mode: PERFORMANCE ({', '.join(perf_info)})")
     logging.info("=" * 60)
-    
+
     # Store performance mode flag in global
     global LOW_LATENCY_MODE
     LOW_LATENCY_MODE = is_performance_mode
-    
+
     # Store performance configuration
     global PERF_CONFIG
-    PERF_CONFIG = {
-        "max_steps": args.max_steps,
-        "quantization": args.quantization
-    }
+    PERF_CONFIG = {"max_steps": args.max_steps, "quantization": args.quantization}
 
     # Initialize model wrapper with explicit device
-    ACE_WRAPPER = ACEStepWrapper(model_path=args.model_path, device=args.device)
+    ACE_WRAPPER = ACEStepWrapper(model_path=args.model_path, device=args.device, dtype=args.dtype)
+    if args.warmup and ACE_WRAPPER.is_loaded:
+        ACE_WRAPPER.warmup()
 
     if ACE_WRAPPER.is_loaded:
         logging.info(f"✓ Model ready on {ACE_WRAPPER.device} — " f"full neural inference active")
@@ -955,7 +1340,9 @@ def main():
             logging.warning(f"  Reason: {ACE_WRAPPER.load_error}")
         else:
             logging.warning("  No model path specified. " "Use --model-path to load a model.")
-        logging.info("  Callers will receive passthrough audio from /infer until a model is loaded.")
+        logging.info(
+            "  Callers will receive passthrough audio from /infer until a model is loaded."
+        )
 
     logging.info("")
     logging.info(f"Starting server on {args.host}:{args.port}")

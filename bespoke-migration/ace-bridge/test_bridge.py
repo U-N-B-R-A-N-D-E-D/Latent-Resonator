@@ -30,6 +30,9 @@ __all__ = [
     "TestWAVCodecHeader",
     "TestFlaskEndpointsNoModel",
     "TestLiveInfer",
+    "TestProgress",
+    "TestInputLimits",
+    "TestInstrumentation",
 ]
 
 
@@ -242,9 +245,7 @@ def _default_model_path() -> str | None:
 
     # Resolve from repo root relative to this file:
     # ace-bridge/ -> bespoke-migration/ -> <repo root>/
-    repo_root = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..")
-    )
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     base_dir = os.path.join(repo_root, "models", "ace-step-v1.5-base")
 
     # Two layouts are accepted:
@@ -258,9 +259,7 @@ def _default_model_path() -> str | None:
     candidates: list[str] = []
 
     # (a) snapshot layout — scan all snapshots under the v1-3.5B cache dir
-    snap_root = os.path.join(
-        base_dir, "models--ACE-Step--ACE-Step-v1-3.5B", "snapshots"
-    )
+    snap_root = os.path.join(base_dir, "models--ACE-Step--ACE-Step-v1-3.5B", "snapshots")
     if os.path.isdir(snap_root):
         for entry in sorted(os.listdir(snap_root)):
             candidates.append(os.path.join(snap_root, entry))
@@ -324,9 +323,7 @@ class TestLiveInfer:
         assert model_path is not None
 
         wrapper = bridge.ACEStepWrapper(model_path=model_path, device="auto")
-        assert wrapper.is_loaded, (
-            f"Model failed to load from {model_path}: {wrapper.load_error}"
-        )
+        assert wrapper.is_loaded, f"Model failed to load from {model_path}: {wrapper.load_error}"
 
         sr = 48000
         n = sr // 4  # 0.25 s — keep wall time bounded
@@ -350,6 +347,227 @@ class TestLiveInfer:
         # Measurable energy — silence would indicate a broken pipeline.
         rms = float(np.sqrt(np.mean(out.astype(np.float64) ** 2)))
         assert rms > 1e-6, f"output RMS too low ({rms}); likely silent failure"
+
+
+# ---------------------------------------------------------------------------
+# Progress, input limits, instrumentation (no model required)
+# ---------------------------------------------------------------------------
+
+
+def _wav_b64_channels(duration_s: float, channels: int, sr: int = 48000) -> str:
+    """Encode a silent float32 WAV with the given channel count."""
+    import io
+
+    import soundfile as sf
+
+    n = int(sr * duration_s)
+    data = np.zeros((n, channels), dtype=np.float32)
+    buf = io.BytesIO()
+    sf.write(buf, data, sr, format="WAV", subtype="FLOAT")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+class TestProgress:
+    def test_progress_idle_shape(self, flask_client_passthrough):
+        r = flask_client_passthrough.get("/progress")
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["state"] == "idle"
+        assert body["step"] == 0
+        assert body["total_steps"] == 0
+        assert body["elapsed_s"] == 0.0
+
+    def test_tracker_lifecycle(self):
+        tracker = bridge.ProgressTracker()
+        tracker.begin(4)
+        tracker.set_phase("diffusion")
+        snap = tracker.snapshot()
+        assert snap["state"] == "busy"
+        assert snap["phase"] == "diffusion"
+        assert snap["total_steps"] == 4
+        assert snap["eta_s"] is None
+
+        tracker.set_step(1)
+        tracker.set_step(2)
+        snap = tracker.snapshot()
+        assert snap["step"] == 2
+        assert snap["eta_s"] is not None and snap["eta_s"] >= 0.0
+
+        tracker.set_total(3)
+        assert tracker.snapshot()["total_steps"] == 3
+        tracker.end()
+        assert tracker.snapshot()["state"] == "idle"
+
+    def test_phase_ignored_when_idle(self):
+        tracker = bridge.ProgressTracker()
+        tracker.set_phase("diffusion")
+        assert tracker.snapshot()["phase"] == "idle"
+
+    def test_status_reports_progress(self, flask_client_passthrough):
+        body = flask_client_passthrough.get("/status").get_json()
+        assert body["progress"]["state"] == "idle"
+        assert body["max_wav_bytes"] == bridge.MAX_WAV_BYTES
+
+
+class TestInputLimits:
+    def test_limits_cover_30s_stereo_float32(self):
+        stereo_30s_bytes = 30 * 48000 * 2 * 4 + 44
+        assert bridge.MAX_WAV_BYTES >= stereo_30s_bytes
+        b64_len = (stereo_30s_bytes + 2) // 3 * 4
+        assert bridge.MAX_AUDIO_B64_LEN >= b64_len
+
+    def test_limits_stay_bounded(self):
+        assert bridge.MAX_WAV_BYTES <= 32_000_000
+        assert bridge.MAX_AUDIO_B64_LEN <= 44_000_000
+
+    def test_stereo_3s_accepted(self, flask_client_passthrough):
+        r = flask_client_passthrough.post("/infer", json={"audio": _wav_b64_channels(3.0, 2)})
+        assert r.status_code == 200
+
+    @pytest.mark.parametrize("channels", [1, 2])
+    def test_30s_accepted(self, flask_client_passthrough, channels):
+        r = flask_client_passthrough.post(
+            "/infer", json={"audio": _wav_b64_channels(30.0, channels)}
+        )
+        assert r.status_code == 200
+        assert r.get_json()["num_samples"] == 30 * 48000
+
+    def test_oversized_base64_rejected_413(self, flask_client_passthrough):
+        r = flask_client_passthrough.post(
+            "/infer", json={"audio": "A" * (bridge.MAX_AUDIO_B64_LEN + 1)}
+        )
+        assert r.status_code == 413
+
+    def test_oversized_decoded_wav_rejected_413(self, flask_client_passthrough):
+        # 40 s stereo float32 is 15.4 MB decoded, above MAX_WAV_BYTES.
+        r = flask_client_passthrough.post("/infer", json={"audio": _wav_b64_channels(40.0, 2)})
+        assert r.status_code == 413
+
+
+class _StubTransformer:
+    def encode(self, *args, **kwargs):
+        return None
+
+
+class _StubPipeline:
+    """Minimal stand-in exposing the ACEStepPipeline methods the wrapper wraps."""
+
+    dtype = "stub"
+
+    def __init__(self):
+        self.text_calls = 0
+        self.ace_step_transformer = _StubTransformer()
+
+    def get_text_embeddings(self, texts, text_max_length=256):
+        self.text_calls += 1
+        return ("hidden:" + texts[0], "mask")
+
+    def get_text_embeddings_null(self, texts, text_max_length=256):
+        self.text_calls += 1
+        return "null:" + texts[0]
+
+    def infer_latents(self, path):
+        return "latents"
+
+    def text2music_diffusion_process(self, **kwargs):
+        self.ace_step_transformer.encode()
+        return "target"
+
+    def latents2audio(self, latents, save_path=None, **kwargs):
+        import soundfile as sf
+
+        out = os.path.join(save_path, "out.wav")
+        sf.write(out, np.full((4800, 2), 0.25, dtype=np.float32), 48000)
+        return [out]
+
+    def cleanup_memory(self):
+        pass
+
+    def __call__(self, prompt=None, ref_audio_input=None, save_path=None, **kwargs):
+        self.get_text_embeddings([prompt])
+        self.get_text_embeddings_null([prompt])
+        self.infer_latents(ref_audio_input)
+        latents = self.text2music_diffusion_process()
+        return self.latents2audio(latents, save_path=save_path) + [{}]
+
+
+@pytest.fixture
+def stub_wrapper(monkeypatch):
+    try:
+        import acestep.pipeline_ace_step as pipeline_module
+
+        # Registers the original for restoration after the test.
+        monkeypatch.setattr(pipeline_module, "tqdm", pipeline_module.tqdm)
+    except ImportError:
+        pass
+    wrapper = bridge.ACEStepWrapper(model_path=None, device="cpu")
+    wrapper.model = _StubPipeline()
+    wrapper.device = "cpu"
+    wrapper.is_loaded = True
+    wrapper._instrument_pipeline()
+    return wrapper
+
+
+class TestInstrumentation:
+    def _tone(self):
+        return (0.3 * np.sin(np.linspace(0, 200, 4800))).astype(np.float32)
+
+    def test_timings_reported_per_phase(self, stub_wrapper):
+        out, timings = stub_wrapper.infer_with_timings(self._tone(), prompt="pad")
+        assert len(out) == 4800
+        for key in (
+            "input_write",
+            "text_encode",
+            "vae_encode",
+            "cond_encode",
+            "diffusion_loop",
+            "vae_decode",
+            "output_read",
+            "other",
+            "total",
+        ):
+            assert key in timings and timings[key] >= 0.0
+        assert stub_wrapper.inference_count == 1
+        assert stub_wrapper.last_timings == timings
+
+    def test_text_cache_reuses_embeddings(self, stub_wrapper):
+        stub_wrapper.infer_with_timings(self._tone(), prompt="pad")
+        assert stub_wrapper.model.text_calls == 2
+        stub_wrapper.infer_with_timings(self._tone(), prompt="pad")
+        assert stub_wrapper.model.text_calls == 2
+        stub_wrapper.infer_with_timings(self._tone(), prompt="other prompt")
+        assert stub_wrapper.model.text_calls == 4
+
+    def test_text_cache_is_bounded(self, stub_wrapper):
+        for i in range(bridge.TEXT_CACHE_SIZE + 5):
+            stub_wrapper.model.get_text_embeddings([f"prompt {i}"])
+        calls = stub_wrapper.model.text_calls
+        stub_wrapper.model.get_text_embeddings(["prompt 0"])
+        assert stub_wrapper.model.text_calls == calls + 1
+
+    def test_progress_returns_to_idle(self, stub_wrapper):
+        stub_wrapper.infer_with_timings(self._tone(), prompt="pad")
+        assert bridge.PROGRESS.snapshot()["state"] == "idle"
+
+    def test_infer_returns_audio_only(self, stub_wrapper):
+        out = stub_wrapper.infer(self._tone(), prompt="pad")
+        assert isinstance(out, np.ndarray)
+
+    def test_tqdm_hook_reports_steps(self, stub_wrapper):
+        pipeline_module = pytest.importorskip("acestep.pipeline_ace_step")
+        bridge.PROGRESS.begin(9)
+        bridge.PROGRESS.set_phase("diffusion")
+        try:
+            seen = []
+            for i, item in pipeline_module.tqdm(enumerate(["a", "b", "c"]), total=3):
+                seen.append(item)
+                assert bridge.PROGRESS.snapshot()["step"] == i
+            snap = bridge.PROGRESS.snapshot()
+            assert seen == ["a", "b", "c"]
+            assert snap["step"] == 3
+            assert snap["total_steps"] == 3
+        finally:
+            bridge.PROGRESS.end()
 
 
 if __name__ == "__main__":
