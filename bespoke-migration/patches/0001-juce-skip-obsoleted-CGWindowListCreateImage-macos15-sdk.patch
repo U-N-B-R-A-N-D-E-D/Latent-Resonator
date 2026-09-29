@@ -1,0 +1,67 @@
+Local compatibility patch for the JUCE submodule (libs/JUCE) of Bespoke Synth.
+
+Apply from the JUCE submodule root:   git -C <bespoke>/libs/JUCE apply <this file>
+(scripts/apply_module.sh does this for you, idempotently.)
+
+Why it is needed
+  The macOS 15.x SDK (verified with SDK 15.5) marks CGWindowListCreateImage as
+  fully unavailable ("obsoleted"), not merely deprecated. The JUCE revision
+  pinned by upstream Bespoke (see below) calls it in createNSWindowSnapshot()
+  and only silences the *deprecation* warning, so juceaide fails to compile
+  juce_Windowing_mac.mm with a macOS 15 SDK (Xcode 16.x). On MAC_OS_VERSION_15_0+
+  SDKs this patch skips the call and yields a null CGImageRef. Behaviour for SDKs
+  older than 15.0 is unchanged. The function is only used for window-snapshot
+  capture; audio and the Latent Resonator module never touch it.
+  Caveat: on 15+ SDKs a code path that requests a native window snapshot gets a
+  null image (Bespoke does not use this path in normal operation).
+
+Versions
+  Bespoke Synth base : f3cdd38ed756da1edd745f7e4c25bd6575b8561b
+                       (upstream BespokeSynth/BespokeSynth, "Fix a settings label
+                       overlapping with a control element (#2115)")
+  JUCE submodule base: 4f43011b96eb0636104cb3e433894cda98243626
+                       (describe: 6.0.8-2406, Bespoke's JUCE fork)
+  Source of this diff: local commit 37861a6a7b in the working fork's libs/JUCE.
+  Not upstreamed. If upstream Bespoke bumps JUCE to a revision that already
+  handles this, drop the patch (apply_module.sh skips it when it does not apply
+  and the code is already fixed; see the script).
+
+diff --git a/modules/juce_gui_basics/native/juce_Windowing_mac.mm b/modules/juce_gui_basics/native/juce_Windowing_mac.mm
+index ad459d483e..f94d5d053f 100644
+--- a/modules/juce_gui_basics/native/juce_Windowing_mac.mm
++++ b/modules/juce_gui_basics/native/juce_Windowing_mac.mm
+@@ -524,19 +524,27 @@ static Image createNSWindowSnapshot (NSWindow* nsWindow)
+         // that framework is only available from macOS 12.3 onwards.
+         // A suitable @available check should be added once the minimum build OS is 12.3 or greater,
+         // so that ScreenCaptureKit can be weak-linked.
+-       #if defined (MAC_OS_VERSION_14_0) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_VERSION_14_0
+-        JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wdeprecated-declarations")
+-        #define JUCE_DEPRECATION_IGNORED 1
+-       #endif
++       #if defined (MAC_OS_VERSION_15_0) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_VERSION_15_0
++        // CGWindowListCreateImage is fully unavailable (obsoleted) as of the macOS 15.0 SDK.
++        // A ScreenCaptureKit-based replacement should be added once the minimum build OS
++        // allows weak-linking it; until then, skip the call and return a null image so this
++        // (window-snapshot-only) helper simply produces no snapshot on macOS 15 SDKs.
++        CGImageRef screenShot = nullptr;
++       #else
++        #if defined (MAC_OS_VERSION_14_0) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_VERSION_14_0
++         JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wdeprecated-declarations")
++         #define JUCE_DEPRECATION_IGNORED 1
++        #endif
+ 
+         CGImageRef screenShot = CGWindowListCreateImage (CGRectNull,
+                                                          kCGWindowListOptionIncludingWindow,
+                                                          (CGWindowID) [nsWindow windowNumber],
+                                                          kCGWindowImageBoundsIgnoreFraming);
+ 
+-       #if JUCE_DEPRECATION_IGNORED
+-        JUCE_END_IGNORE_WARNINGS_GCC_LIKE
+-        #undef JUCE_DEPRECATION_IGNORED
++        #if JUCE_DEPRECATION_IGNORED
++         JUCE_END_IGNORE_WARNINGS_GCC_LIKE
++         #undef JUCE_DEPRECATION_IGNORED
++        #endif
+        #endif
+ 
+         NSBitmapImageRep* bitmapRep = [[NSBitmapImageRep alloc] initWithCGImage: screenShot];

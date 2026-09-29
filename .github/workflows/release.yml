@@ -1,85 +1,98 @@
-# Create GitHub Release with zip when a version tag is pushed (e.g. v1.0.2)
+# Build the Latent Resonator standalone (Bespoke Synth fork + module) and
+# publish a DRAFT GitHub release when a version tag (v*) is pushed.
+#
+# WARNING: THIS WORKFLOW COULD NOT BE TESTED LOCALLY. Its building blocks
+# (scripts/apply_module.sh, scripts/package_macos.sh) were exercised on a
+# scratch copy, but the cmake build on the macos-14 runner and the release
+# step have never run. Expect to iterate on the first tag (try a v0.0.0-rc1).
+#
+# Uses only the default GITHUB_TOKEN.
 name: Release
 
 on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag to release (e.g. v1.0.0 or v1.0.2)'
-        required: true
-        type: string
 
 permissions:
-  contents: write  # Required to create releases and upload assets
+  contents: write
 
 jobs:
   release:
-    name: Build and Release
+    name: Build macOS arm64 and draft release
     runs-on: macos-14
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out this repository
+        uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          path: project
 
-      - name: Set version
-        id: version
+      - name: Read pinned Bespoke commit
+        id: pin
+        shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${INPUT_TAG#v}" >> $GITHUB_OUTPUT
-            echo "tag_name=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            echo "tag_name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          fi
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . project/bespoke-migration/patches/BESPOKE_BASE.txt
+          echo "repo=${BESPOKE_REPO}" >> "$GITHUB_OUTPUT"
+          echo "commit=${BESPOKE_COMMIT}" >> "$GITHUB_OUTPUT"
+
+      - name: Clone upstream Bespoke Synth at the pinned commit
+        shell: bash
         env:
-          INPUT_TAG: ${{ github.event.inputs.tag }}
-
-      - name: Select Xcode
+          BESPOKE_REPO: ${{ steps.pin.outputs.repo }}
+          BESPOKE_COMMIT: ${{ steps.pin.outputs.commit }}
         run: |
-          sudo xcode-select -s /Applications/Xcode_15.4.app \
-            || sudo xcode-select -s /Applications/Xcode_15.2.app \
-            || sudo xcode-select -s /Applications/Xcode.app
+          set -euo pipefail
+          git clone "$BESPOKE_REPO" bespoke
+          git -C bespoke checkout "$BESPOKE_COMMIT"
+          git -C bespoke submodule update --init --recursive
+
+      - name: Apply module and JUCE patch
+        run: project/scripts/apply_module.sh bespoke
+
+      - name: Configure
+        run: |
+          cmake -S bespoke -B bespoke/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64
 
       - name: Build
-        working-directory: LatentResonator
-        run: |
-          set -o pipefail
-          xcodebuild build \
-            -project LatentResonator.xcodeproj \
-            -scheme LatentResonator \
-            -destination 'platform=macOS' \
-            -configuration Debug \
-            -derivedDataPath ./build \
-            CODE_SIGNING_ALLOWED=NO \
-            ONLY_ACTIVE_ARCH=YES
+        run: cmake --build bespoke/build --config Release --parallel 4
 
-      - name: Ad-hoc sign app
-        working-directory: LatentResonator
-        run: |
-          APP_PATH="build/Build/Products/Debug/LatentResonator.app"
-          codesign --force --deep --sign - "$APP_PATH"
-        # Ad-hoc signing avoids "damaged" Gatekeeper message for unsigned downloads
-
-      - name: Zip app
-        working-directory: LatentResonator
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          APP_PATH="build/Build/Products/Debug/LatentResonator.app"
-          mkdir -p dist
-          cp -R "$APP_PATH" "dist/LatentResonator.app"
-          cd dist && zip -r "../LatentResonator-${VERSION}-macOS.zip" LatentResonator.app && cd ..
-          echo "ZIP_PATH=LatentResonator/LatentResonator-${VERSION}-macOS.zip" >> $GITHUB_ENV
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.tag_name }}
-          files: ${{ env.ZIP_PATH }}
-          generate_release_notes: true
-          draft: false
+      - name: Package
+        id: package
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_DIR: ${{ github.workspace }}/bespoke/build
+          OUT_DIR: ${{ github.workspace }}/dist
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          project/scripts/package_macos.sh
+          zip_path="$(ls dist/LatentResonator-*-macOS-arm64.zip)"
+          echo "zip=${zip_path}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 -c ./*.sha256
+          cat ./*.sha256
+
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          ZIP: ${{ steps.package.outputs.zip }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --generate-notes \
+            --title "Latent Resonator $TAG"
