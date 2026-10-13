@@ -1,674 +1,187 @@
 # Latent Resonator
 
-[![CI](https://github.com/U-N-B-R-A-N-D-E-D/Latent-Resonator/actions/workflows/ci.yml/badge.svg)](https://github.com/U-N-B-R-A-N-D-E-D/Latent-Resonator/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Platform: macOS 14+](https://img.shields.io/badge/Platform-macOS%2014+-blue.svg)]()
-[![Swift 5](https://img.shields.io/badge/Swift-5-orange.svg)]()
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB.svg)]()
-[![v1.0.3](https://img.shields.io/badge/version-1.0.3-gray.svg)](CHANGELOG.md)
+**A recursive neural resampler, built as a custom module inside a fork of [Bespoke Synth](https://www.bespokesynth.com/).**
 
-**A Non-Linear Spectral Processor powered by recursive neural inference.**
-
-Latent Resonator transforms the ACE-Step 1.5 neural audio synthesis architecture into an executable instrument. Instead of generating songs, it establishes a *Neural Feedback Loop*--where inference output feeds back as input--inducing **generative degradation** that reveals the latent timbral biases of the neural network.
-
-Grounded in the avant-garde traditions of Musique Concrète (Schaeffer), Stochastic Synthesis (Xenakis), Microsound (Roads), and Algorithmic Composition (Koenig), the system treats a diffusion model not as a composer but as a **Black Box Resonator**.
+Latent Resonator captures audio, runs it through the ACE-Step music model, feeds the result back in, and repeats. Each pass regenerates the sound a little further from its source, so the model's own timbral tendencies (metallic, granular, smeared) accumulate. You audition the resulting takes and play with them using Bespoke Synth's own real-time nodes (looper, granulator, filters).
 
 > *"We do not create music; we organize sound, and in the process, we allow the machine to reveal its own acoustic unconscious."*
 
-## Screenshots
+## What it is, and what it is not
 
-| Setup | Perform |
-|-------|---------|
-| [![Setup](docs/screenshots/setup.png)](docs/screenshots/setup.png) | [![Perform](docs/screenshots/perform.png)](docs/screenshots/perform.png) |
+**It is** an asynchronous neural texture generator. One iteration takes seconds on the current bridge (see [Measured performance](#measured-performance)). You trigger it, wait, and get a take back.
 
-*Setup: multi-lane configuration, Drift Field, channel mixer. Perform: Motherbase, step grid, P-locks, XY pad, lane headers.*
+**It is not** a real-time effect. Neural inference does not run in the audio path and cannot run at audio rate. Earlier drafts of this project claimed "<200 ms" and "<5 ms" neural latency; those claims were wrong and have been removed. Only Bespoke Synth's own DSP nodes are real-time.
 
----
+**It does not preserve your input.** At `input_strength` 0.6 the output is largely regenerated: measured waveform correlation with the input was approximately zero. Think "resampled through a model's imagination," not "processed."
 
-## Audio Demo
+Other limits, up front:
 
-**Texture Improvisation** -- 14 minutes 47 seconds of a live recursive session, unedited.
-Euclidean impulses (Koenig Seed) enter the Neural Feedback Loop and emerge as self-organizing metallic textures, spectral drones, and granular artifacts.
+- Verified only on Apple Silicon macOS. Nothing else has been tested.
+- Bespoke Synth has no plugin system, so this is a whole-app fork, not an add-on. There is no packaged download yet.
+- Model weights are never bundled. You download them yourself (~16 GB).
+- Interactive use of the module has had a first hands-on pass only; expect rough edges.
 
-[**Listen: latent_resonator_texture_improv.mp3**](docs/audio/latent_resonator_texture_improv.mp3) *(48 kHz stereo, 31 MB, 14m 47s)*
+## How the recursion works
 
-*Mastered to -15 LUFS integrated with brick-wall limiter at -0.1 dBTP.*
-
----
-
-## Download
-
-Pre-built macOS apps are available in [Releases](https://github.com/U-N-B-R-A-N-D-E-D/Latent-Resonator/releases). Download the zip, unzip, and drag `LatentResonator.app` to Applications (or run from anywhere).
-
-**If macOS says the app is "damaged":** Gatekeeper blocks unsigned downloads. In Terminal:
-```bash
-xattr -cr /path/to/LatentResonator.app
+```
+S(i+1) = ACE( S(i) + N(mu, sigma), P, gamma )
 ```
 
----
+| Symbol | Meaning |
+|---|---|
+| `S(i)` | Audio at iteration `i` (S(0) is the captured input) |
+| `N(mu, sigma)` | Gaussian noise added before the model sees the audio |
+| `P` | Text prompt (semantic conditioning) |
+| `gamma` | Sent to the bridge as `denoise_strength`, which scales the number of diffusion steps (`round(num_steps * gamma)`). How much of the input survives is governed separately by the bridge's `input_strength` (default 0.6), which the module does not yet expose |
+
+Each pass is an audio-to-audio diffusion run: the input is partially noised and the model denoises it toward the prompt. Feeding the output back makes the whole system behave like a feedback loop with a nonlinear, learned "filter" in it. The [whitepaper](docs/whitepaper.md) covers the theory (Lucier's *I Am Sitting in a Room*, SDEdit-style partial denoising, model-collapse literature) and lists the hypotheses we still have to test.
 
 ## Architecture
 
-The system runs on two independent clocks. The **real-time DSP path** (solid lines) processes audio at buffer rate (<5 ms latency). The **async inference path** (dotted lines) sends captured audio to ACE-Step or Core ML in the background (2-30 s per cycle) and feeds the hallucinated result back into the mix. When no neural engine is connected, the DSP path operates standalone as the "Black Box Resonator."
+Two clocks, deliberately separated:
+
+- **Slow neural layer** (seconds to minutes): the ACE-Step model, running in a Python subprocess.
+- **Fast DSP layer** (audio rate): Bespoke Synth's stock nodes, where you audition and perform the takes.
 
 ```mermaid
 graph TD
-    subgraph realtime ["Real-Time Path -- less than 5 ms"]
-        Excitation["Excitation Sources\nKoenig Seed / Mic / Noise / Sine"]
-        FeedbackMix["Feedback Mix\nexcitation + feedback * gain"]
-        DSP["SpectralProcessor\n13-stage FFT chain"]
-        Delay["Delay Line\nLucier Chamber"]
-        LaneMixer["Lane Mixer"]
-        MasterMixer["Master Mixer"]
-        Output["Speaker / Recording"]
-    end
-
-    subgraph inference ["Async Inference Path -- 2-30 s"]
-        CaptureBuffer["CircularAudioBuffer\nlock-free SPSC ring"]
-        Bridge["ACE-Step Bridge\nPyTorch + MPS"]
-        CoreML["Core ML Pipeline\nVAE - DiT - VAE"]
-        FeedbackBuffer["Feedback Buffer"]
-    end
-
-    Excitation --> FeedbackMix
-    FeedbackMix --> DSP
-    DSP --> Delay
-    Delay --> LaneMixer
-    LaneMixer --> MasterMixer
-    MasterMixer --> Output
-
-    LaneMixer -.->|"capture tap"| CaptureBuffer
-    CaptureBuffer -.-> Bridge
-    CaptureBuffer -.-> CoreML
-    Bridge -.->|"hallucinated audio"| FeedbackBuffer
-    CoreML -.->|"hallucinated audio"| FeedbackBuffer
-    FeedbackBuffer -.->|"recursive loop"| FeedbackMix
+    Input["Audio input"] --> Snapshot["Snapshot buffer S(i)\n(audio thread)"]
+    Snapshot -->|"trigger: button or patch-cable pulse"| Noise["+ N(mu, sigma)"]
+    Noise --> Worker["Background worker thread"]
+    Worker -->|"HTTP POST /infer"| Bridge["Python bridge\n(ACE-Step v1 3.5B)"]
+    Bridge -->|"WAV"| Worker
+    Worker -->|"atomic publish"| Out["Double-buffered output"]
+    Out --> Play["Patch cable output\n-> looper, granulator, ...\n(real-time Bespoke DSP)"]
+    Out -.->|"optional: next S(i)"| Snapshot
 ```
 
-### Core Components
+- **Module** (`bespoke-migration/module/`): C++ module registered in Bespoke as `latentresonator`. Neural inference is isolated from both the audio and UI threads.
+- **Bridge** (`bespoke-migration/ace-bridge/`): standalone Python HTTP server that wraps ACE-Step. It binds to `127.0.0.1` only and has no authentication; do not expose it to a network.
 
-| Component | File | Purpose |
-|---|---|---|
-| **Neural Engine** | `NeuralEngine.swift` | Orchestrates the feedback loop, AVAudioEngine, and parameter control |
-| **Sequencer Engine** | `SequencerEngine.swift` | Step grid state, advance logic, BPM, chain length |
-| **Scene Manager** | `SceneManager.swift` | Scene bank, apply/capture, crossfade blending |
-| **Core ML Inference** | `CoreMLInference.swift` | VAE Encoder -> DiT -> VAE Decoder pipeline with latent state management |
-| **ACE-Step Bridge** | `ACEStepBridge.swift` | Swift async HTTP client for the Python bridge server |
-| **WAV Codec** | `WAVCodec.swift` | WAV encoding/decoding for audio-to-HTTP transport |
-| **Spectral Processor** | `SpectralProcessor.swift` | FFT-based Non-Linear Spectral Processor / Black Box Resonator (DSP fallback) |
-| **Signal Generator** | `SignalGenerator.swift` | Multi-source excitation signals (noise, sine, impulses, mic input) |
-| **Koenig Seed** | `KoenigSeedGenerator.swift` | Generates Euclidean rhythm E(5,13) Dirac impulses with Gaussian noise tails |
-| **Circular Buffer** | `CircularAudioBuffer.swift` | Lock-free SPSC ring buffer for audio-to-inference thread communication |
-| **Resonator Lane** | `ResonatorLane.swift` | Self-contained recursive feedback loop per lane -- implements S(i+1) = ACE(S(i) + N, P, gamma) |
-| **Bridge Process Mgr** | `BridgeProcessManager.swift` | Manages Python bridge lifecycle: venv creation, deps, server launch, model auto-discovery |
-| **Audio Recorder** | `AudioRecorder.swift` | Master recording to WAV in Documents |
-| **Vectorscope** | _(TBI)_ | Metal-rendered Lissajous display -- deferred until a lower-memory implementation is available |
-| **Bridge Server** | `ace_bridge_server.py` | Python HTTP server wrapping ACE-Step 1.5 inference |
-| **Design System** | `Config/Constants.swift` (`DS` enum) | Centralized design tokens: typography scale, semantic colors, spacing, radii |
-| **UI Components** | `Views/LRComponents.swift` | Reusable SwiftUI primitives: LRToggle, LRSegmentPicker, LRStatusRow, LRActionButton, LRParamSlider, LRSectionHeader, LRDivider |
-| **UI Views** | `Views/` | SwiftUI views: LatentResonatorView (Setup), PerformanceMotherbaseView (Perform), LaneStripView, RetroKnob, LatentXYPad, SceneCrossfaderView |
-
-### The Neural Feedback Loop
-
-```
-S(i+1) = ACE( S(i) + N(μ,σ), P, γ )
-```
-
-- **S(i)** -- audio signal at iteration *i*
-- **N(μ,σ)** -- Gaussian noise (controlled by `inputStrength`)
-- **P** -- abstract prompt vector (evolves across iterations)
-- **γ** -- Guidance Scale / CFG (15.0–18.0 to overdrive the renderer)
-
----
+Build details, including the exact registration diffs against a Bespoke checkout, are in [`bespoke-migration/module/BUILD_VERIFICATION.md`](bespoke-migration/module/BUILD_VERIFICATION.md).
 
 ## Requirements
 
-| Requirement | Minimum | Recommended |
-|---|---|---|
-| **Chip** | Apple M1 | M1 Pro / M2 / M3 |
-| **RAM** | 8 GB unified | 16 GB unified |
-| **OS** | macOS 14.0 (Sonoma) | macOS 15 (Sequoia) |
-| **Xcode** | 15.0+ | 15.4+ |
-| **Python** | 3.10+ *(bridge server only, optional)* | 3.11 |
-| **Disk** | ~200 MB (app) | ~7 GB (with ACE-Step model weights) |
-| **Microphone** | Required for live audio input | -- |
+| Requirement | Detail |
+|---|---|
+| Machine | Apple Silicon Mac (the only platform verified) |
+| Python | 3.12 virtual environment for the bridge |
+| Disk | ~16 GB for ACE-Step weights (not bundled) |
+| Toolchain | CMake and Xcode Command Line Tools, to build Bespoke Synth |
+| Model | ACE-Step v1 3.5B is what the bridge loads |
 
-### Portability & Security
+The `acestep-v15-turbo` folder that some downloads contain has no weights in our setup, and the turbo variant is not usable here.
 
-The project is designed to run on any Mac without machine-specific paths or secrets:
+## Try it (standalone zip)
 
-- **Paths**: Model directory defaults to `~/Documents/LatentResonatorModels/`; recordings to `~/Documents/LatentResonator/`. Both configurable in Settings > Config.
-- **Bridge**: Binds to `127.0.0.1` only (local use). No authentication; do not expose to the network.
-- **Secrets**: No API keys or credentials in the repo. `.gitignore` excludes `.env`, `*.key`, `*.pem`.
-- **Python venv**: App creates `~/Library/Application Support/LatentResonator/venv-ace-bridge/` (user-writable; fixes "Failed to create venv" when app is in /Applications or read-only locations).
+`scripts/package_macos.sh` assembles `LatentResonator-<version>-macOS-arm64.zip`: the fork's `BespokeSynth.app`, the bridge, an example patch, licenses and a source offer. It is ad-hoc signed, not notarized, and there is no public download yet. Its `QUICKSTART.txt` has the exact steps; in short:
 
-### Optional: Core ML Models
+1. `cd ace-bridge && ./setup_ace_bridge.sh --with-model` creates the Python 3.12 venv and `models/ace-step/`, and the bridge downloads the ~7.7 GB checkpoint on first load. Stop it with Ctrl+C when the model is ready.
+2. Optionally load `examples/latent_resonator_demo.json` (copy it to `~/Documents/BespokeSynth/layouts/` and set `"layout"` in `~/Documents/BespokeSynth/userprefs.json`), or wire `signalgenerator` -> `latentresonator` -> `gain` -> outputs by hand.
+3. Open the app. The module starts its own bridge and finds the weights in `models/ace-step` next to the app (or in `LATENT_RESONATOR_MODEL_PATH`). Raise `vol` on the signal generator, then press `regenerate`.
 
-The app gracefully degrades to DSP-only processing (Black Box Resonator mode) if Core ML models are not present. To enable full neural inference:
+What was verified for the zip layout: the module finds the bridge script, the venv and the weights by itself, and the bridge reports the model loaded in float16 on MPS. The example patch loads with all cables wired. Not verified by hand: audio playback, the progress bar during a run, iterate/cancel, and save/load of the patch.
 
-1. Run the conversion script:
-   ```bash
-   cd LatentResonator/LatentResonator/Scripts
-   pip install -r requirements.txt
-   python convert_ace_to_coreml.py
-   ```
-2. Copy the generated `.mlpackage` files to `LatentResonator/Resources/`
+### Module controls
 
-### ACE-Step Bridge Server (Recommended)
+| Control | Effect |
+|---|---|
+| `prompt` | Text conditioning |
+| `input strength` | Bridge `input_strength` (0-1, default 0.6): how much of the input the model keeps before denoising |
+| `steps`, `guidance`, `seed` (`lock seed`) | Diffusion steps, guidance scale, seed (-1 = random) |
+| `gamma (step scale)` | Bridge `denoise_strength`; scales the number of steps actually run |
+| `noise mu` / `noise sigma` | Gaussian noise added to the snapshot before each pass |
+| `iterate`, `cancel` | Feed each take back as the next input, up to N times |
+| `dry monitor`, `out gain dB`, `normalize take`, `loop take` | Hear the live input, adjust level, normalize to about -3 dBFS, loop the last take |
+| `regenerate` (button or pulse input) | Snapshot the input and start a take |
 
-The ACE-Step Bridge provides a Python HTTP server that wraps ACE-Step 1.5 inference, allowing the Swift app to offload neural processing to PyTorch with MPS (Metal) acceleration.
+## Quick start (build)
 
-```
-┌─────────────────────┐    HTTP/JSON     ┌─────────────────────┐
-│   Latent Resonator  │  <──────────>   │  ACE-Step Bridge    │
-│   (Swift / macOS)   │    base64 WAV    │  (Python / PyTorch) │
-│                     │                  │                     │
-│  • DSP Processor    │    /health       │  • ACE-Step 1.5     │
-│  • Feedback Loop    │    /infer        │  • MPS/CUDA accel   │
-│  • Vectorscope (TBD)│    /status       │  • Passthrough mode │
-└─────────────────────┘                  └─────────────────────┘
-```
-
-**Quick Start (passthrough mode -- no model download needed):**
+Bespoke Synth has no plugin system, so every module is compiled into the one binary. This repository does not vendor Bespoke's source tree; it owns only the module and the bridge.
 
 ```bash
-cd LatentResonator/LatentResonator/Scripts
-./setup_ace_bridge.sh
+git clone https://github.com/BespokeSynth/BespokeSynth
+cd BespokeSynth
+git submodule update --init --recursive
+cmake -Bignore/build -DCMAKE_BUILD_TYPE=Release
+
+# Copy this repo's module in, then wire it up as documented in
+# bespoke-migration/module/BUILD_VERIFICATION.md:
+#   - copy ModuleACEResonator.h / .cpp into Source/
+#   - add the #include and this line to Source/ModuleFactory.cpp:
+#       REGISTER(ModuleACEResonator, latentresonator, kModuleCategory_Synth);
+#   - add both filenames to target_sources() in Source/CMakeLists.txt
+
+cmake --build ignore/build --target BespokeSynth --parallel 4 --config Release
+
+# Place the bridge next to the built app:
+cp -R /path/to/this/repo/bespoke-migration/ace-bridge ./ace-bridge
 ```
 
-This creates a Python virtual environment, installs dependencies, and starts the bridge server on `http://127.0.0.1:8976`. The Swift app will auto-detect it via health polling.
-
-**With full model download (~7GB):**
+The result is `ignore/build/Source/BespokeSynth_artefacts/Release/BespokeSynth.app`. Set up the bridge's Python 3.12 venv and place ACE-Step weights as described in [`bespoke-migration/ace-bridge/`](bespoke-migration/ace-bridge/). Bridge tests:
 
 ```bash
-./setup_ace_bridge.sh --with-model
+pytest bespoke-migration/ace-bridge/test_bridge.py -v
 ```
 
-**With an existing model:**
+Known gap: the module ports the bridge launch, health-check and shutdown lifecycle, but not the old app's automatic dependency install and repair logic. See `BUILD_VERIFICATION.md`.
 
-```bash
-./setup_ace_bridge.sh --start-only --model-path /path/to/ace-step-model
-```
+## Measured performance
 
-**Manual setup (without script):**
+Measured on an Apple Silicon Mac (32 GB) with the MPS backend, ACE-Step v1 3.5B, 8 diffusion steps, `input_strength` 0.6. The machine was under heavy load during every run (load average 8-15), so treat these as indicative, not benchmarks. The bridge's own [Performance notes](bespoke-migration/ace-bridge/README.md) have the full table and method.
 
-```bash
-# Create virtual environment
-python3 -m venv .venv-ace-bridge
-source .venv-ace-bridge/bin/activate
-
-# Install dependencies
-pip install -r LatentResonator/LatentResonator/Scripts/requirements_bridge.txt
-
-# Start server (passthrough mode)
-python LatentResonator/LatentResonator/Scripts/ace_bridge_server.py
-
-# Start server (with model)
-python LatentResonator/LatentResonator/Scripts/ace_bridge_server.py \
-  --model-path ACE-Step/Ace-Step1.5
-```
-
-**Local use only:** The bridge binds to `127.0.0.1` by default and is intended for use on the same machine as the app. Binding to `0.0.0.0` or a network interface exposes unauthenticated endpoints; use only in trusted environments.
-
-The bridge server has three operating modes:
-| Mode | When | Behavior |
+| Bridge configuration | 3 s of audio (wall time) | Real-time factor |
 |---|---|---|
-| **Passthrough** | No model loaded | Echoes audio back; Swift DSP processes it |
-| **Neural Inference** | Model loaded | Full ACE-Step pipeline on MPS/CUDA/CPU |
-| **Disconnected** | Server not running | Swift app uses DSP-only fallback |
+| Original: float32, no warm-up | 39-57 s | ~14x slower than real time |
+| Current: float16, `--warmup` | ~1.1 s warm (2-7 s on the first calls) | ~0.4 (faster than real time) |
 
----
-
-## Build from Source
-
-```bash
-# Open in Xcode
-open LatentResonator/LatentResonator.xcodeproj
-
-# Or build from command line
-cd LatentResonator
-xcodebuild -project LatentResonator.xcodeproj \
-           -scheme LatentResonator \
-           -destination 'platform=macOS' \
-           build
-```
-
-### First Launch
-
-1. **Grant microphone access** when prompted.
-2. Wait for the ACE-Step bridge to initialize (loading model weights).
-3. Press **START** to begin the feedback loop.
-4. The Koenig Seed (Euclidean rhythm of Dirac impulses) will be injected automatically.
-5. Adjust parameters in real-time to steer the generative degradation.
-
-### Setup vs Performance (Motherbase)
-
-The app has two modes (top bar: **SETUP** | **PERFORM**):
-
-- **SETUP** -- Full mixer, lane strips, DETAIL popovers. Use for sound design and prep.
-- **PERFORM** -- Fixed Motherbase surface: scenes (A/B crossfader), Elektron-style step sequencer, focus lane, master XY, vectorscope _(planned)_. Same controls in the same place for muscle memory.
-
-### Step Sequencer (Perform View)
-
-The step grid is an Elektron-inspired pattern sequencer with **parameter locks (P-Locks)**, **trig types**, and a configurable **chain length**.
-
-**Trig Types** (set via right-click context menu on any step pad):
-
-| Trig | Color | Behavior |
-|---|---|---|
-| **Note** | Red | Normal trigger -- fires audio + applies P-Locks |
-| **Lock** (Trigless) | Yellow | Applies P-Locks without triggering a new note |
-| **One-Shot** | Green | Fires once per pattern cycle, then skips until wrap |
-| **Skip** | Gray | Step is silenced entirely |
-
-**14 Lockable Parameters** (per-step, via knob manipulation while a step is selected):
-
-| Category | Parameters |
+| Current bridge, warm | Wall time |
 |---|---|
-| Primary (always visible) | CFG, Feedback, Filter Cutoff, Warmth |
-| Secondary (shown during P-Lock editing) | Texture, Chaos, Delay Mix, BitCrush Depth |
-| Additional | Prompt Phase, Denoise Strength, Filter Resonance, Excitation Mode, Entropy |
-| Drum Lane | **DrumVoice** (kick, snare, hat, cymbal, mixed) — per-step prompt override for percussion character |
+| 10 s of audio | ~2.4 s |
+| 30 s of audio | ~7-8 s |
+| Model load | ~60 s, plus a cold first request when weights are not in the OS page cache |
 
-**Drum Lane**: Add a lane with the "DRUM LANE" preset. Use the DRUM row in the P-Lock header to lock kick/snare/hat/cymbal/mixed per step. The AI steers toward that percussion type for the next inference cycle. One lane, no extra synthesis. See whitepaper §2.10.
+What changed: on MPS, ACE-Step forces float32, which puts the model at roughly 14 GB. On a shared 32 GB machine that showed up as 20+ s of stalls in the small conditioning step of every call. Running in float16 removed the stalls. The cause is inferred from timings, not proven, and float16 output quality was checked only by correlation with float32 (0.88 for the same seed) and level, not by ear.
 
-**Multi-Select (Shift+Click)**: Hold Shift and tap steps to select multiple. When 2+ steps are selected, a batch bar appears: apply trig type, DrumVoice, or Clear All to the selection. Clears when you switch lanes.
+Practical consequence: takes are seconds, not minutes, so iterating a loop of ten passes is on the order of tens of seconds. That is still an asynchronous batch process, not a real-time effect: it does not run at audio rate and cannot be played live.
 
-**P-Lock Editing**: Tap a step pad to enter edit mode. All knobs become context-aware (showing an `[L]` suffix and orange accent). A secondary knob row appears for extended parameters. The header bar provides trig type selection, DrumVoice picker (Drum Lane), probability slider, and copy/paste/clear actions.
+Observed quirks: float16 outputs were quiet (RMS roughly 0.01-0.03 against an input RMS of 0.13), so expect to add gain; and output is largely regenerated (waveform correlation with the input approximately zero at `input_strength` 0.6).
 
-**Chain Length**: Configurable 1--16 steps via the `LEN` stepper. Steps beyond the chain length are dimmed and inactive.
+## Roadmap
 
-**Probability Gate**: Per-step probability (0--100%). Steps with probability < 100% fire stochastically.
+1. **Truth and hygiene**: done. Claims corrected, Swift app removed (source at tag `swift-app-final`), licensing settled.
+2. **Engine**: done for the bridge (float16, warm-up, progress endpoint, benchmark harness). Still open: dependency repair from inside the module, and hand-testing the module's GUI workflow.
+3. **Science experiments**: generator and first data exist (`demos/make_demo.py`; a single-seed `input_strength` sweep hints at a change of regime between 0.4 and 0.6, not resolved with four points). Open: more seeds, a codec-only control, and CLAP-based metrics.
+4. **Nodes and Take Strip**: open. Today a single module holds the loop and the last take; a Take Strip to browse, compare and route takes is next.
+5. **Performance layer**: open. Prefab, macro slider and snapshots around the module, plus more example patches.
+6. **Release**: the zip builds locally; the tag-triggered release workflow has not been run. No public download yet.
 
-**Step Advance Modes**: time-based, iteration-based, or manual.
+No dates are committed.
 
-### Drum Lane Tips (Getting Clearer Kick / Snare)
+## Licensing
 
-ACE-Step produces timbral *suggestions*, not literal 808 samples. The DrumVoice prompt steers the texture; these tips help:
-
-- **Filter P-Lock per step**: Lock a low cutoff (100–300 Hz) on kick steps, mids (800–3k) on snare, highs (4k+) on hat. Combines with DrumVoice for clearer separation.
-- **Lower feedback** (0.3–0.4) for tighter transients; higher (0.6+) for smeared, evolving textures.
-- **Step advance = TIME + BPM**: If using iteration-based advance, each "step" lasts ~20s (one inference cycle). Use TIME mode at 60–120 BPM so steps change faster and you hear more prompt variety.
-- **Rhythm vs timbre**: The Koenig seed provides the pulse; the DrumVoice affects the *character* of the next inference. Timbral change lags ~20s (inference time). Expect texture to evolve slowly, not hit-per-hit.
-- **BUCHLA PERC** preset: Also Koenig-based, sometimes more percussive. Try it, add DrumVoice P-Locks on top.
-
-**Layer Carving (§2.11)**: Each preset occupies a distinct frequency slot so lanes don't blend into one "reverberant landscape." MOOG BASS stays sub (LP 120 Hz), NOISE SCAPE is air-only (HP 2.5 kHz), etc. Polarized prompts ("NO bass", "NO air") push the model toward opposite latent regions. Combine lanes for a layered mix with clear separation.
-
-Scenes and the step grid are aligned with the whitepaper recursive formula (§3.3, §4.2.2).
-
----
-
-## Settings
-
-Use **Cmd + ,** or the gear icon in the mode bar to open Settings. Configure:
-
-| Setting | Default | Description |
-|---|---|---|
-| **ACE-Step Model Path** | `~/Documents/LatentResonatorModels/` | Directory containing ACE-Step model weights. Use Browse to select a custom location. |
-| **Recording Output Directory** | `~/Documents/LatentResonator/` | Where master WAV recordings are saved. Use Browse to select a custom location. |
-| **Bridge Port** | 8976 (read-only) | Local port for the Python bridge server |
-
-### Model Path Discovery
-
-The app searches for model weights in this order:
-
-1. **Custom path** (if configured in Settings)
-2. **Documents** (`~/Documents/LatentResonatorModels/`) — default, user-visible
-3. **Application Support** (`~/Library/Application Support/LatentResonator/Models/`)
-4. **Project root** (`{projectRoot}/models/`) — developer convenience
-
-Place your downloaded ACE-Step weights in any of these locations. The app creates the default directories automatically on first launch.
-
----
-
-## Keyboard Shortcuts
-
-All major actions are reachable without a mouse. Also documented in Settings > SHORTCUTS.
-
-### Transport
-
-| Key | Action |
+| Component | License |
 |---|---|
-| `Space` | Start / Stop engine |
-| `Escape` | Panic -- force stop all lanes |
-| `R` | Toggle master recording (saves to configured directory; default `~/Documents/LatentResonator/`) |
+| Bespoke Synth (upstream) | GPL-3.0 |
+| `latentresonator` module (compiled into the fork) | GPL-3.0 |
+| Python bridge (`bespoke-migration/ace-bridge/`) | MIT |
+| Documentation | MIT |
+| ACE-Step code | Apache-2.0 (read from the upstream `LICENSE`, 2026-09-29) |
+| ACE-Step v1 3.5B weights | MIT, as declared in the model card that ships with the checkpoint (read 2026-09-29) |
 
-### Navigation
+Any binary distributed from the fork must make the fork's full source available under GPL-3.0. Re-check the ACE-Step licenses before each release. Statements about ACE-Step's training-data provenance are claims made by its authors; we have not verified them. Copyright holder of this repository: UNBRANDED. See [LICENSE](LICENSE) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
-| Key | Action |
-|---|---|
-| `Tab` | Switch SETUP / PERFORM views |
-| `Cmd + ,` | Open Settings |
-| `[` / `]` | Focus previous / next lane |
+## Legacy Swift app
 
-### Focus Lane
+The original SwiftUI/AVAudioEngine app was retired and removed from the tree. Its distilled knowledge (algorithms, parameters, bridge lifecycle, lessons learned) is in [`docs/LEGACY_SWIFT_LEARNINGS.md`](docs/LEGACY_SWIFT_LEARNINGS.md); the full source is in git history under the tag `swift-app-final`. The migration rationale is in [`docs/MIGRATION_BESPOKE_SYNTH_2026-09-11.md`](docs/MIGRATION_BESPOKE_SYNTH_2026-09-11.md).
 
-| Key | Action |
-|---|---|
-| `M` | Mute / unmute focus lane |
-| `S` | Solo / unsolo focus lane |
-| `F` | Toggle spectral freeze |
+## Credits
 
-### Scenes
-
-| Key | Action |
-|---|---|
-| `1` -- `8` | Load scene to A-side |
-| `Shift + 1` -- `8` | Load scene to B-side |
-| `Left` / `Right` | Nudge crossfader toward A / B |
-
-### Sequencer
-
-| Key | Action |
-|---|---|
-| `.` | Manual step advance (TAP) |
-| `,` | Decrease chain length |
-| `Shift + .` | Increase chain length |
-| `Up` / `Down` | BPM +/- 10 (TIME mode) |
-
-### Input Methods
-
-All knobs respond to **vertical drag** and **scroll wheel / trackpad**. All sliders respond to **scroll wheel / trackpad**. Sensitivity: 0.3% of parameter range per scroll point.
-
----
-
-## MIDI CC Map
-
-Latent Resonator listens on all connected MIDI sources (class-compliant USB, network MIDI). CC messages route to the focus lane. Toggle parameters: CC < 64 = OFF, CC >= 64 = ON.
-
-| CC | Parameter | Range |
-|---|---|---|
-| 20 | Volume | 0.0 -- 1.0 |
-| 21 | Guidance Scale (CFG) | 3.0 -- 20.0 |
-| 22 | Mute (toggle) | OFF / ON |
-| 23 | Solo (toggle) | OFF / ON |
-| 24 | Spectral Freeze (toggle) | OFF / ON |
-| 25 | Texture | 0.0 -- 1.0 |
-| 26 | Chaos | 0.0 -- 1.0 |
-| 27 | Warmth | 0.0 -- 1.0 |
-| 28 | Crossfader | 0.0 -- 1.0 |
-| 29 | Feedback | 0.0 -- 1.0 |
-| 30 | Filter Cutoff | 20 -- 20000 Hz |
-| 31 | Filter Resonance | 0.0 -- 0.95 |
-| 32 | Delay Mix | 0.0 -- 1.0 |
-| 33 | Delay Time | 0.01 -- 2.0 s |
-| 34 | Delay Feedback | 0.0 -- 0.95 |
-| 35 | Bit Crush Depth | 2 -- 16 bits |
-| 36 | Entropy | 0.0 -- 100.0 |
-| 37 | Granularity | 0.0 -- 100.0 |
-
-Also documented in Settings > MIDI.
-
----
-
-## Controls
-
-| Parameter | Range | Description |
-|---|---|---|
-| **Guidance Scale** | 3.0–20.0 | CFG "gain" -- higher values overdrive the renderer, inducing hallucinations |
-| **Feedback Amount** | 0.0–1.0 | How much output feeds back as input for the next iteration |
-| **Input Strength** | 0.0–1.0 | Balance between original signal structure and neural hallucination |
-| **Entropy Level** | 0.0–100.0 | Controls stochastic noise injection into the latent space |
-| **Granularity** | 0.0–100.0 | Microsound window size -- lower values create granular dust |
-| **Prompt** | Free text | Semantic filter concept (e.g., "ferrofluid texture", "spectral degradation") |
-| **Prompt Evolution** | Toggle | Automatically shifts prompt across iterations toward entropy maximization |
-| **Denoise (per step)** | 0–100% | Performance step lock: how much ACE denoises (0 = DSP-only, 100% = full) |
-
-### Recommended Starting Points
-
-**Subtle Texturization:**
-- Guidance: 8.0 | Feedback: 0.3 | Input Strength: 0.6
-- Prompt: "granular synthesis, metallic decay"
-
-**Full Machine Ghost:**
-- Guidance: 16.0 | Feedback: 0.8 | Input Strength: 0.4
-- Prompt: "ferrofluid texture, non-linear distortion"
-- Enable Prompt Evolution
-
----
-
-## Design System (DS)
-
-The user interface is governed by a centralized design token system defined in `LRConstants.DS`. This eliminates hardcoded values across view files and enforces visual consistency.
-
-### Typography Scale
-
-All text uses **Fira Code** (monospaced). Five levels cover every role in the interface:
-
-| Token | Size | Role |
-|---|---|---|
-| `fontCaption2` | 9pt | Metadata, status dots, tiny readouts |
-| `fontCaption` | 10pt | Section headers, labels, bridge status |
-| `fontBody` | 12pt | Primary text, lane names, buttons |
-| `fontTitle` | 14pt | View titles, popover headers |
-| `fontHeadline` | 16pt | Trigger buttons, app title |
-
-### Semantic Color Palette
-
-Colors are defined by function, not by literal value:
-
-| Token | Value | Role |
-|---|---|---|
-| `textPrimary` | white 90% | Active, high-priority text |
-| `textSecondary` | phosphor green 70% | Labels, secondary information (green-tinted) |
-| `textTertiary` | phosphor green 50% | Hints, disabled labels (green-tinted) |
-| `textDisabled` | phosphor green 30% | Inactive indicators (green-tinted) |
-| `surfacePrimary` | RGB(0.03) | Main background |
-| `surfaceElevated` | white 6% | Section backgrounds for visual grouping |
-| `surfaceOverlay` | white 8% | Sheets, popovers |
-| `border` | gray 20% | Default borders |
-| `borderActive` | gray 50% | Hover / active borders |
-| `danger` / `warning` / `success` / `info` | red / orange / green / cyan | Functional status colors |
-| `trigNote` / `trigLock` / `trigOneShot` / `trigSkip` | red / yellow / green / gray | Step sequencer trig type indicators |
-
-### Spacing Scale
-
-Five levels ensure consistent rhythm across all layouts:
-
-| Token | Value | Usage |
-|---|---|---|
-| `spacingXS` | 3pt | Tight inline spacing |
-| `spacingSM` | 6pt | Between related elements |
-| `spacingMD` | 10pt | Standard element gaps |
-| `spacingLG` | 16pt | Between sections |
-| `spacingXL` | 20pt | Outer padding |
-
-### Reusable Components (LRComponents.swift)
-
-Seven SwiftUI primitives enforce consistent interaction patterns:
-
-| Component | Purpose | Used by |
-|---|---|---|
-| `LRToggle` | Binary toggle (M, S, FREEZE, TRIGLESS, REC) | LaneStripView, PerformanceMotherbaseView |
-| `LRSegmentPicker` | Horizontal mode selector (ExcitationMode, FilterMode, XYAxisMode) | LaneStripView, PerformanceMotherbaseView |
-| `LRStatusRow` | Status indicator: dot + label + value + extras | LatentResonatorView (bridge status) |
-| `LRSectionHeader` | Section header with tracking and optional trailing text | All views |
-| `LRDivider` | 1px divider using design tokens | All views |
-| `LRActionButton` | Trigger-style button (INITIATE, ABORT, PANIC) | LatentResonatorView, PerformanceMotherbaseView |
-| `LRParamSlider` | Parameter slider with label and value readout | LaneDetailPopover |
-
-All components include hover states (`.onHover`) for macOS affordance and state transition animations (`.animation(.easeInOut(duration: 0.15))`).
-
-### Accent Color System
-
-Each lane preset defines an `accentColor` string (e.g., "blue", "cyan", "red"). This string is stored on `ResonatorLane.accentColorName` at initialization and resolved to a SwiftUI `Color` via the shared helper `LRConstants.DS.accentColor(for:)`. This replaces the fragile switch-on-lane-name pattern that was previously duplicated across view files.
-
----
-
-## Testing
-
-### Python Bridge Tests (included)
-
-The Python bridge codec tests are included in the repository and run in CI:
-
-```bash
-pytest LatentResonator/LatentResonator/Scripts/test_bridge.py -v
-```
-
-### Swift Test Suite (not included)
-
-The Swift unit test suite (269 test methods across 8 test files) is maintained privately and is not distributed with this repository. It covers:
-
-- Constants and range validation (54 tests)
-- Performance state: scenes, step grid, snapshots, persistence (58 tests)
-- Spectral processor: FFT, filters, knob checks, stress sweep (46 tests)
-- Signal generator: all excitation modes, noise statistics, Euclidean rhythm (31 tests)
-- Parameter routing: CC scaling, delay line, macros, multi-lane concurrency (52 tests)
-- NeuralEngine: cross-lane feedback routing, step microtiming, scene apply (8 tests)
-- Circular audio buffer: wrap-around, overflow, SPSC concurrency (11 tests)
-- WAV codec: encode/decode round-trips, error handling (9 tests)
-
-Contributors are encouraged to add their own tests when submitting pull requests. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
----
-
-## Python Scripts
-
-Located in `LatentResonator/LatentResonator/Scripts/`:
-
-| Script | Purpose |
-|---|---|
-| `ace_bridge_server.py` | HTTP bridge wrapping ACE-Step 1.5 inference for the Swift app |
-| `setup_ace_bridge.sh` | One-command setup: venv + deps + optional model download + server start |
-| `generate_koenig_seed.py` | Generate the Koenig Seed WAV file (Euclidean rhythm + Dirac impulses) |
-| `convert_ace_to_coreml.py` | Convert ACE-Step 1.5 model components to Core ML format |
-| `test_bridge.py` | Pytest suite for bridge API (encode/decode, inference contract) |
-
-```bash
-# Start the ACE-Step bridge server (recommended)
-./setup_ace_bridge.sh
-
-# Run bridge tests (from repo root)
-pytest LatentResonator/LatentResonator/Scripts/test_bridge.py
-
-# Generate a custom Koenig Seed
-python generate_koenig_seed.py --duration 10.0 --pulses 5 --steps 13 --output seed.wav
-
-# Convert models (requires PyTorch + coremltools)
-python convert_ace_to_coreml.py --model-path ACE-Step/Ace-Step1.5
-```
-
----
-
-## Project Structure
-
-```
-RLTNAS/
-├── README.md
-├── CHANGELOG.md                     # Version history
-├── LICENSE                          # MIT License
-├── CONTRIBUTING.md
-├── pyproject.toml                   # Python: black, flake8, pylint
-├── .flake8                          # Flake8 config
-├── .gitignore
-├── docs/
-│   ├── whitepaper.md                # Full research paper
-│   └── audio/
-│       └── latent_resonator_texture_improv.mp3  # Full session (14m 47s)
-└── LatentResonator/
-    ├── LatentResonator.xcodeproj/
-    └── LatentResonator/
-        ├── LatentResonatorApp.swift    # App entry point
-        ├── RootView.swift              # SETUP | PERFORM mode switch + Settings
-        ├── NeuralEngine.swift          # Multi-lane audio engine + step grid + scenes
-        ├── SequencerEngine.swift       # Step grid state, advance modes, BPM
-        ├── SceneManager.swift          # Scene bank, apply/capture, crossfade
-        ├── ResonatorLane.swift         # Per-lane recursive feedback loop (the core formula)
-        ├── BridgeProcessManager.swift  # Python bridge lifecycle + model auto-discovery
-        ├── AudioRecorder.swift         # Master recording to WAV
-        ├── CoreMLInference.swift       # Core ML pipeline (on-device fallback)
-        ├── SpectralProcessor.swift     # FFT-based DSP processor (DSP fallback)
-        ├── KoenigSeedGenerator.swift   # Euclidean rhythm seed E(5,13)
-        ├── SignalGenerator.swift       # Multi-source signal generator
-        ├── CircularAudioBuffer.swift   # Lock-free ring buffer
-        ├── ACEStepBridge.swift         # Swift HTTP client for bridge server
-        ├── WAVCodec.swift              # WAV encode/decode for HTTP transport
-        ├── Config/
-        │   ├── Constants.swift         # All tuning parameters, lane presets, design system (DS)
-        │   ├── PerformanceState.swift  # Scenes, step grid, parameter locks (Motherbase)
-        │   └── ParameterRouter.swift   # MIDI CC mapping (ControlParameter, scaleCCToValue)
-        ├── Metal/                          # (planned -- not yet implemented)
-        │   ├── Vectorscope.metal
-        │   └── VectorscopeRenderer.swift
-        ├── Views/
-        │   ├── LRComponents.swift          # Reusable UI components (design system primitives)
-        │   ├── LatentResonatorView.swift   # Setup: full mixer + bridge status + DETAIL
-        │   ├── PerformanceMotherbaseView.swift  # Perform: scenes, crossfader, step grid
-        │   ├── SceneCrossfaderView.swift        # Scene A/B crossfader + load buttons
-        │   ├── LaneStripView.swift     # Per-lane mixer strip + DisclosureGroup detail popover
-        │   ├── RetroKnob.swift         # Precision dial with 270-degree sweep and tick marks
-        │   └── LatentXYPad.swift       # CRT-style 2D XY pad with coordinate readout
-        ├── Scripts/
-        │   ├── requirements.txt      # Python conversion deps
-        │   ├── requirements_bridge.txt # ACE-Step bridge deps
-        │   ├── setup_ace_bridge.sh   # One-command bridge setup
-        │   ├── ace_bridge_server.py  # Python HTTP bridge server
-        │   ├── convert_ace_to_coreml.py
-        │   └── generate_koenig_seed.py
-        ├── Resources/               # Core ML models go here
-        ├── Info.plist
-        └── LatentResonator.entitlements
-```
-
----
-
-## Theoretical Background
-
-This project implements the methodology described in the accompanying white paper: [Recursive Latent Trajectories in Neural Audio Synthesis](docs/whitepaper.md).
-
-Key concepts:
-
-- **Alvin Lucier's** *I Am Sitting in a Room* (1969) -- recursive acoustic filtering as composition
-- **Iannis Xenakis** -- stochastic synthesis and formalized music
-- **Curtis Roads** -- microsound and granular synthesis
-- **Gottfried Michael Koenig** -- algorithmic composition with mathematical structures
-- **ACE-Step 1.5** -- hybrid LLM + Diffusion Transformer architecture for audio
-
-The Neural Feedback Loop is a digital resurrection of analog recursive techniques, operating within the high-dimensional latent space of a diffusion model rather than physical acoustic space.
-
----
-
-## Acknowledgments
-
-### Theoretical Sources
-
-This project implements concepts from the following foundational works. Full citations are in the [white paper](docs/whitepaper.md) (References section).
-
-- **Alvin Lucier** -- *I Am Sitting in a Room* (1969): recursive acoustic filtering as composition
-- **Iannis Xenakis** -- *Formalized Music* (1971): stochastic synthesis and mathematical composition
-- **Pierre Schaeffer** -- *Traité des objets musicaux* (1966): acousmatic listening and sound objects
-- **Curtis Roads** -- *Microsound* (2001): granular and microsound synthesis
-- **Gottfried Michael Koenig** -- *Project One / Project Two* (1970): algorithmic composition with mathematical structures
-- **Godfried Toussaint** -- "The Euclidean Algorithm Generates Traditional Musical Rhythms" (2005, BRIDGES)
-- **Norbert Wiener** -- *Cybernetics* (1948): machine emergent behavior and post-humanist philosophy
-- **ACE-Step Team** -- "ACE-Step: A Step Towards Music Generation Foundation Model" (2025, arXiv)
-- **Ho, Jain & Abbeel** -- "Denoising Diffusion Probabilistic Models" (2020, NeurIPS)
-- **Rombach et al.** -- "High-Resolution Image Synthesis with Latent Diffusion Models" (2022, CVPR)
-
-### Frameworks and Tools
-
-The macOS application uses exclusively Apple system frameworks (no third-party dependencies):
-
-| Framework | Usage |
-|---|---|
-| AVFoundation | Real-time audio engine, microphone input |
-| CoreML | On-device neural inference (VAE, DiT) |
-| Metal / MetalKit | Lissajous vectorscope rendering _(planned)_ |
-| Accelerate (vDSP) | FFT, spectral processing, vector math |
-| Foundation (URLSession) | HTTP client for ACE-Step bridge server |
-| SwiftUI | User interface |
-
-The ACE-Step bridge server (Python) uses Flask, NumPy, and optionally PyTorch + soundfile.
-See `Scripts/requirements_bridge.txt` for details and licenses.
+- [Bespoke Synth](https://github.com/BespokeSynth/BespokeSynth) by Ryan Challinor and contributors (GPL-3.0): the host, audio engine and UI.
+- [ACE-Step](https://github.com/ace-step/ACE-Step): the music-generation model (ACE-Step Team, "ACE-Step: A Step Towards Music Generation Foundation Model", 2025).
+- Conceptual lineage: Alvin Lucier, *I Am Sitting in a Room* (1969); Iannis Xenakis, *Formalized Music*; Pierre Schaeffer; Curtis Roads, *Microsound*; G. M. Koenig; G. Toussaint (Euclidean rhythms).
+- Full references in the [whitepaper](docs/whitepaper.md).
 
 ## Contributing
 
-Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a pull request.
-
-All contributions will be licensed under the MIT License. By submitting a pull request, you agree to these terms.
-
----
-
-## License
-
-[MIT](LICENSE) -- Copyright (c) 2026 Leo Lambertini
+This is our own fork. Nothing is pushed to or proposed upstream to Bespoke Synth. Issues and pull requests against this repository are welcome; read [CONTRIBUTING.md](CONTRIBUTING.md) first. Contributions to the bridge and docs are MIT; contributions to the module are GPL-3.0.

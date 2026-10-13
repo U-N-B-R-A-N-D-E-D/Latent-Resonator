@@ -1,0 +1,5 @@
+# Pinned upstream base for the Latent Resonator Bespoke build.
+# Sourced by scripts/apply_module.sh, scripts/package_macos.sh and CI.
+BESPOKE_REPO=https://github.com/BespokeSynth/BespokeSynth
+BESPOKE_COMMIT=f3cdd38ed756da1edd745f7e4c25bd6575b8561b
+JUCE_COMMIT=4f43011b96eb0636104cb3e433894cda98243626

@@ -10,68 +10,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  BRIDGE_DIR: bespoke-migration/ace-bridge
+
 jobs:
-  # ----------------------------------------------------------------
-  # Job 1: Build the macOS app (validates all Swift compiles)
-  # ----------------------------------------------------------------
-  build:
-    name: Build (macOS)
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Select Xcode
-        run: |
-          sudo xcode-select -s /Applications/Xcode_15.4.app \
-            || sudo xcode-select -s /Applications/Xcode_15.2.app \
-            || sudo xcode-select -s /Applications/Xcode.app
-
-      - name: Install xcpretty
-        run: gem install xcpretty
-
-      - name: Get version
-        id: version
-        run: |
-          V=$(grep -m1 'MARKETING_VERSION = ' LatentResonator/LatentResonator.xcodeproj/project.pbxproj | sed 's/.*= //;s/;//')
-          echo "version=$V" >> $GITHUB_OUTPUT
-
-      - name: Build
-        working-directory: LatentResonator
-        run: |
-          set -o pipefail
-          xcodebuild build \
-            -project LatentResonator.xcodeproj \
-            -scheme LatentResonator \
-            -destination 'platform=macOS' \
-            -configuration Debug \
-            -derivedDataPath ./build \
-            CODE_SIGNING_ALLOWED=NO \
-            ONLY_ACTIVE_ARCH=YES \
-            | xcpretty --color
-
-      - name: Zip app for testing
-        working-directory: LatentResonator
-        run: |
-          APP_PATH="build/Build/Products/Debug/LatentResonator.app"
-          mkdir -p dist
-          cp -R "$APP_PATH" "dist/LatentResonator.app"
-          ZIP_NAME="LatentResonator-${{ steps.version.outputs.version }}-macOS.zip"
-          cd dist && zip -r "../$ZIP_NAME" LatentResonator.app && cd ..
-
-      - name: Upload app zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: LatentResonator-${{ steps.version.outputs.version }}-macOS
-          path: LatentResonator/LatentResonator-${{ steps.version.outputs.version }}-macOS.zip
-
-  # Swift unit tests skipped: LatentResonatorTests/ is gitignored (private suite).
-  # See README Testing section.
-
-  # ----------------------------------------------------------------
-  # Job 2: Run Python bridge codec tests
-  # ----------------------------------------------------------------
   test-python:
-    name: Test (Python)
+    name: Test (bridge)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,34 +23,16 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Install dependencies
         run: pip install numpy pytest flask soundfile
 
       - name: Run tests
-        run: pytest LatentResonator/LatentResonator/Scripts/test_bridge.py -v
+        run: pytest ${{ env.BRIDGE_DIR }}/test_bridge.py -v
 
-  # ----------------------------------------------------------------
-  # Job 3: SwiftLint (blocking)
-  # ----------------------------------------------------------------
-  lint-swift:
-    name: Lint (SwiftLint)
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install SwiftLint
-        run: brew install swiftlint
-
-      - name: Run SwiftLint
-        run: swiftlint lint --config .swiftlint.yml --reporter github-actions-logging
-
-  # ----------------------------------------------------------------
-  # Job 4: Python quality (black, flake8, pylint)
-  # ----------------------------------------------------------------
   lint-python:
-    name: Lint (Python)
+    name: Lint (bridge)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -114,20 +40,16 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.12'
 
       - name: Install lint tools
-        run: |
-          pip install black flake8 pylint pip-audit
+        run: pip install black flake8 pip-audit
 
-      - name: Pip-audit (dependency vulnerability check)
-        run: pip-audit -r LatentResonator/LatentResonator/Scripts/requirements_bridge.txt
+      - name: Audit dependencies
+        run: pip-audit -r ${{ env.BRIDGE_DIR }}/requirements_bridge.txt
 
-      - name: Black (format check)
-        run: black --check LatentResonator/LatentResonator/Scripts/
+      - name: Black
+        run: black --check ${{ env.BRIDGE_DIR }}
 
-      - name: Flake8 (style + errors)
-        run: flake8 LatentResonator/LatentResonator/Scripts/
-
-      - name: Pylint (static analysis)
-        run: pylint LatentResonator/LatentResonator/Scripts/*.py
+      - name: Flake8
+        run: flake8 ${{ env.BRIDGE_DIR }}

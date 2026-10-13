@@ -1,0 +1,39 @@
+Latent Resonator -- licensing and third-party notice
+
+Repository layout and licenses
+------------------------------
+bespoke-migration/module/      GPL-3.0-or-later (see bespoke-migration/module/LICENSE)
+bespoke-migration/ace-bridge/  MIT (see LICENSE)
+docs, scripts, other files     MIT (see LICENSE)
+
+A Bespoke Synth build that includes the module is a combined work and must be
+distributed under GPL-3.0 (source availability applies).
+
+Third-party components
+----------------------
+Component      License / status                         Where to check
+-------------  ---------------------------------------  ------------------------------------------
+Bespoke Synth  GPL-3.0-or-later                         https://github.com/BespokeSynth/BespokeSynth
+ACE-Step code  Apache-2.0 (LICENSE file of the checkout   https://github.com/ace-step/ACE-Step
+               the bridge imports)
+ACE-Step       MIT, as declared in the front matter of    The model card shipped with the
+weights        the model card that ships with the        downloaded checkpoint (ACE-Step v1 3.5B)
+               downloaded checkpoint
+JUCE           Per JUCE's own notice: tiered JUCE       libs/JUCE/LICENSE.md in the Bespoke Synth
+               EULA, or GPL-3.0; some modules are ISC.  tree (bundled with Bespoke).
+
+Python dependencies of the bridge (names only; check each package's own license):
+flask, waitress, numpy, soundfile, huggingface_hub, torch, torchcodec,
+torchaudio, torchvision, transformers, diffusers, accelerate, tqdm, loguru,
+spacy, py3langid, pypinyin, num2words, hangul-romanize, librosa, matplotlib,
+pytorch_lightning, peft, cutlet, fugashi[unidic-lite], click.
+Source: bespoke-migration/ace-bridge/requirements_bridge.txt
+
+Model weights
+-------------
+Model weights are never redistributed by this repository or its releases.
+Users download them themselves from the upstream source and are bound by the
+upstream weights license. The licenses above were read from local copies of the
+upstream LICENSE file and model card on 2026-09-29; re-check them before each
+release. The upstream authors describe their training data as licensed and
+royalty-free; that is their claim and has not been audited here.
