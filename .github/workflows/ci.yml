@@ -45,8 +45,21 @@ jobs:
       - name: Install lint tools
         run: pip install black flake8 pip-audit
 
+      # Gate policy (2026-10-19): transformers is capped at the 4.x line because
+      # ACE-Step upstream pins 4.50.0 and 5.x removes APIs it uses. The six
+      # advisories below are fixed only in transformers >=5.0.0, so they are
+      # explicitly accepted (not a blanket warning) until upstream supports 5.x.
+      # Any advisory not listed here still fails this job. Re-check on each
+      # transformers 4.x bump and remove IDs once a 5.x migration lands.
       - name: Audit dependencies
-        run: pip-audit -r ${{ env.BRIDGE_DIR }}/requirements_bridge.txt
+        run: |
+          pip-audit -r ${{ env.BRIDGE_DIR }}/requirements_bridge.txt \
+            --ignore-vuln PYSEC-2025-217 \
+            --ignore-vuln PYSEC-2026-2288 \
+            --ignore-vuln PYSEC-2026-2289 \
+            --ignore-vuln PYSEC-2026-2290 \
+            --ignore-vuln PYSEC-2026-3929 \
+            --ignore-vuln PYSEC-2026-4174
 
       - name: Black
         run: black --check ${{ env.BRIDGE_DIR }}
