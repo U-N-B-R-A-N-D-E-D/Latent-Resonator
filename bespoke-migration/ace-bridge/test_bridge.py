@@ -208,6 +208,21 @@ class TestFlaskEndpointsNoModel:
         assert r.status_code == 400
         assert "error" in r.get_json()
 
+    def test_infer_text2music_without_audio(self, flask_client_passthrough):
+        r = flask_client_passthrough.post(
+            "/infer",
+            json={
+                "task_type": "text2music",
+                "prompt": "tibetan monks chanting",
+                "lyrics": "om mani padme hum",
+                "audio_duration": 5,
+            },
+        )
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["model_used"] is False
+        assert "audio" in body and len(body["audio"]) > 0
+
     def test_infer_invalid_json_400(self, flask_client_passthrough):
         r = flask_client_passthrough.post(
             "/infer", data="not-json", content_type="application/json"
@@ -484,6 +499,8 @@ class _StubPipeline:
         pass
 
     def __call__(self, prompt=None, ref_audio_input=None, save_path=None, **kwargs):
+        self.last_ref_audio_input = ref_audio_input
+        self.last_kwargs = dict(kwargs)
         self.get_text_embeddings([prompt])
         self.get_text_embeddings_null([prompt])
         self.infer_latents(ref_audio_input)
@@ -568,6 +585,36 @@ class TestInstrumentation:
             assert snap["total_steps"] == 3
         finally:
             bridge.PROGRESS.end()
+
+
+class TestTaskRouting:
+    """text2music must not inherit the cover/audio2audio reference contract."""
+
+    def _tone(self):
+        return (0.3 * np.sin(np.linspace(0, 200, 4800))).astype(np.float32)
+
+    def test_text2music_forwards_task_and_lyrics_without_reference(self, stub_wrapper):
+        stub_wrapper.infer_with_timings(
+            self._tone(),
+            prompt="tibetan monks chanting",
+            lyrics="om mani padme hum",
+            task_type="text2music",
+            audio_duration=12.0,
+        )
+        kwargs = stub_wrapper.model.last_kwargs
+        assert kwargs["task"] == "text2music"
+        assert kwargs["lyrics"] == "om mani padme hum"
+        assert kwargs["audio_duration"] == 12.0
+        assert "audio2audio_enable" not in kwargs
+        assert stub_wrapper.model.last_ref_audio_input is None
+
+    def test_cover_keeps_audio2audio_and_instrumental_default(self, stub_wrapper):
+        stub_wrapper.infer_with_timings(self._tone(), prompt="pad")
+        kwargs = stub_wrapper.model.last_kwargs
+        assert kwargs["audio2audio_enable"] is True
+        assert kwargs["lyrics"] == "[inst]"
+        assert stub_wrapper.model.last_ref_audio_input
+        assert stub_wrapper.model.last_ref_audio_input.endswith("input.wav")
 
 
 if __name__ == "__main__":

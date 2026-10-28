@@ -514,6 +514,7 @@ class ACEStepWrapper:
         audio_samples: np.ndarray,
         sample_rate: int = 48000,
         prompt: str = "",
+        lyrics: str = "[inst]",
         guidance_scale: float = 15.0,
         num_steps: int = 20,
         seed: int = -1,
@@ -608,6 +609,7 @@ class ACEStepWrapper:
         # audio as src_audio.
         _TASK_MAP = {
             "cover": None,  # audio2audio auto-set below
+            "text2music": "text2music",  # prompt -> audio, no source audio
             "repaint": "repaint",
             "extend": "extend",
             "edit": "edit",
@@ -619,6 +621,7 @@ class ACEStepWrapper:
                 "falling back to 'cover' (audio2audio)."
             )
         use_repaint_path = resolved_task in ("repaint", "extend", "edit")
+        use_text2music_path = resolved_task == "text2music"
 
         # Per-step denoise strength: 0 = passthrough; (0,1] = run that fraction of steps.
         # Mapping: effective_steps = max(1, round(num_steps * denoise_strength)).
@@ -632,6 +635,7 @@ class ACEStepWrapper:
                 audio_samples=audio_samples,
                 sample_rate=sample_rate,
                 prompt=prompt,
+                lyrics=lyrics,
                 guidance_scale=guidance_scale,
                 effective_steps=effective_steps,
                 seed=seed,
@@ -652,6 +656,7 @@ class ACEStepWrapper:
                 task_type=task_type,
                 resolved_task=resolved_task,
                 use_repaint_path=use_repaint_path,
+                use_text2music_path=use_text2music_path,
             )
 
     def _run_pipeline(
@@ -659,6 +664,7 @@ class ACEStepWrapper:
         audio_samples,
         sample_rate,
         prompt,
+        lyrics,
         guidance_scale,
         effective_steps,
         seed,
@@ -679,14 +685,17 @@ class ACEStepWrapper:
         task_type,
         resolved_task,
         use_repaint_path,
+        use_text2music_path,
     ):
         """Execute one pipeline call while holding the inference lock."""
         self._timings = {}
         t_total = time.perf_counter()
-        # audio2audio noises the reference and runs only (1 - strength) of the steps.
+        # audio2audio noises the reference and runs only (1 - strength) of the
+        # steps. text2music and repaint run the full step count: input_strength
+        # only has meaning for the cover/audio2audio path.
         estimated_steps = (
             effective_steps
-            if use_repaint_path
+            if (use_repaint_path or use_text2music_path)
             else max(1, int(effective_steps * (1.0 - input_strength)))
         )
         PROGRESS.begin(estimated_steps)
@@ -704,7 +713,7 @@ class ACEStepWrapper:
 
                 infer_kwargs = dict(
                     prompt=prompt,
-                    lyrics="[inst]",
+                    lyrics=lyrics,
                     audio_duration=audio_duration,
                     infer_step=effective_steps,
                     guidance_scale=guidance_scale,
@@ -731,6 +740,10 @@ class ACEStepWrapper:
                     if resolved_task == "repaint":
                         infer_kwargs["repaint_start"] = 0
                         infer_kwargs["repaint_end"] = int(audio_duration)
+                elif use_text2music_path:
+                    # text2music: prompt -> audio. No source/ref audio and no
+                    # audio2audio_enable (which would override the task).
+                    infer_kwargs["task"] = "text2music"
                 else:
                     # "cover" — the feedback-loop pattern. audio2audio_enable +
                     # ref_audio auto-set task="audio2audio" inside
@@ -1082,31 +1095,41 @@ def infer():
         if not isinstance(data, dict):
             return jsonify({"error": "Request body must be valid JSON object"}), 400
 
-        if "audio" not in data:
+        # task_type is read before the audio check because text2music generates
+        # from the prompt alone: there is no source audio to send.
+        task_type = data.get("task_type") if isinstance(data.get("task_type"), str) else "cover"
+
+        if "audio" not in data and task_type != "text2music":
             return jsonify({"error": 'Missing "audio" field (base64-encoded WAV)'}), 400
 
-        audio_b64 = data["audio"]
-        if not isinstance(audio_b64, str) or len(audio_b64) > MAX_AUDIO_B64_LEN:
-            return (
-                jsonify({"error": f'"audio" exceeds max size ({MAX_AUDIO_B64_LEN} chars)'}),
-                413,
-            )
+        if "audio" in data:
+            audio_b64 = data["audio"]
+            if not isinstance(audio_b64, str) or len(audio_b64) > MAX_AUDIO_B64_LEN:
+                return (
+                    jsonify({"error": f'"audio" exceeds max size ({MAX_AUDIO_B64_LEN} chars)'}),
+                    413,
+                )
 
-        try:
-            wav_bytes = base64.b64decode(audio_b64)
-        except (ValueError, TypeError) as e:
-            return jsonify({"error": f'Invalid base64 in "audio" field: {e}'}), 400
+            try:
+                wav_bytes = base64.b64decode(audio_b64)
+            except (ValueError, TypeError) as e:
+                return jsonify({"error": f'Invalid base64 in "audio" field: {e}'}), 400
 
-        if len(wav_bytes) > MAX_WAV_BYTES:
-            return (
-                jsonify({"error": f"Decoded WAV exceeds max size ({MAX_WAV_BYTES} bytes)"}),
-                413,
-            )
+            if len(wav_bytes) > MAX_WAV_BYTES:
+                return (
+                    jsonify({"error": f"Decoded WAV exceeds max size ({MAX_WAV_BYTES} bytes)"}),
+                    413,
+                )
 
-        try:
-            samples, sr = decode_wav_bytes(wav_bytes)
-        except (ValueError, KeyError) as e:
-            return jsonify({"error": f'Invalid WAV in "audio" field: {e}'}), 400
+            try:
+                samples, sr = decode_wav_bytes(wav_bytes)
+            except (ValueError, KeyError) as e:
+                return jsonify({"error": f'Invalid WAV in "audio" field: {e}'}), 400
+        else:
+            # text2music ignores the source audio; keep a one-sample placeholder
+            # so the wrapper's passthrough path still has a valid array.
+            samples = np.zeros(1, dtype=np.float32)
+            sr = 48000
 
         def safe_float(val, default: float) -> float:
             if val is None:
@@ -1125,6 +1148,9 @@ def infer():
                 return default
 
         prompt = data.get("prompt") if isinstance(data.get("prompt"), str) else ""
+        # `[inst]` is ACE-Step's instrumental marker; pass real lyrics (or a
+        # chant) to ask for vocal content instead.
+        lyrics = data.get("lyrics") if isinstance(data.get("lyrics"), str) else "[inst]"
         guidance_scale = safe_float(data.get("guidance_scale"), 15.0)
         num_steps = safe_int(data.get("num_steps"), 20)
         seed = safe_int(data.get("seed"), -1)
@@ -1172,8 +1198,7 @@ def infer():
         if not isinstance(thinking, bool):
             thinking = safe_int(thinking, 1) != 0
 
-        # task_type vocabulary → ACE-Step task routing (see ACEStepWrapper.infer).
-        task_type = data.get("task_type") if isinstance(data.get("task_type"), str) else "cover"
+        # task_type was parsed before the audio check (text2music needs no audio).
 
         # Min guidance scale — floor during CFG decay
         min_guidance_scale = max(1.0, guidance_scale * 0.2)
@@ -1185,6 +1210,7 @@ def infer():
             audio_samples=samples,
             sample_rate=sr,
             prompt=prompt,
+            lyrics=lyrics,
             guidance_scale=guidance_scale,
             num_steps=num_steps,
             seed=seed,
